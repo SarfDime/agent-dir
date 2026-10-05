@@ -1,0 +1,49 @@
+{
+  "name": "agent-dir",
+  "version": "0.1.0",
+  "description": "Expose a local project to an AI agent through authenticated MCP, filesystem tools, and allowlisted development commands",
+  "type": "module",
+  "bin": {
+    "agent-dir": "./dist/bin/agent-dir.js"
+  },
+  "files": [
+    "dist/bin",
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "start": "node ./dist/bin/agent-dir.js .",
+    "typecheck": "tsc --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "check": "biome check . && tsc --noEmit",
+    "check:write": "biome check --write --unsafe .",
+    "prepublishOnly": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.15",
+    "@types/node": "^24.19.1",
+    "typescript": "^7.0.2"
+  },
+  "keywords": [
+    "mcp",
+    "ai",
+    "agent",
+    "filesystem",
+    "developer-tools",
+    "mcp-server",
+    "mcp-tools",
+    "local-development"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
