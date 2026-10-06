@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { configPath, loadConfig, mergeProfile, saveConfig } from "../src/config.js";
@@ -8,6 +9,9 @@ import { printBanner, printHelp, printRequestHeader } from "../src/logging.js";
 import { startServer } from "../src/server.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
+
+const require = createRequire(import.meta.url);
+const packageVersion = (require("../../package.json") as { version: string }).version;
 
 function fail(message: string): never {
   console.error(`Error: ${message}`);
@@ -33,6 +37,7 @@ function parsePort(value: string | undefined, fallback: number): number {
 const { values, positionals } = parseArgs({
   options: {
     help: { type: "boolean", short: "h" },
+    version: { type: "boolean", short: "v" },
     directory: { type: "string", short: "d" },
     port: { type: "string", short: "p" },
     tunnel: { type: "string", short: "t" },
@@ -49,6 +54,11 @@ const { values, positionals } = parseArgs({
 
 if (values.help) {
   printHelp();
+  process.exit(0);
+}
+
+if (values.version) {
+  console.log(packageVersion);
   process.exit(0);
 }
 

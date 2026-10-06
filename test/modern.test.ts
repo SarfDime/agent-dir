@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
 import { getMcpLog, validateMcpHeaders } from "../src/server.js";
+
+test("CLI reports its package version", () => {
+  const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
+    encoding: "utf8",
+  });
+  assert.equal(output.trim(), "0.1.3");
+});
 
 const META = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -226,7 +234,7 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
           resources: { listChanged: true, subscribe: true },
           extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
         },
-        serverInfo: { name: "agent-dir", version: "0.1.2" },
+        serverInfo: { name: "agent-dir", version: "0.1.3" },
         instructions:
           "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
       },

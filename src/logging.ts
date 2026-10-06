@@ -130,6 +130,7 @@ export function printHelp(): void {
   writeLine("      --no-tunnel            Disable tunneling");
   writeLine("      --random               Use a random Wormhole URL (no subdomain)");
   writeLine("  -h, --help                 Show this help");
+  writeLine("  -v, --version              Show the installed version");
   writeLine("");
   writeLine("Config:");
   writeLine("  agent-dir config add <name> ...");
