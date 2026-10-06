@@ -45,6 +45,7 @@ import type { CommandConfig } from "./types.js";
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
 const PROTOCOL_VERSION = "2026-07-28";
+const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
@@ -406,6 +407,18 @@ const baseTools: ToolDefinition[] = [
     { type: "object", additionalProperties: true },
   ),
   tool(
+    "allowed_commands",
+    "Show the npm scripts and commands explicitly allowed by the active server configuration.",
+    {},
+    objectOutput(
+      {
+        npmScripts: { type: "array", items: stringSchema },
+        commands: { type: "array", items: stringSchema },
+      },
+      ["npmScripts", "commands"],
+    ),
+  ),
+  tool(
     "file_info",
     "Return filesystem metadata for a project path.",
     { path: pathSchema },
@@ -531,23 +544,68 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
     if (message.params !== undefined && !isRecord(message.params))
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
     const params = message.params ?? {};
-    if (!isRecord(params._meta))
+    const requestedProtocolVersion =
+      typeof params.protocolVersion === "string" ? params.protocolVersion : undefined;
+    const legacyInitialize = message.method === "initialize";
+    const legacyRequest =
+      !legacyInitialize &&
+      request.headers.get("mcp-protocol-version") === LEGACY_PROTOCOL_VERSION &&
+      !isRecord(params._meta);
+
+    if (legacyInitialize) {
+      const protocolHeader = request.headers.get("mcp-protocol-version");
+      if (protocolHeader !== null && protocolHeader !== LEGACY_PROTOCOL_VERSION)
+        return jsonRpcError(
+          message.id ?? null,
+          -32020,
+          "MCP-Protocol-Version does not match the initialize protocol version.",
+          400,
+        );
+      if (requestedProtocolVersion !== LEGACY_PROTOCOL_VERSION)
+        return jsonRpcError(message.id ?? null, -32602, "Unsupported protocol version.", 400, {
+          supported: [LEGACY_PROTOCOL_VERSION],
+          requested: requestedProtocolVersion,
+        });
+      if (!isRecord(params.capabilities) || !isRecord(params.clientInfo))
+        return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
+      return json({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: LEGACY_PROTOCOL_VERSION,
+          capabilities: capabilities(),
+          serverInfo: SERVER_INFO,
+          instructions:
+            "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
+        },
+      });
+    }
+
+    if (legacyRequest) {
+      if (request.headers.get("mcp-protocol-version") !== LEGACY_PROTOCOL_VERSION)
+        return jsonRpcError(
+          message.id ?? null,
+          -32020,
+          "MCP-Protocol-Version must be 2025-11-25 for legacy requests.",
+          400,
+        );
+    } else if (!isRecord(params._meta))
       return jsonRpcError(message.id ?? null, -32602, "Missing required request metadata.", 400);
-    const meta = params._meta;
+    const meta = isRecord(params._meta) ? params._meta : {};
     const version = meta[PROTOCOL_META];
-    if (typeof version !== "string")
+    if (!legacyRequest && typeof version !== "string")
       return jsonRpcError(
         message.id ?? null,
         -32602,
         "Missing required protocol version metadata.",
         400,
       );
-    if (version !== PROTOCOL_VERSION)
+    if (!legacyRequest && version !== PROTOCOL_VERSION)
       return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
         supported: [PROTOCOL_VERSION],
         requested: version,
       });
-    if (!isRecord(meta[CLIENT_CAPABILITIES_META]))
+    if (!legacyRequest && !isRecord(meta[CLIENT_CAPABILITIES_META]))
       return jsonRpcError(
         message.id ?? null,
         -32602,
@@ -961,6 +1019,12 @@ async function callTool(
       break;
     case "package_info":
       structuredContent = await packageInfo(root);
+      break;
+    case "allowed_commands":
+      structuredContent = {
+        npmScripts: [...npmAllowed],
+        commands: [...allowedCommands],
+      };
       break;
     case "file_info":
       structuredContent = await fileInfo(root, String(args.path));

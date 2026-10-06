@@ -76,9 +76,58 @@ agent-dir config remove my-project
 
 Profiles are stored per-user at `~/.config/agent-dir/config.json`, not in the project repository. The config directory and file are written with user-only permissions. Command-line options can override saved values for one run.
 
-## MCP tools
+## MCP transport and compatibility
 
-The HTTP MCP transport implements the modern MCP `2026-07-28` stateless lifecycle over authenticated `POST /mcp`. There is no initialize handshake and no `Mcp-Session-Id`; every request carries its protocol version and client capabilities in `_meta`. The server implements `server/discover`, standard modern HTTP headers, cursor pagination, `subscriptions/listen`, cache metadata, and modern `resultType`/structured tool results.
+The HTTP MCP endpoint is `POST /mcp`. The implementation supports two protocol compatibility paths:
+
+### Modern stateless MCP
+
+The native protocol path uses MCP `2026-07-28`. Requests carry the protocol version and client capabilities in `params._meta`. The server does not require an initialize handshake or `Mcp-Session-Id` for this path.
+
+Standard Streamable HTTP requests do **not** need the implementation-specific `MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` headers. If a client sends those optional headers, `agent-dir` validates them against the JSON-RPC request and metadata instead of requiring them.
+
+The modern implementation includes:
+
+- `server/discover`
+- cursor pagination for list-style methods
+- `subscriptions/listen` for tool, prompt, and resource change events
+- resource subscriptions and filesystem change notifications
+- cache metadata
+- structured tool results with `resultType`
+- `outputSchema` for tools
+- the stable `io.modelcontextprotocol/skills` extension
+
+### Legacy MCP compatibility
+
+Clients using the MCP `2025-11-25` initialize-based lifecycle are also supported. A legacy client can:
+
+1. send `initialize` with `params.protocolVersion: "2025-11-25"`, `capabilities`, and `clientInfo`;
+2. negotiate `2025-11-25`;
+3. send subsequent requests with `MCP-Protocol-Version: 2025-11-25` without the modern `params._meta` object.
+
+This compatibility path is intentionally narrow. It does not weaken the modern protocol validation, and conflicting protocol headers are rejected.
+
+The compatibility layer exists for clients such as MCP integrations that still perform the standard `initialize` handshake instead of using the native stateless lifecycle.
+
+### Authentication and protocol troubleshooting
+
+Authentication is independent of protocol negotiation. A valid Bearer token is still required before MCP handling:
+
+```http
+Authorization: Bearer <token>
+```
+
+For clients that cannot send an Authorization header, the server also accepts:
+
+```text
+https://your-subdomain.wormhole.bar/mcp?token=<token>
+```
+
+If a client reports that the server needs sign-in, inspect the server's request log before changing credentials. A `400` from MCP can be a protocol compatibility error rather than an authentication failure. Request logs now include the MCP error message and, for JSON-RPC failures, safe diagnostic context such as the method, request id, parameter names, metadata presence, protocol version, and protocol header. Parameter values are not logged.
+
+The server log distinguishes protocol/header validation from MCP handler errors. This makes transient client interoperability failures diagnosable without exposing request payloads or secrets.
+
+## MCP tools
 
 | Tool | Purpose |
 |---|---|
@@ -140,6 +189,8 @@ skills/
 
 Skills are exposed through `skills/list`, `skills/get`, `resources/list`, and `resources/read`. Skill entries contain parsed frontmatter plus SHA-256 digests and byte sizes for every served file. Skill manifests enforce the 512-resource and 16 MiB limits. Binary supporting files are returned as MCP blobs. `resources/directory/read` lists direct children of a skill resource directory. The extension advertises `directoryRead: true`.
 
+This repository now includes a maintainer-facing compatibility skill at `skills/agent-dir-maintainer/SKILL.md`. It documents the modern and legacy MCP paths, troubleshooting signals, and release/test expectations for agents working on this project.
+
 ## Authentication
 
 By default, `agent-dir` generates a random Bearer token when the server starts. The token protects both the MCP endpoint and the HTTP file API.
@@ -173,6 +224,14 @@ POST    /mcp
 ```
 
 All HTTP endpoints are authenticated by default.
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for development setup, testing requirements, MCP compatibility guidance, and pull-request expectations.
+
+Use the GitHub issue templates for bug reports, feature requests, and usage questions. Security vulnerabilities should be reported privately through the process in [SECURITY.md](SECURITY.md), not through a public issue.
+
+See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community participation guidelines.
 
 ## Development
 

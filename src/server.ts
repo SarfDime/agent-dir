@@ -53,23 +53,29 @@ export function startServer({
         }
         const headerError = validateMcpHeaders(request, messageBody(body));
         if (headerError) {
+          const errorDetail = await getResponseErrorDetail(headerError);
           await sendResponse(res, headerError);
           logRequest({
             method: req.method,
             path: url.pathname,
             status: headerError.status,
-            detail: "MCP header validation",
+            detail: errorDetail ? `MCP header validation: ${errorDetail}` : "MCP header validation",
           });
           return;
         }
         const response = await mcp(request);
+        const errorDetail = await getResponseErrorDetail(response);
         await sendResponse(res, response);
         const mcpLog = getMcpLog(body);
+        const mcpErrorContext =
+          response.status >= 400 ? getMcpErrorContext(body, request) : undefined;
         logRequest({
           method: req.method,
           path: url.pathname,
           status: response.status,
-          detail: mcpLog?.detail ?? "MCP",
+          detail: errorDetail
+            ? `MCP error: ${errorDetail}${mcpErrorContext ? `\n${mcpErrorContext}` : ""}`
+            : (mcpLog?.detail ?? "MCP"),
           ...(mcpLog ? { tool: mcpLog.name } : {}),
         });
         return;
@@ -187,20 +193,22 @@ export function validateMcpHeaders(
       400,
     );
   }
-  if (!protocolHeader)
-    return jsonRpcErrorForServer(message, -32020, "MCP-Protocol-Version header is required.", 400);
   const bodyProtocolVersion =
     typeof params._meta === "object" && params._meta !== null
       ? (params._meta as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"]
       : undefined;
-  if (bodyProtocolVersion !== undefined && bodyProtocolVersion !== protocolHeader)
+  if (
+    protocolHeader !== null &&
+    bodyProtocolVersion !== undefined &&
+    bodyProtocolVersion !== protocolHeader
+  )
     return jsonRpcErrorForServer(
       message,
       -32020,
       "MCP-Protocol-Version does not match the request metadata.",
       400,
     );
-  if (!method || methodHeader !== method)
+  if (methodHeader !== null && (!method || methodHeader !== method))
     return jsonRpcErrorForServer(
       message,
       -32020,
@@ -222,7 +230,7 @@ export function validateMcpHeaders(
           : undefined;
     const headerName = request.headers.get("mcp-name");
     const decodedHeaderName = headerName === null ? undefined : decodeMcpHeaderValue(headerName);
-    if (!bodyName || decodedHeaderName !== bodyName)
+    if (headerName !== null && (!bodyName || decodedHeaderName !== bodyName))
       return jsonRpcErrorForServer(
         message,
         -32020,
@@ -264,20 +272,80 @@ function jsonRpcErrorForServer(
   );
 }
 
-function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
+function getMcpErrorContext(body: Buffer, request: Request): string | undefined {
+  try {
+    const message = JSON.parse(body.toString("utf8")) as {
+      id?: string | number | null;
+      method?: unknown;
+      params?: unknown;
+    };
+    const params = isRecordValue(message.params) ? message.params : undefined;
+    const meta = params && isRecordValue(params._meta) ? params._meta : undefined;
+    const parts = [
+      typeof message.method === "string" ? `method       : ${message.method}` : undefined,
+      message.id !== undefined ? `id           : ${String(message.id)}` : undefined,
+      params ? "params       : present" : "params       : missing",
+      params ? `params keys  : ${Object.keys(params).sort().join(", ") || "(none)"}` : undefined,
+      meta ? "params._meta  : present" : "params._meta  : missing",
+      meta && typeof meta["io.modelcontextprotocol/protocolVersion"] === "string"
+        ? `protocol     : ${meta["io.modelcontextprotocol/protocolVersion"]}`
+        : meta
+          ? "protocol     : missing"
+          : undefined,
+      meta && isRecordValue(meta["io.modelcontextprotocol/clientCapabilities"])
+        ? "capabilities : present"
+        : meta
+          ? "capabilities : missing"
+          : undefined,
+      request.headers.get("mcp-protocol-version")
+        ? `header       : MCP-Protocol-Version=${request.headers.get("mcp-protocol-version")}`
+        : "header       : MCP-Protocol-Version=missing",
+    ].filter((value): value is string => value !== undefined);
+    return parts.join("\n");
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function getResponseErrorDetail(response: Response): Promise<string | undefined> {
+  if (response.status < 400) return undefined;
+  try {
+    const body = (await response.clone().json()) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    if (typeof body.error === "object" && body.error !== null) {
+      const message = body.error.message;
+      if (typeof message === "string") return message;
+    }
+    if (typeof body.message === "string") return body.message;
+    if (typeof body.error === "string") return body.error;
+  } catch {
+    // Keep logging the status even when the error response is not JSON.
+  }
+  return undefined;
+}
+
+export function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
   try {
     const message = JSON.parse(body.toString("utf8")) as {
       method?: string;
-      params?: {
-        name?: unknown;
-        arguments?: Record<string, unknown>;
-      };
+      params?: Record<string, unknown>;
     };
-    if (message.method !== "tools/call" || typeof message.params?.name !== "string")
-      return undefined;
+    if (typeof message.method !== "string") return undefined;
+
+    if (message.method !== "tools/call") {
+      return { name: message.method, detail: getMcpMethodDetail(message.method, message.params) };
+    }
+    if (typeof message.params?.name !== "string")
+      return { name: message.method, detail: "tool name missing" };
 
     const name = message.params.name;
-    const args = message.params.arguments ?? {};
+    const args = isRecordValue(message.params.arguments) ? message.params.arguments : {};
     const detail = (() => {
       const paths = Array.isArray(args.paths)
         ? args.paths.filter((value): value is string => typeof value === "string")
@@ -293,8 +361,22 @@ function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
         : [];
 
       switch (name) {
+        case "list_files":
+          return "all project files";
+        case "list_dirs":
+          return paths.join(", ");
+        case "read_range": {
+          const path = typeof args.path === "string" ? args.path : "";
+          const startLine = typeof args.startLine === "number" ? args.startLine : undefined;
+          const endLine = typeof args.endLine === "number" ? args.endLine : undefined;
+          return path && startLine !== undefined && endLine !== undefined
+            ? `${path}:${startLine}-${endLine}`
+            : path;
+        }
         case "read_files":
         case "delete_files":
+        case "git_stage":
+        case "git_unstage":
           return paths.join(", ");
         case "write_files":
         case "patch_files":
@@ -305,6 +387,81 @@ function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
             : [];
           return scripts.map((script) => `npm run ${script}`).join(", ");
         }
+        case "search_files":
+        case "search_code": {
+          const query = typeof args.query === "string" ? args.query : "";
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          const regex = args.regex === true ? "regex" : undefined;
+          const options = [regex, maxResults !== undefined ? `max ${maxResults}` : undefined]
+            .filter(Boolean)
+            .join(", ");
+          return options ? `${query} (${options})` : query;
+        }
+        case "find_files": {
+          const pattern = typeof args.pattern === "string" ? args.pattern : "";
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return maxResults !== undefined ? `${pattern} (max ${maxResults})` : pattern;
+        }
+        case "find_symbol": {
+          const symbol = typeof args.symbol === "string" ? args.symbol : "";
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return symbol
+            ? maxResults !== undefined
+              ? `symbol: ${symbol} (max ${maxResults})`
+              : `symbol: ${symbol}`
+            : "";
+        }
+        case "find_definition": {
+          const symbol = typeof args.symbol === "string" ? args.symbol : "";
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return symbol
+            ? maxResults !== undefined
+              ? `definition: ${symbol} (max ${maxResults})`
+              : `definition: ${symbol}`
+            : "";
+        }
+        case "find_references": {
+          const symbol = typeof args.symbol === "string" ? args.symbol : "";
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return symbol
+            ? maxResults !== undefined
+              ? `references: ${symbol} (max ${maxResults})`
+              : `references: ${symbol}`
+            : "";
+        }
+        case "git_commit":
+          return typeof args.message === "string" ? args.message : "";
+        case "find_imports": {
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return maxResults !== undefined ? `all imports (max ${maxResults})` : "all imports";
+        }
+        case "find_exports": {
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return maxResults !== undefined ? `all exports (max ${maxResults})` : "all exports";
+        }
+        case "diagnostics": {
+          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
+          return maxResults !== undefined ? `max ${maxResults}` : "";
+        }
+        case "git_restore":
+          return paths.join(", ");
+        case "git_push": {
+          const remote = typeof args.remote === "string" ? args.remote : "";
+          const branch = typeof args.branch === "string" ? args.branch : "";
+          return remote && branch ? `${remote}/${branch}` : remote || branch;
+        }
+        case "git_diff": {
+          const staged = args.staged === true ? "staged" : "working tree";
+          const path = typeof args.path === "string" ? args.path : "";
+          return path ? `${staged}: ${path}` : staged;
+        }
+        case "git_log": {
+          const limit = typeof args.limit === "number" ? args.limit : 20;
+          const path = typeof args.path === "string" ? args.path : "";
+          return path ? `last ${limit}: ${path}` : `last ${limit}`;
+        }
+        case "file_info":
+          return typeof args.path === "string" ? args.path : "";
         case "run_command_batch": {
           const commands = Array.isArray(args.commands) ? args.commands : [];
           return commands
@@ -323,6 +480,77 @@ function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
     return { name, detail };
   } catch {
     return undefined;
+  }
+}
+
+function getMcpMethodDetail(method: string, params: Record<string, unknown> | undefined): string {
+  const value = params ?? {};
+  const capabilities = isRecordValue(value.capabilities)
+    ? Object.keys(value.capabilities).sort()
+    : [];
+  const clientInfo = isRecordValue(value.clientInfo) ? value.clientInfo : undefined;
+  const clientName = typeof clientInfo?.name === "string" ? clientInfo.name : undefined;
+  const clientVersion = typeof clientInfo?.version === "string" ? clientInfo.version : undefined;
+  const protocol =
+    typeof value.protocolVersion === "string"
+      ? value.protocolVersion
+      : isRecordValue(value._meta) &&
+          typeof value._meta["io.modelcontextprotocol/protocolVersion"] === "string"
+        ? value._meta["io.modelcontextprotocol/protocolVersion"]
+        : undefined;
+
+  switch (method) {
+    case "initialize": {
+      const client = clientName
+        ? clientVersion
+          ? `${clientName} v${clientVersion}`
+          : clientName
+        : undefined;
+      return (
+        [
+          protocol ? `protocol: ${protocol}` : undefined,
+          client ? `client: ${client}` : undefined,
+          capabilities.length ? `capabilities: ${capabilities.join(", ")}` : undefined,
+        ]
+          .filter((part): part is string => Boolean(part))
+          .join(" • ") || "initialization handshake"
+      );
+    }
+    case "notifications/initialized":
+      return "initialization complete";
+    case "tools/list":
+      return "list tools";
+    case "resources/list":
+      return "list resources";
+    case "resources/templates/list":
+      return "list resource templates";
+    case "prompts/list":
+      return "list prompts";
+    case "skills/list":
+      return typeof value.cursor === "string" ? `cursor: ${value.cursor}` : "list skills";
+    case "server/discover":
+      return "discover server capabilities";
+    case "ping":
+      return "health check";
+    case "subscriptions/listen": {
+      const notifications = isRecordValue(value.notifications) ? value.notifications : undefined;
+      const resourceSubscriptions = Array.isArray(notifications?.resourceSubscriptions)
+        ? notifications.resourceSubscriptions.length
+        : 0;
+      const parts = [
+        notifications?.resourcesListChanged === true ? "resources list changes" : undefined,
+        resourceSubscriptions
+          ? `${resourceSubscriptions} resource subscription${resourceSubscriptions === 1 ? "" : "s"}`
+          : undefined,
+      ].filter((part): part is string => Boolean(part));
+      return parts.length ? parts.join(" • ") : "listen for notifications";
+    }
+    default: {
+      const keys = Object.keys(value)
+        .filter((key) => key !== "_meta")
+        .sort();
+      return keys.length ? `params: ${keys.join(", ")}` : "no parameters";
+    }
   }
 }
 

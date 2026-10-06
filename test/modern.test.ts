@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
-import { validateMcpHeaders } from "../src/server.js";
+import { getMcpLog, validateMcpHeaders } from "../src/server.js";
 
 const META = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -26,6 +26,129 @@ function requestFor(id: number, method: string, params: Record<string, unknown> 
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: META } }),
   });
 }
+
+test("allowed_commands reports the active command policy", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root, {
+      npm: { allowedScripts: ["check", "test"] },
+      commands: ["git", "node", "npm"],
+    });
+    const response = await handler(
+      requestFor(1, "tools/call", {
+        name: "allowed_commands",
+        arguments: {},
+      }),
+    );
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as {
+      result: { structuredContent: { npmScripts: string[]; commands: string[] } };
+    };
+    assert.deepEqual(result.result.structuredContent, {
+      npmScripts: ["check", "test"],
+      commands: ["git", "node", "npm"],
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("allowed_commands defaults to empty policy", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root);
+    const response = await handler(
+      requestFor(1, "tools/call", {
+        name: "allowed_commands",
+        arguments: {},
+      }),
+    );
+    const result = (await response.json()) as {
+      result: { structuredContent: { npmScripts: string[]; commands: string[] } };
+    };
+    assert.deepEqual(result.result.structuredContent, { npmScripts: [], commands: [] });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP request logging describes initialize and non-tool methods", () => {
+  const legacy = getMcpLog(
+    Buffer.from(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: { roots: {}, sampling: {} },
+          clientInfo: { name: "Test Client", version: "1.2.3" },
+        },
+      }),
+    ),
+  );
+  assert.deepEqual(legacy, {
+    name: "initialize",
+    detail: "protocol: 2025-11-25 • client: Test Client v1.2.3 • capabilities: roots, sampling",
+  });
+
+  const modern = getMcpLog(
+    Buffer.from(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "initialize",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          },
+          capabilities: { roots: {} },
+          clientInfo: { name: "Modern Client" },
+        },
+      }),
+    ),
+  );
+  assert.deepEqual(modern, {
+    name: "initialize",
+    detail: "protocol: 2026-07-28 • client: Modern Client • capabilities: roots",
+  });
+
+  assert.deepEqual(
+    getMcpLog(
+      Buffer.from(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/list",
+          params: {},
+        }),
+      ),
+    ),
+    { name: "tools/list", detail: "list tools" },
+  );
+
+  assert.deepEqual(
+    getMcpLog(
+      Buffer.from(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 4,
+          method: "subscriptions/listen",
+          params: {
+            notifications: {
+              resourcesListChanged: true,
+              resourceSubscriptions: ["skill://demo/SKILL.md", "skill://demo/README.md"],
+            },
+          },
+        }),
+      ),
+    ),
+    {
+      name: "subscriptions/listen",
+      detail: "resources list changes • 2 resource subscriptions",
+    },
+  );
+});
 
 test("Mcp-Param headers validate annotated arguments", () => {
   const schema = {
@@ -66,6 +189,105 @@ test("Mcp-Param headers validate annotated arguments", () => {
     validateMcpParamHeaders(schema, { region: "Rüd", count: 3, enabled: true }, encoded),
     undefined,
   );
+});
+
+test("legacy initialize handshake is accepted without modern metadata", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root);
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2025-11-25",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "claude", version: "1.0.0" },
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        protocolVersion: "2025-11-25",
+        capabilities: {
+          tools: { listChanged: true },
+          resources: { listChanged: true, subscribe: true },
+          extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
+        },
+        serverInfo: { name: "agent-dir", version: "0.1.2" },
+        instructions:
+          "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
+      },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy initialize rejects a conflicting protocol header", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root);
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "claude", version: "1.0.0" },
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 400);
+    assert.equal(((await response.json()) as { error: { code: number } }).error.code, -32020);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy requests can use the negotiated protocol without modern metadata", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root);
+    const request = new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2025-11-25",
+        "mcp-method": "tools/list",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+    const response = await handler(request);
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as { result: { tools: Array<{ name: string }> } };
+    assert.ok(result.result.tools.some((tool) => tool.name === "read_files"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("missing protocol version metadata returns invalid params", async () => {
@@ -156,6 +378,29 @@ test("MCP protocol header must agree with request metadata", async () => {
   );
   assert.equal(response?.status, 400);
   assert.match(await response?.text(), /does not match/);
+});
+
+test("standard Streamable HTTP requests do not require optional MCP headers", () => {
+  const request = new Request("http://localhost/mcp", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "server/discover",
+      params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } },
+    }),
+  });
+  const response = validateMcpHeaders(request, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "server/discover",
+    params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } },
+  });
+  assert.equal(response, undefined);
 });
 
 test("modern notification POSTs do not require standard MCP headers", async () => {
@@ -298,7 +543,7 @@ test("invalid JSON-RPC request envelopes are rejected", async () => {
   }
 });
 
-test("modern HTTP requires Mcp-Name for URI-mirroring methods", async () => {
+test("modern HTTP accepts URI-mirroring methods without optional Mcp-Name", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     for (const method of ["skills/get", "resources/directory/read"]) {
@@ -308,8 +553,7 @@ test("modern HTTP requires Mcp-Name for URI-mirroring methods", async () => {
         request,
         JSON.parse(await request.clone().text()) as Record<string, unknown>,
       );
-      assert.equal(response?.status, 400);
-      assert.match(await response?.text(), /Mcp-Name does not match/);
+      assert.equal(response, undefined);
     }
   } finally {
     await rm(root, { recursive: true, force: true });

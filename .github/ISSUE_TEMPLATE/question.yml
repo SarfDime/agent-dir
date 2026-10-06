@@ -1,0 +1,26 @@
+name: Question / support
+description: Ask a usage or configuration question
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search the README and existing issues first. Never include authentication tokens, credentials, or other secrets.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where are you stuck?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include relevant versions, configuration shape, commands, and safe log excerpts. Remove secrets and private data.
+    validations:
+      required: true

@@ -48,11 +48,37 @@ const TOOL_ICONS: Record<string, string> = {
   git_log: "📜",
   project_overview: "🗺️",
   package_info: "📦",
+  allowed_commands: "🔐",
   file_info: "ℹ️",
   diagnostics: "🩺",
 };
 
+const MCP_METHOD_ICONS: Record<string, string> = {
+  initialize: "🚀",
+  "notifications/initialized": "✓",
+  "notifications/cancelled": "✖",
+  "notifications/progress": "⏳",
+  "notifications/resources/list_changed": "📣",
+  "notifications/tools/list_changed": "📣",
+  "notifications/prompts/list_changed": "📣",
+  "notifications/roots/list_changed": "📣",
+  "notifications/message": "💬",
+  "notifications/elicitation/complete": "✓",
+  "tools/list": "🧰",
+  "resources/list": "📚",
+  "resources/templates/list": "🗂️",
+  "resources/read": "📖",
+  "prompts/list": "💬",
+  "prompts/get": "💬",
+  "skills/list": "🧩",
+  "skills/get": "🧩",
+  "server/discover": "🔍",
+  ping: "⚡",
+  "subscriptions/listen": "📡",
+};
+
 const TOOL_NAME_WIDTH = Math.max(...Object.keys(TOOL_ICONS).map((name) => name.length));
+const MCP_METHOD_NAME_WIDTH = Math.max(...Object.keys(MCP_METHOD_ICONS).map((name) => name.length));
 const TOOL_COLORS: Record<string, string> = {
   list_files: CYAN,
   list_dirs: BRIGHT_CYAN,
@@ -73,7 +99,7 @@ const NARROW_TOOL_ICONS = new Set(["✎", "✖", "⚙", "⌘", "↪", "↗"]);
 const TOOL_ICON_SLOT_WIDTH = 3;
 
 function toolIcon(name: string): string {
-  return TOOL_ICONS[name] ?? "•";
+  return TOOL_ICONS[name] ?? MCP_METHOD_ICONS[name] ?? "•";
 }
 
 function toolColor(name?: string): string | undefined {
@@ -83,8 +109,9 @@ function toolColor(name?: string): string | undefined {
 function toolLabel(name: string): string {
   const icon = toolIcon(name);
   const iconWidth = NARROW_TOOL_ICONS.has(icon) ? 1 : 2;
-  const iconSlot = `${" ".repeat(TOOL_ICON_SLOT_WIDTH - iconWidth - 1)}${icon} `;
-  return `${iconSlot}${name.padEnd(TOOL_NAME_WIDTH)}`;
+  const iconSlot = `${icon}${" ".repeat(TOOL_ICON_SLOT_WIDTH - iconWidth)}`;
+  const nameWidth = Object.hasOwn(TOOL_ICONS, name) ? TOOL_NAME_WIDTH : MCP_METHOD_NAME_WIDTH;
+  return `${iconSlot}${name.padEnd(nameWidth)}`;
 }
 
 export function printHelp(): void {
@@ -171,6 +198,7 @@ export function printBanner(options: {
   writeLine(`    ${color(toolLabel("git_log"), CYAN)}`);
   writeLine(`    ${color(toolLabel("project_overview"), BRIGHT_CYAN)}`);
   writeLine(`    ${color(toolLabel("package_info"), YELLOW)}`);
+  writeLine(`    ${color(toolLabel("allowed_commands"), YELLOW)}`);
   writeLine(`    ${color(toolLabel("file_info"), YELLOW)}`);
   writeLine(`    ${color(toolLabel("diagnostics"), BRIGHT_YELLOW)}`);
   writeLine("");
@@ -205,13 +233,30 @@ export function printRequestLog(entry: RequestLog): void {
           ? YELLOW
           : RED);
 
-  const detail = entry.tool
-    ? [toolLabel(entry.tool), entry.detail].filter(Boolean).join("  │  ")
+  const rawDetail = entry.tool
+    ? entry.detail
+      ? `${toolLabel(entry.tool)}  │  ${entry.detail}`
+      : toolLabel(entry.tool).trimEnd()
     : entry.detail;
+  const detail = entry.tool ? wrapToolDetail(rawDetail ?? "") : rawDetail;
 
+  const detailLines = detail ? detail.split("\n") : [];
   writeLine(
-    `  ├─ ${color(method, methodCode)}  ${color(path, methodCode)}  ${color(status, statusCode)}  ${color("•", methodCode)}${detail ? ` ${detail}` : ""}`,
+    `  ├─ ${color(method, methodCode)}  ${color(path, methodCode)}  ${color(status, statusCode)}  ${color("•", methodCode)}${detailLines[0] ? ` ${detailLines[0]}` : ""}`,
   );
+  for (const line of detailLines.slice(1)) writeLine(`  │      ${line}`);
+}
+
+function wrapToolDetail(detail: string): string {
+  if (detail.length <= 100) return detail;
+
+  const separator = detail.includes("  •  ") ? "  •  " : ", ";
+  if (!detail.includes(separator)) return detail;
+
+  const parts = detail.split(separator);
+  if (parts.length < 2) return detail;
+
+  return parts.join("\n");
 }
 
 export function logRequest(entry: RequestLog): void {
