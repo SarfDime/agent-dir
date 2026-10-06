@@ -15,6 +15,7 @@ export function runCommand(
   args: string[] = [],
   allowedCommands: string[] = [],
   timeoutMs = 120000,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   if (!SAFE_NAME.test(command)) throw new Error("Invalid command name.");
   if (!allowedCommands.includes(command))
@@ -27,12 +28,26 @@ export function runCommand(
     let stdout = "";
     let stderr = "";
     let finished = false;
-    const timer = setTimeout(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const abort = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.kill("SIGTERM");
+      reject(new Error(`Command '${command}' was aborted.`));
+    };
+    timer = setTimeout(() => {
       if (finished) return;
       finished = true;
       child.kill("SIGTERM");
+      signal?.removeEventListener("abort", abort);
       reject(new Error(`Command '${command}' timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdout += chunk.toString();
@@ -44,12 +59,14 @@ export function runCommand(
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       reject(error);
     });
     child.on("close", (code: number | null) => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       resolve({ command: [command, ...args].join(" "), exitCode: code ?? 1, stdout, stderr });
     });
   });

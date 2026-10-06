@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="260" viewBox="0 0 1200 260" role="img" aria-labelledby="title desc">
+  <title id="title">AGENT-DIR</title>
+  <desc id="desc">Expose a local project to AI agents through authenticated MCP.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="48%" stop-color="#312e81"/>
+      <stop offset="100%" stop-color="#0f766e"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="45%" r="65%">
+      <stop offset="0%" stop-color="#a5b4fc" stop-opacity=".28"/>
+      <stop offset="100%" stop-color="#a5b4fc" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1200" height="260" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="260" rx="28" fill="url(#glow)"/>
+  <g fill="none" stroke="#fff" stroke-opacity=".08">
+    <path d="M0 210C240 120 420 310 690 175S1040 65 1200 120"/>
+    <path d="M0 235C250 145 430 335 700 200S1040 90 1200 145"/>
+  </g>
+  <text x="600" y="112" text-anchor="middle" fill="#fff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="58" font-weight="800" letter-spacing="3">AGENT-DIR</text>
+  <text x="600" y="158" text-anchor="middle" fill="#e0e7ff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="23">Expose a local project to AI agents through authenticated MCP.</text>
+  <text x="600" y="198" text-anchor="middle" fill="#c7d2fe" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="15">Local files · Code intelligence · Git inspection · Allowlisted commands · Optional Wormhole tunneling</text>
+  <g transform="translate(600 222)">
+    <g transform="translate(-212 0)">
+      <rect width="132" height="28" rx="7" fill="#111827" fill-opacity=".72" stroke="#ffffff" stroke-opacity=".16"/>
+      <text x="66" y="19" text-anchor="middle" fill="#fff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">Node.js 24+</text>
+    </g>
+    <g transform="translate(-62 0)">
+      <rect width="124" height="28" rx="7" fill="#6b4fbb" fill-opacity=".92"/>
+      <text x="62" y="19" text-anchor="middle" fill="#fff" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">MCP 2026-07-28</text>
+    </g>
+    <g transform="translate(78 0)">
+      <rect width="94" height="28" rx="7" fill="#d4b000" fill-opacity=".94"/>
+      <text x="47" y="19" text-anchor="middle" fill="#111827" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="13" font-weight="700">License MIT</text>
+    </g>
+  </g>
+</svg>

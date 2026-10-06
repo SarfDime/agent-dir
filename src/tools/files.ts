@@ -3,7 +3,11 @@ import path from "node:path";
 
 const IGNORED = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
 
-async function safePath(root: string, relativePath = ".", allowMissing = false): Promise<string> {
+export async function safePath(
+  root: string,
+  relativePath = ".",
+  allowMissing = false,
+): Promise<string> {
   const resolvedRoot = await fs.realpath(root);
   const target = path.resolve(resolvedRoot, relativePath);
   if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${path.sep}`))
@@ -94,6 +98,30 @@ export function readFile(root: string, relativePath: string): Promise<string> {
   return safePath(root, relativePath).then((target) => fs.readFile(target, "utf8"));
 }
 
+export async function readRange(
+  root: string,
+  relativePath: string,
+  startLine: number,
+  endLine: number,
+): Promise<{ path: string; startLine: number; endLine: number; content: string }> {
+  if (
+    !Number.isInteger(startLine) ||
+    !Number.isInteger(endLine) ||
+    startLine < 1 ||
+    endLine < startLine
+  )
+    throw new Error("Line range must use positive integers with endLine >= startLine.");
+  if (endLine - startLine > 2000) throw new Error("A read range may contain at most 2000 lines.");
+  const content = await readFile(root, relativePath);
+  const lines = content.split(/\r?\n/);
+  return {
+    path: relativePath,
+    startLine,
+    endLine: Math.min(endLine, lines.length),
+    content: lines.slice(startLine - 1, endLine).join("\n"),
+  };
+}
+
 export async function writeFile(
   root: string,
   relativePath: string,
@@ -148,6 +176,6 @@ export async function patchFile(
 export async function deleteFile(root: string, relativePath: string): Promise<void> {
   const target = await safePath(root, relativePath);
   const stat = await fs.stat(target);
-  if (!stat.isFile()) throw new Error("delete_file only deletes files.");
+  if (!stat.isFile()) throw new Error("delete_files only deletes files.");
   await fs.unlink(target);
 }

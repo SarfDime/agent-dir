@@ -41,6 +41,7 @@ const { values, positionals } = parseArgs({
     command: { type: "string" },
     token: { type: "string" },
     "no-tunnel": { type: "boolean" },
+    random: { type: "boolean" },
   },
   allowPositionals: true,
   strict: true,
@@ -113,8 +114,8 @@ if (command === "config") {
     const commands = parseList(values.command);
     if (commands !== undefined) profile.commands = commands;
 
-    if (profile.tunnel === "wormhole" && !profile.subdomain) {
-      fail("Wormhole profiles require --subdomain <name>.");
+    if (profile.tunnel === "wormhole" && !profile.subdomain && !values.random) {
+      fail("Wormhole profiles require --subdomain <name>, or use --random.");
     }
 
     config.profiles[name] = profile;
@@ -141,9 +142,13 @@ if (tunnelValue !== "none" && tunnelValue !== "wormhole") {
 }
 
 const tunnel: Profile["tunnel"] = tunnelValue;
-const subdomain = values.subdomain ?? profile?.subdomain;
-if (tunnel === "wormhole" && !subdomain) {
-  fail("Wormhole requires --subdomain <name>, or configure one in a profile.");
+const randomTunnel = values.random === true;
+const subdomain = randomTunnel ? undefined : (values.subdomain ?? profile?.subdomain);
+if (tunnel === "wormhole" && !subdomain && !randomTunnel) {
+  fail("Wormhole requires --subdomain <name>, or use --random.");
+}
+if (randomTunnel && tunnel === "none") {
+  fail("--random requires --tunnel wormhole.");
 }
 
 const token = values.token ?? profile?.token ?? randomBytes(24).toString("hex");
@@ -177,14 +182,14 @@ console.log("  ✓ SERVER ONLINE");
 console.log(`    Local target : http://127.0.0.1:${port}`);
 console.log("    Auth         : Bearer token");
 console.log(`    Token        : ${token}`);
-printRequestHeader();
 
 if (tunnel !== "none") {
   try {
     tunnelResult = await startTunnel({
       provider: "wormhole",
       port,
-      subdomain: subdomain as string,
+      random: randomTunnel,
+      ...(subdomain && !randomTunnel ? { subdomain } : {}),
     });
   } catch (error) {
     console.error(`  ✖ TUNNEL ERROR  ${error instanceof Error ? error.message : String(error)}`);
@@ -192,6 +197,8 @@ if (tunnel !== "none") {
     process.exit(1);
   }
 }
+
+printRequestHeader();
 
 let shuttingDown = false;
 

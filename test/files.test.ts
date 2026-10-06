@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
+import { searchCode, searchFiles } from "../src/tools/code.js";
 import {
   deleteFile,
   listDir,
@@ -77,6 +78,9 @@ test("filesystem tools stay inside project root", async () => {
         () => writeProjectFile(root, "escape/new.txt", "blocked"),
         /Path escapes the exposed project directory\./,
       );
+      await fsWriteFile(path.join(outside, "secret.ts"), "const outsideSecret = true;");
+      assert.deepEqual(await searchCode(root, "outsideSecret"), []);
+      assert.deepEqual(await searchFiles(root, "outsideSecret"), []);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }

@@ -42,7 +42,8 @@ export interface RequestLog {
 export interface TunnelOptions {
   provider: "wormhole";
   port: number;
-  subdomain: string;
+  subdomain?: string;
+  random?: boolean;
 }
 
 export interface TunnelResult {

@@ -1,8 +1,14 @@
-# agent-dir
+<div align="center">
 
-`agent-dir` is a cross-platform TypeScript CLI that exposes a local project to an AI agent through an authenticated MCP server. It provides controlled file access, targeted file patches, and explicitly allowlisted development commands, with optional Wormhole tunneling.
+<img src="assets/agent-dir-banner.svg" alt="AGENT-DIR — Expose a local project to AI agents through authenticated MCP." width="100%">
 
-> **Security:** this is a remote-control development tool. Only expose directories you trust, keep the Bearer token private, and allow only commands you actually need.
+</div>
+
+> **`agent-dir` turns a trusted local project directory into a controlled, authenticated MCP endpoint for AI agents.**
+
+`agent-dir` is a cross-platform TypeScript CLI that exposes a local project to an AI agent through an authenticated MCP server. It provides controlled file access, targeted file patches, and explicitly allowlisted development commands, with optional tunneling through [Wormhole](https://wormhole.bar/).
+
+> **Security:** this is a remote-control development tool. Only expose directories you trust, keep the authentication token private, and allow only commands you actually need.
 
 ## Requirements
 
@@ -33,19 +39,23 @@ agent-dir . --tunnel wormhole --subdomain my-project-x7k4m2
 
 ### Wormhole domains
 
-**Always use a distinctive, hard-to-guess Wormhole subdomain, especially when authentication is disabled or an endpoint is otherwise exposed without authentication.** Avoid generic names such as `project`, `test`, `dev`, or `scriptr`.
+When using a custom Wormhole subdomain, choose a distinctive name such as `my-project-x7k4m2`. Avoid generic names such as `project`, `test`, `dev`, or `scriptr` to reduce collisions and make the public endpoint less predictable.
 
-A unique domain reduces accidental collisions and makes the endpoint harder to guess. It is **not a replacement for authentication**.
+The Wormhole URL is only the transport endpoint. `agent-dir` authentication is enforced by the local HTTP server; Wormhole does not provide the Bearer-token authentication described below.
+
+> **Wormhole subdomain limit:** Wormhole limits how many subdomains a user can have registered/active at once. If you see an error such as `Subdomain limit reached (max 3 per user)`, the tunnel is being rejected by Wormhole, not by `agent-dir`. Release an existing Wormhole subdomain or use `--random` to let Wormhole choose a temporary random URL.
+>
+> A subdomain can remain registered while another `wormhole` process is still running, so stop unused Wormhole tunnels before creating another one. If a configured subdomain is unavailable, `agent-dir` will report the Wormhole registration failure instead of silently starting without a tunnel.
 
 ## Profiles
 
 Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, and allowed non-npm commands.
 
 ```bash
-agent-dir config add scriptr \
-  --directory ~/src/scriptr \
+agent-dir config add my-project \
+  --directory ~/src/my-project \
   --tunnel wormhole \
-  --subdomain scriptr-x7k4m2 \
+  --subdomain my-project-x7k4m2 \
   --npm typecheck,lint,format,test,build \
   --command grep,find,rg,git
 ```
@@ -53,36 +63,51 @@ agent-dir config add scriptr \
 Then:
 
 ```bash
-agent-dir scriptr
+agent-dir my-project
 ```
 
 Manage profiles with:
 
 ```bash
 agent-dir config list
-agent-dir config show scriptr
-agent-dir config remove scriptr
+agent-dir config show my-project
+agent-dir config remove my-project
 ```
 
 Profiles are stored per-user at `~/.config/agent-dir/config.json`, not in the project repository. The config directory and file are written with user-only permissions. Command-line options can override saved values for one run.
 
 ## MCP tools
 
-The HTTP MCP transport currently implements the legacy `2025-06-18` initialize handshake over authenticated `POST /mcp`. Clients that support automatic legacy fallback can use it; the newer `2026-07-28` stateless MCP lifecycle is not implemented yet.
+The HTTP MCP transport implements the modern MCP `2026-07-28` stateless lifecycle over authenticated `POST /mcp`. There is no initialize handshake and no `Mcp-Session-Id`; every request carries its protocol version and client capabilities in `_meta`. The server implements `server/discover`, standard modern HTTP headers, cursor pagination, `subscriptions/listen`, cache metadata, and modern `resultType`/structured tool results.
 
 | Tool | Purpose |
 |---|---|
-| `list_files` | List files and directories recursively |
-| `list_dir` | List one directory directly |
-| `list_dirs` | List multiple directories directly |
-| `read_file` / `read_files` | Read one or many UTF-8 files |
-| `write_file` / `write_files` | Create or completely replace one or many files |
-| `patch_file` / `patch_files` | Apply targeted text replacements without replacing the whole file |
-| `delete_file` / `delete_files` | Delete one or many files |
-| `run_npm` / `run_npm_batch` | Run allowlisted npm scripts |
-| `run_command` / `run_command_batch` | Run allowlisted executables without a shell |
+| `list_files` | Recursive project discovery |
+| `list_dirs` | Direct directory discovery for one or more directories |
+| `read_range` | Read a bounded line range from one UTF-8 file |
+| `read_files` | Read one or more UTF-8 files in one call |
+| `write_files` | Create or replace one or more files in one call |
+| `patch_files` | Apply targeted text replacements to one or more files |
+| `delete_files` | Delete one or more files in one call |
+| `search_files` / `find_files` | Search file contents or find paths by glob |
+| `search_code` | Search source-like files |
+| `find_symbol` / `find_definition` | Locate likely symbol definitions |
+| `find_references` | Locate symbol references |
+| `find_imports` / `find_exports` | Inspect source dependencies and exports |
+| `git_status` / `git_diff` / `git_log` | Git inspection |
+| `git_stage` / `git_unstage` | Stage or unstage paths |
+| `git_commit` | Commit staged changes |
+| `git_restore` | Restore paths, discarding unstaged changes |
+| `git_push` | Push the current branch to a remote |
+| `project_overview` | Project structure, languages, package managers, and Git state |
+| `package_info` / `file_info` | Project and filesystem metadata |
+| `diagnostics` | Project-independent diagnostics; does not run tests, lint, or typecheck |
+| `run_npm_batch` | Run one or more explicitly allowlisted npm scripts sequentially |
+| `run_command_batch` | Run one or more explicitly allowlisted executables sequentially without a shell |
 
-Batch operations execute sequentially and stop on the first failed command.
+Batch operations execute sequentially and stop on the first failed command. Tool calls return modern `structuredContent` alongside a serialized text representation, and tools that return structured data advertise an `outputSchema`. List-style protocol methods use opaque cursors when more than 50 entries are available.
+
+Modern `subscriptions/listen` replaces the legacy GET/SSE notification model. Clients can subscribe to tool, prompt, resource-list, and resource-specific change events; filesystem mutations publish resource-change events to active subscribers.
 
 ### Command permissions
 
@@ -102,21 +127,38 @@ Commands are launched with `shell: false`; the MCP client supplies the executabl
 
 Avoid allowing `sh`, `bash`, `zsh`, `cmd`, `node`, or `python` unless you intentionally want to grant a much broader execution capability.
 
+## Agent Skills
+
+The server implements the stable MCP Skills extension (`io.modelcontextprotocol/skills`) over the standard Resources primitive. It discovers project-local `SKILL.md` files under:
+
+```text
+skills/
+.agents/skills/
+.claude/skills/
+.github/skills/
+```
+
+Skills are exposed through `skills/list`, `skills/get`, `resources/list`, and `resources/read`. Skill entries contain parsed frontmatter plus SHA-256 digests and byte sizes for every served file. Skill manifests enforce the 512-resource and 16 MiB limits. Binary supporting files are returned as MCP blobs. `resources/directory/read` lists direct children of a skill resource directory. The extension advertises `directoryRead: true`.
+
 ## Authentication
 
-A random Bearer token is generated when the server starts. MCP and REST requests must provide:
+By default, `agent-dir` generates a random Bearer token when the server starts. The token protects both the MCP endpoint and the HTTP file API.
+
+Clients should authenticate with:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-For clients that cannot send a custom `Authorization` header, HTTP endpoints also accept the token as a query parameter:
+The CLI also supports explicitly configured profile tokens and the `--token` option. There is no `--no-auth` option; authentication cannot be disabled through the CLI. Keep the token secret and do not commit it to a repository or publish it alongside a tunnel URL.
+
+For clients that cannot send an `Authorization` header, the HTTP server also accepts the token as a query parameter:
 
 ```text
 https://your-subdomain.wormhole.bar/mcp?token=<token>
 ```
 
-The Bearer header remains preferred. Query-string tokens can appear in URL logs and should be treated as less secure. Do not commit the token or publish it alongside a tunnel URL.
+Query-string tokens may be exposed in URL logs and should be treated as less secure than the Authorization header.
 
 ## REST API
 
@@ -130,7 +172,7 @@ DELETE  /path/to/file
 POST    /mcp
 ```
 
-All endpoints are authenticated by default.
+All HTTP endpoints are authenticated by default.
 
 ## Development
 
@@ -169,7 +211,13 @@ The TypeScript configuration uses strict checking, exact optional properties, un
 
 File access is rooted at the shared directory and resolves existing paths through their real filesystem targets, preventing symlinks from escaping the exposed root. HTTP request bodies are limited to 10 MiB. npm scripts and external executables use explicit allowlists, and external commands are not passed through a shell.
 
-Because file writes, deletion, and command execution can modify a project or execute programs, expose only directories and capabilities you intend an AI agent to control. Never share directories containing credentials, SSH keys, private certificates, production secrets, or unrelated personal data.
+Because file writes, deletion, command execution, and Git write operations can modify a project or remote repository, expose only directories and capabilities you intend an AI agent to control. Git write tools are intentionally explicit: staging, unstaging, committing, restoring, and pushing are separate operations. `git_restore` discards unstaged changes, and `git_push` can modify a remote repository. If you do not want Git mutation, do not use the Git write tools and do not allow `git` through the generic command allowlist.
+
+The diagnostics tool is deliberately project-independent. It checks conditions such as invalid JSON, broken symlinks, and unresolved merge-conflict markers instead of assuming a particular test runner, linter, compiler, or package ecosystem. Never share directories containing credentials, SSH keys, private certificates, production secrets, or unrelated personal data.
+
+## Credits
+
+Remote tunneling support is provided through [Wormhole](https://wormhole.bar/), a project of the Wormhole team. `agent-dir` invokes the Wormhole CLI and does not provide the tunneling service itself.
 
 ## License
 

@@ -22,40 +22,55 @@ const color = (value: string, code: string): string => `${code}${value}${RESET}`
 
 const TOOL_ICONS: Record<string, string> = {
   list_files: "📂",
-  list_dir: "📁",
   list_dirs: "🗂️",
-  read_file: "📖",
+  read_range: "📐",
   read_files: "📚",
-  write_file: "✎",
   write_files: "📝",
-  patch_file: "🩹",
   patch_files: "🧩",
-  delete_file: "✖",
   delete_files: "🗑️",
-  run_npm: "⚙",
   run_npm_batch: "🔧",
-  run_command: "⌘",
   run_command_batch: "🛠️",
+  search_files: "🔎",
+  find_files: "🧭",
+  search_code: "🧠",
+  find_symbol: "🔹",
+  find_definition: "🎯",
+  find_references: "🔗",
+  find_imports: "↪",
+  find_exports: "↗",
+  git_status: "🌿",
+  git_stage: "➕",
+  git_unstage: "➖",
+  git_commit: "●",
+  git_restore: "↩",
+  git_push: "⬆",
+  git_diff: "📝",
+  git_log: "📜",
+  project_overview: "🗺️",
+  package_info: "📦",
+  file_info: "ℹ️",
+  diagnostics: "🩺",
 };
 
 const TOOL_NAME_WIDTH = Math.max(...Object.keys(TOOL_ICONS).map((name) => name.length));
 const TOOL_COLORS: Record<string, string> = {
   list_files: CYAN,
-  list_dir: CYAN,
   list_dirs: BRIGHT_CYAN,
-  read_file: GREEN,
   read_files: BRIGHT_GREEN,
-  write_file: YELLOW,
   write_files: BRIGHT_YELLOW,
-  patch_file: MAGENTA,
   patch_files: BRIGHT_MAGENTA,
-  delete_file: RED,
   delete_files: BRIGHT_RED,
-  run_npm: BLUE,
   run_npm_batch: BRIGHT_BLUE,
-  run_command: CYAN,
   run_command_batch: BRIGHT_CYAN,
+  git_stage: YELLOW,
+  git_unstage: MAGENTA,
+  git_commit: BRIGHT_GREEN,
+  git_restore: RED,
+  git_push: BRIGHT_BLUE,
 };
+
+const NARROW_TOOL_ICONS = new Set(["✎", "✖", "⚙", "⌘", "↪", "↗"]);
+const TOOL_ICON_SLOT_WIDTH = 3;
 
 function toolIcon(name: string): string {
   return TOOL_ICONS[name] ?? "•";
@@ -65,11 +80,10 @@ function toolColor(name?: string): string | undefined {
   return name ? TOOL_COLORS[name] : undefined;
 }
 
-const NARROW_TOOL_ICONS = new Set(["✎", "✖", "⚙", "⌘"]);
-
 function toolLabel(name: string): string {
   const icon = toolIcon(name);
-  const iconSlot = NARROW_TOOL_ICONS.has(icon) ? ` ${icon} ` : `${icon} `;
+  const iconWidth = NARROW_TOOL_ICONS.has(icon) ? 1 : 2;
+  const iconSlot = `${" ".repeat(TOOL_ICON_SLOT_WIDTH - iconWidth - 1)}${icon} `;
   return `${iconSlot}${name.padEnd(TOOL_NAME_WIDTH)}`;
 }
 
@@ -87,6 +101,7 @@ export function printHelp(): void {
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --token <token>        Explicit Bearer token");
   writeLine("      --no-tunnel            Disable tunneling");
+  writeLine("      --random               Use a random Wormhole URL (no subdomain)");
   writeLine("  -h, --help                 Show this help");
   writeLine("");
   writeLine("Config:");
@@ -108,9 +123,16 @@ export function printBanner(options: {
   commands?: string[];
 }): void {
   writeLine("");
-  writeLine("╭──────────────────────────────────────────────────────────────╮");
-  writeLine("│                         AGENT-DIR                            │");
-  writeLine("╰──────────────────────────────────────────────────────────────╯");
+  const banner = [
+    "╭──────────────────────────────────────────────────────────────╮",
+    "│                         AGENT-DIR                            │",
+    "╰──────────────────────────────────────────────────────────────╯",
+  ];
+  const gradient = [BRIGHT_CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA];
+
+  for (let i = 0; i < banner.length; i++) {
+    writeLine(color(banner[i] ?? "", gradient[i] ?? BRIGHT_CYAN));
+  }
   writeLine("");
   writeLine(`  Directory    ${options.root}`);
   writeLine(`  Port         ${options.port}`);
@@ -123,20 +145,34 @@ export function printBanner(options: {
   writeLine("");
   writeLine("  TOOLS");
   writeLine(`    ${color(toolLabel("list_files"), CYAN)}`);
-  writeLine(`    ${color(toolLabel("list_dir"), CYAN)}`);
   writeLine(`    ${color(toolLabel("list_dirs"), BRIGHT_CYAN)}`);
-  writeLine(`    ${color(toolLabel("read_file"), GREEN)}`);
+  writeLine(`    ${color(toolLabel("read_range"), GREEN)}`);
   writeLine(`    ${color(toolLabel("read_files"), BRIGHT_GREEN)}`);
-  writeLine(`    ${color(toolLabel("write_file"), YELLOW)}`);
   writeLine(`    ${color(toolLabel("write_files"), BRIGHT_YELLOW)}`);
-  writeLine(`    ${color(toolLabel("patch_file"), MAGENTA)}`);
   writeLine(`    ${color(toolLabel("patch_files"), BRIGHT_MAGENTA)}`);
-  writeLine(`    ${color(toolLabel("delete_file"), RED)}`);
   writeLine(`    ${color(toolLabel("delete_files"), BRIGHT_RED)}`);
-  writeLine(`    ${color(toolLabel("run_npm"), BLUE)}`);
   writeLine(`    ${color(toolLabel("run_npm_batch"), BRIGHT_BLUE)}`);
-  writeLine(`    ${color(toolLabel("run_command"), CYAN)}`);
   writeLine(`    ${color(toolLabel("run_command_batch"), BRIGHT_CYAN)}`);
+  writeLine(`    ${color(toolLabel("search_files"), CYAN)}`);
+  writeLine(`    ${color(toolLabel("find_files"), CYAN)}`);
+  writeLine(`    ${color(toolLabel("search_code"), BRIGHT_CYAN)}`);
+  writeLine(`    ${color(toolLabel("find_symbol"), GREEN)}`);
+  writeLine(`    ${color(toolLabel("find_definition"), GREEN)}`);
+  writeLine(`    ${color(toolLabel("find_references"), GREEN)}`);
+  writeLine(`    ${color(toolLabel("find_imports"), BRIGHT_GREEN)}`);
+  writeLine(`    ${color(toolLabel("find_exports"), BRIGHT_GREEN)}`);
+  writeLine(`    ${color(toolLabel("git_status"), CYAN)}`);
+  writeLine(`    ${color(toolLabel("git_stage"), YELLOW)}`);
+  writeLine(`    ${color(toolLabel("git_unstage"), MAGENTA)}`);
+  writeLine(`    ${color(toolLabel("git_commit"), BRIGHT_GREEN)}`);
+  writeLine(`    ${color(toolLabel("git_restore"), RED)}`);
+  writeLine(`    ${color(toolLabel("git_push"), BRIGHT_BLUE)}`);
+  writeLine(`    ${color(toolLabel("git_diff"), CYAN)}`);
+  writeLine(`    ${color(toolLabel("git_log"), CYAN)}`);
+  writeLine(`    ${color(toolLabel("project_overview"), BRIGHT_CYAN)}`);
+  writeLine(`    ${color(toolLabel("package_info"), YELLOW)}`);
+  writeLine(`    ${color(toolLabel("file_info"), YELLOW)}`);
+  writeLine(`    ${color(toolLabel("diagnostics"), BRIGHT_YELLOW)}`);
   writeLine("");
   if (options.npmScripts?.length) {
     writeLine("  NPM COMMANDS");
@@ -150,10 +186,14 @@ export function printBanner(options: {
   }
 }
 
+const LOG_METHOD_WIDTH = 6;
+const LOG_PATH_WIDTH = 16;
+const LOG_STATUS_WIDTH = 5;
+
 export function printRequestLog(entry: RequestLog): void {
-  const method = entry.method;
-  const path = entry.path.padEnd(8);
-  const status = String(entry.status);
+  const method = `[${entry.method}]`.padEnd(LOG_METHOD_WIDTH);
+  const path = entry.path.padEnd(LOG_PATH_WIDTH);
+  const status = `[${entry.status}]`.padEnd(LOG_STATUS_WIDTH);
   const statusCode = entry.status >= 500 ? RED : entry.status >= 400 ? YELLOW : GREEN;
   const methodCode =
     toolColor(entry.tool) ??
@@ -168,8 +208,9 @@ export function printRequestLog(entry: RequestLog): void {
   const detail = entry.tool
     ? [toolLabel(entry.tool), entry.detail].filter(Boolean).join("  │  ")
     : entry.detail;
+
   writeLine(
-    `  ├─ [${color(method, methodCode)}]  ${color(path, methodCode)}  [${color(status, statusCode)}]${detail ? `  ${color("•", methodCode)} ${detail}` : ""}`,
+    `  ├─ ${color(method, methodCode)}  ${color(path, methodCode)}  ${color(status, statusCode)}  ${color("•", methodCode)}${detail ? ` ${detail}` : ""}`,
   );
 }
 

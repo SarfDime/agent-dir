@@ -12,6 +12,7 @@ export function runNpm(
   script: string,
   timeoutMs = 120000,
   allowedScripts: string[] = [],
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   if (!/^[A-Za-z0-9:_-]+$/.test(script)) throw new Error("Invalid npm script name.");
   return (async () => {
@@ -37,12 +38,26 @@ export function runNpm(
       let stdout = "";
       let stderr = "";
       let finished = false;
-      const timer = setTimeout(() => {
+      let timer: ReturnType<typeof setTimeout>;
+      const abort = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        child.kill("SIGTERM");
+        reject(new Error(`npm run ${script} was aborted.`));
+      };
+      timer = setTimeout(() => {
         if (finished) return;
         finished = true;
         child.kill("SIGTERM");
+        signal?.removeEventListener("abort", abort);
         reject(new Error(`npm run ${script} timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
       child.stdout.on("data", (chunk: Buffer | string) => {
         stdout += chunk.toString();
       });
@@ -53,6 +68,7 @@ export function runNpm(
         if (!finished) {
           finished = true;
           clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
           reject(error);
         }
       });
@@ -60,6 +76,7 @@ export function runNpm(
         if (!finished) {
           finished = true;
           clearTimeout(timer);
+          signal?.removeEventListener("abort", abort);
           resolve({ command: `npm run ${script}`, exitCode: code ?? 1, stdout, stderr });
         }
       });

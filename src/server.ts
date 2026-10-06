@@ -39,7 +39,29 @@ export function startServer({
         });
         return;
       }
-      if (url.pathname === "/mcp" && req.method === "POST") {
+      if (url.pathname === "/mcp") {
+        if (req.method !== "POST") {
+          res.setHeader("allow", "POST");
+          sendText(res, 405, "Method Not Allowed\n");
+          logRequest({
+            method: req.method ?? "UNKNOWN",
+            path: url.pathname,
+            status: 405,
+            detail: "method not allowed",
+          });
+          return;
+        }
+        const headerError = validateMcpHeaders(request, messageBody(body));
+        if (headerError) {
+          await sendResponse(res, headerError);
+          logRequest({
+            method: req.method,
+            path: url.pathname,
+            status: headerError.status,
+            detail: "MCP header validation",
+          });
+          return;
+        }
         const response = await mcp(request);
         await sendResponse(res, response);
         const mcpLog = getMcpLog(body);
@@ -71,19 +93,19 @@ export function startServer({
       }
       if (req.method === "GET") {
         sendText(res, 200, await readFile(root, relative), "text/plain; charset=utf-8");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "read_file" });
+        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST GET" });
         return;
       }
       if (req.method === "PUT") {
         await writeFile(root, relative, body.toString("utf8"));
         sendText(res, 200, "File updated successfully\n");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "write_file" });
+        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST PUT" });
         return;
       }
       if (req.method === "DELETE") {
         await deleteFile(root, relative);
         sendText(res, 200, "File deleted successfully\n");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "delete_file" });
+        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST DELETE" });
         return;
       }
       sendText(res, 404, "Not found\n");
@@ -109,9 +131,137 @@ export function startServer({
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () =>
-      resolve({ close: () => new Promise<void>((done) => server.close(() => done())) }),
+      resolve({
+        close: () =>
+          new Promise<void>((done) => {
+            mcp.closeSubscriptions();
+            server.close(() => done());
+          }),
+      }),
     );
   });
+}
+
+function messageBody(body: Buffer): Record<string, unknown> | null {
+  try {
+    const value = JSON.parse(body.toString("utf8")) as unknown;
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function validateMcpHeaders(
+  request: Request,
+  message: Record<string, unknown> | null,
+): Response | undefined {
+  const method = typeof message?.method === "string" ? message.method : undefined;
+  const isNotification = method !== undefined && !Object.hasOwn(message ?? {}, "id");
+  const params =
+    typeof message?.params === "object" && message?.params !== null
+      ? (message.params as Record<string, unknown>)
+      : {};
+  const protocolHeader = request.headers.get("mcp-protocol-version");
+  const methodHeader = request.headers.get("mcp-method");
+  const accept = request.headers.get("accept") ?? "";
+  const contentType = request.headers.get("content-type") ?? "";
+  const origin = request.headers.get("origin");
+
+  if (isNotification) return undefined;
+  if (!contentType.toLowerCase().startsWith("application/json"))
+    return jsonRpcErrorForServer(message, -32020, "Content-Type must be application/json.", 400);
+  if (
+    !accept
+      .split(",")
+      .map((value) => value.trim().split(";")[0]?.toLowerCase())
+      .some((value) => value === "application/json") ||
+    !accept
+      .split(",")
+      .map((value) => value.trim().split(";")[0]?.toLowerCase())
+      .some((value) => value === "text/event-stream")
+  ) {
+    return jsonRpcErrorForServer(
+      message,
+      -32020,
+      "Accept must include application/json and text/event-stream.",
+      400,
+    );
+  }
+  if (!protocolHeader)
+    return jsonRpcErrorForServer(message, -32020, "MCP-Protocol-Version header is required.", 400);
+  const bodyProtocolVersion =
+    typeof params._meta === "object" && params._meta !== null
+      ? (params._meta as Record<string, unknown>)["io.modelcontextprotocol/protocolVersion"]
+      : undefined;
+  if (bodyProtocolVersion !== undefined && bodyProtocolVersion !== protocolHeader)
+    return jsonRpcErrorForServer(
+      message,
+      -32020,
+      "MCP-Protocol-Version does not match the request metadata.",
+      400,
+    );
+  if (!method || methodHeader !== method)
+    return jsonRpcErrorForServer(
+      message,
+      -32020,
+      "Mcp-Method does not match the JSON-RPC method.",
+      400,
+    );
+  if (
+    method === "tools/call" ||
+    method === "resources/read" ||
+    method === "resources/directory/read" ||
+    method === "skills/get" ||
+    method === "prompts/get"
+  ) {
+    const bodyName =
+      typeof params.name === "string"
+        ? params.name
+        : typeof params.uri === "string"
+          ? params.uri
+          : undefined;
+    const headerName = request.headers.get("mcp-name");
+    const decodedHeaderName = headerName === null ? undefined : decodeMcpHeaderValue(headerName);
+    if (!bodyName || decodedHeaderName !== bodyName)
+      return jsonRpcErrorForServer(
+        message,
+        -32020,
+        "Mcp-Name does not match the request parameter.",
+        400,
+      );
+  }
+  if (origin && origin !== new URL(request.url).origin)
+    return jsonRpcErrorForServer(message, -32020, "Invalid Origin.", 403);
+  return undefined;
+}
+
+function decodeMcpHeaderValue(value: string): string | undefined {
+  const prefix = "=?base64?";
+  const suffix = "?=";
+  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return value;
+  const encoded = value.slice(prefix.length, -suffix.length);
+  try {
+    const decoded = Buffer.from(encoded, "base64").toString("utf8");
+    if (Buffer.from(decoded, "utf8").toString("base64") !== encoded) return undefined;
+    return decoded;
+  } catch {
+    return undefined;
+  }
+}
+
+function jsonRpcErrorForServer(
+  message: Record<string, unknown> | null,
+  code: number,
+  text: string,
+  status: number,
+): Response {
+  return new Response(
+    JSON.stringify({ jsonrpc: "2.0", id: message?.id ?? null, error: { code, message: text } }),
+    {
+      status,
+      headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    },
+  );
 }
 
 function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
@@ -132,29 +282,29 @@ function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
       const paths = Array.isArray(args.paths)
         ? args.paths.filter((value): value is string => typeof value === "string")
         : [];
-      const path = typeof args.path === "string" ? args.path : undefined;
+      const files = Array.isArray(args.files)
+        ? args.files
+            .filter(
+              (value): value is Record<string, unknown> =>
+                typeof value === "object" && value !== null,
+            )
+            .map((value) => value.path)
+            .filter((value): value is string => typeof value === "string")
+        : [];
 
       switch (name) {
-        case "read_file":
-        case "write_file":
-        case "patch_file":
-        case "delete_file":
-          return path ?? "";
         case "read_files":
-        case "write_files":
-        case "patch_files":
         case "delete_files":
           return paths.join(", ");
-        case "run_npm":
-          return typeof args.script === "string" ? `npm run ${args.script}` : "";
+        case "write_files":
+        case "patch_files":
+          return files.join(", ");
         case "run_npm_batch": {
           const scripts = Array.isArray(args.scripts)
             ? args.scripts.filter((value): value is string => typeof value === "string")
             : [];
           return scripts.map((script) => `npm run ${script}`).join(", ");
         }
-        case "run_command":
-          return formatCommand(args.command, args.args);
         case "run_command_batch": {
           const commands = Array.isArray(args.commands) ? args.commands : [];
           return commands
@@ -240,5 +390,26 @@ async function sendResponse(res: ServerResponse, response: Response): Promise<vo
   response.headers.forEach((value, key) => {
     res.setHeader(key, value);
   });
-  res.end(Buffer.from(await response.arrayBuffer()));
+  if (!response.body) {
+    res.end();
+    return;
+  }
+  const reader = response.body.getReader();
+  const onClose = () => {
+    void reader.cancel();
+  };
+  res.once("close", onClose);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+  } catch {
+    res.destroy();
+  } finally {
+    res.off("close", onClose);
+    reader.releaseLock();
+  }
+  if (!res.destroyed) res.end();
 }
