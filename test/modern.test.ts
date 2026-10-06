@@ -11,7 +11,7 @@ test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
     encoding: "utf8",
   });
-  assert.equal(output.trim(), "0.1.3");
+  assert.equal(output.trim(), "0.1.4");
 });
 
 const META = {
@@ -231,7 +231,7 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
       resources: { listChanged: true, subscribe: true },
       extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
     });
-    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.1.3" });
+    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.1.4" });
     assert.match(String(body.result.instructions), /minimum necessary tool calls/);
     assert.match(String(body.result.instructions), /Allowed npm scripts/);
   } finally {
