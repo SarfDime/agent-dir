@@ -173,7 +173,6 @@ const bannerOptions: Parameters<typeof printBanner>[0] = {
   root: directory,
   port,
   tunnel,
-  token,
 };
 
 const npmScripts = commandConfig.npm?.allowedScripts;
@@ -191,7 +190,7 @@ let tunnelResult: TunnelResult | undefined;
 console.log("  ✓ SERVER ONLINE");
 console.log(`    Local target : http://127.0.0.1:${port}`);
 console.log("    Auth         : Bearer token");
-console.log(`    Token        : ${token}`);
+console.log("    Token        : <configured>");
 
 if (tunnel !== "none") {
   try {

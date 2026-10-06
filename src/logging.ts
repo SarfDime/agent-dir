@@ -51,6 +51,13 @@ const TOOL_ICONS: Record<string, string> = {
   allowed_commands: "🔐",
   file_info: "ℹ️",
   diagnostics: "🩺",
+  project_context: "🧭",
+  inspect: "🔎",
+  locate: "🎯",
+  read_relevant: "🎯",
+  git_changes: "📋",
+  apply_changes: "✏️",
+  validate: "✓",
 };
 
 const MCP_METHOD_ICONS: Record<string, string> = {

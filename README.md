@@ -153,10 +153,35 @@ The server log distinguishes protocol/header validation from MCP handler errors.
 | `diagnostics` | Project-independent diagnostics; does not run tests, lint, or typecheck |
 | `run_npm_batch` | Run one or more explicitly allowlisted npm scripts sequentially |
 | `run_command_batch` | Run one or more explicitly allowlisted executables sequentially without a shell |
+| `codegraph_explore` | Optional CodeGraph structural code intelligence when the project is indexed |
 
 Batch operations execute sequentially and stop on the first failed command. Tool calls return modern `structuredContent` alongside a serialized text representation, and tools that return structured data advertise an `outputSchema`. List-style protocol methods use opaque cursors when more than 50 entries are available.
 
 Modern `subscriptions/listen` replaces the legacy GET/SSE notification model. Clients can subscribe to tool, prompt, resource-list, and resource-specific change events; filesystem mutations publish resource-change events to active subscribers.
+
+### Optional CodeGraph integration
+
+Agent Dir can optionally bridge the CodeGraph MCP server into the same Agent Dir MCP endpoint. CodeGraph remains an independent tool and dependency; Agent Dir only exposes its `codegraph_explore` capability when the current project has a readable `.codegraph/codegraph.db` index and the `codegraph` executable is available on `PATH`. Agent Dir does not start CodeGraph until `codegraph_explore` is actually called.
+
+Install CodeGraph separately if you want this capability:
+
+```bash
+npm install -g @colbymchenry/codegraph
+codegraph init
+```
+
+CodeGraph exposes `codegraph_explore` as its primary/default MCP tool. Agent Dir forwards its request and structured result without reimplementing graph analysis, and launches CodeGraph with the Agent Dir project root fixed as `--path`; callers cannot select another project through the forwarded tool. Agent Dir intentionally exposes only `codegraph_explore`, even if a CodeGraph installation enables additional MCP tools.
+
+The integration distinguishes these states in `server/discover`:
+
+- `not_installed` — CodeGraph is unavailable on `PATH`.
+- `not_indexed` — CodeGraph is installed, but this project has no readable `.codegraph/codegraph.db`.
+- `available` — CodeGraph is installed and this project is indexed.
+- `startup_failed` / `runtime_failed` — CodeGraph could not initialize or later terminated; Agent Dir remains available and reports the failure locally.
+
+The CodeGraph child process is reused for subsequent calls and is terminated with Agent Dir shutdown. Agent Dir passes a deliberately limited environment to the child and does not forward arbitrary `projectPath` values, credentials, or unrelated filesystem paths.
+
+CodeGraph is optional: without it, the normal Agent Dir tool surface and behavior are unchanged.
 
 ### Command permissions
 

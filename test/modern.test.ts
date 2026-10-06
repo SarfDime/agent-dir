@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,7 +11,7 @@ test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
     encoding: "utf8",
   });
-  assert.equal(output.trim(), "0.1.4");
+  assert.equal(output.trim(), "0.2.0");
 });
 
 const META = {
@@ -34,6 +34,385 @@ function requestFor(id: number, method: string, params: Record<string, unknown> 
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: META } }),
   });
 }
+
+test("apply_changes preflights and atomically applies related file edits", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    await writeFile(path.join(root, "one.txt"), "one\n");
+    await writeFile(path.join(root, "two.txt"), "two\n");
+    const handler = createMcpHandler(root);
+
+    const failed = await handler(
+      requestFor(1, "tools/call", {
+        name: "apply_changes",
+        arguments: {
+          changes: [
+            { kind: "write", path: "created.txt", content: "created\n" },
+            { kind: "patch", path: "two.txt", patches: [{ search: "missing", replace: "x" }] },
+          ],
+        },
+      }),
+    );
+    const failedBody = (await failed.json()) as {
+      result: { isError?: boolean; structuredContent?: { error?: string } };
+    };
+    assert.equal(failedBody.result.isError, true);
+    await assert.rejects(() => access(path.join(root, "created.txt")));
+    assert.equal(await readFile(path.join(root, "two.txt"), "utf8"), "two\n");
+
+    const duplicate = await handler(
+      requestFor(3, "tools/call", {
+        name: "apply_changes",
+        arguments: {
+          changes: [
+            { kind: "write", path: "nested/../duplicate.txt", content: "one" },
+            { kind: "write", path: "duplicate.txt", content: "two" },
+          ],
+        },
+      }),
+    );
+    const duplicateBody = (await duplicate.json()) as {
+      result: { isError?: boolean; structuredContent?: { error?: string } };
+    };
+    assert.equal(duplicateBody.result.isError, true);
+    assert.match(duplicateBody.result.structuredContent?.error ?? "", /Duplicate change path/);
+
+    const preview = await handler(
+      requestFor(2, "tools/call", {
+        name: "apply_changes",
+        arguments: {
+          dryRun: true,
+          changes: [
+            { kind: "write", path: "created.txt", content: "created\n" },
+            { kind: "patch", path: "two.txt", patches: [{ search: "two", replace: "updated" }] },
+            { kind: "delete", path: "one.txt" },
+          ],
+        },
+      }),
+    );
+    const previewBody = (await preview.json()) as {
+      result: { structuredContent: Array<{ path: string; changed: boolean; dryRun?: boolean }> };
+    };
+    assert.deepEqual(
+      previewBody.result.structuredContent.map((item) => [item.path, item.changed, item.dryRun]),
+      [
+        ["created.txt", true, true],
+        ["two.txt", true, true],
+        ["one.txt", true, true],
+      ],
+    );
+    await assert.rejects(() => access(path.join(root, "created.txt")));
+    assert.equal(await readFile(path.join(root, "two.txt"), "utf8"), "two\n");
+
+    const applied = await handler(
+      requestFor(3, "tools/call", {
+        name: "apply_changes",
+        arguments: {
+          changes: [
+            { kind: "write", path: "created.txt", content: "created\n" },
+            { kind: "patch", path: "two.txt", patches: [{ search: "two", replace: "updated" }] },
+            { kind: "delete", path: "one.txt" },
+          ],
+        },
+      }),
+    );
+    const appliedBody = (await applied.json()) as {
+      result: { structuredContent: Array<{ path: string; changed: boolean }> };
+    };
+    assert.equal(
+      appliedBody.result.structuredContent.every((item) => item.changed),
+      true,
+    );
+    assert.equal(await readFile(path.join(root, "created.txt"), "utf8"), "created\n");
+    assert.equal(await readFile(path.join(root, "two.txt"), "utf8"), "updated\n");
+    await assert.rejects(() => access(path.join(root, "one.txt")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LLM-oriented output budgets bound high-volume results", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-budget-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        writeFile(
+          path.join(root, "src", `file-${index}.ts`),
+          `export const target${index} = "${"x".repeat(100)}";\\n`,
+        ),
+      ),
+    );
+    const handler = createMcpHandler(root, { commands: ["node"] });
+    const batchResponse = await handler(
+      requestFor(4, "tools/call", {
+        name: "run_command_batch",
+        arguments: {
+          commands: Array.from({ length: 3 }, () => ({
+            command: "node",
+            args: ["-e", "process.stdout.write('x'.repeat(5000))"],
+          })),
+          maxBytes: 1024,
+        },
+      }),
+    );
+    const batchBody = (await batchResponse.json()) as { result: { structuredContent: unknown } };
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(batchBody.result.structuredContent), "utf8") <= 1024,
+    );
+
+    const locateResponse = await handler(
+      requestFor(1, "tools/call", {
+        name: "locate",
+        arguments: { query: "target", kind: "code", maxResults: 20, maxBytes: 1024 },
+      }),
+    );
+    const locateBody = (await locateResponse.json()) as {
+      result: { structuredContent: { truncated: boolean; items: unknown[] } };
+    };
+    assert.equal(locateBody.result.structuredContent.truncated, true);
+    assert.ok(locateBody.result.structuredContent.items.length < 20);
+
+    const relevantResponse = await handler(
+      requestFor(2, "tools/call", {
+        name: "read_relevant",
+        arguments: { query: "target", maxResults: 20, contextLines: 3, maxBytes: 1024 },
+      }),
+    );
+    const relevantBody = (await relevantResponse.json()) as {
+      result: { structuredContent: { truncated: boolean; matches: unknown[] } };
+    };
+    assert.equal(relevantBody.result.structuredContent.truncated, true);
+    assert.ok(relevantBody.result.structuredContent.matches.length < 20);
+
+    const contextResponse = await handler(
+      requestFor(3, "tools/call", {
+        name: "project_context",
+        arguments: { maxBytes: 1024 },
+      }),
+    );
+    const contextBody = (await contextResponse.json()) as {
+      result: { structuredContent: unknown };
+    };
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(contextBody.result.structuredContent), "utf8") <= 1024,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("discovery search outputs honor maxBytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-discovery-budget-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    const long = "x".repeat(5000);
+    await writeFile(
+      path.join(root, "src", "demo.ts"),
+      `import { ${long} } from "module";\\nexport const target = "${long}";\\nfunction targetFn() { return target; }\\n`,
+    );
+    await writeFile(path.join(root, "src", "other.ts"), `export const target2 = "${long}";\\n`);
+
+    const handler = createMcpHandler(root);
+    const calls = [
+      ["search_files", { query: "target", maxResults: 20, maxBytes: 1024 }],
+      ["search_code", { query: "target", maxResults: 20, maxBytes: 1024 }],
+      ["find_symbol", { symbol: "target", maxResults: 20, maxBytes: 1024 }],
+      ["find_definition", { symbol: "target", maxResults: 20, maxBytes: 1024 }],
+      ["find_references", { symbol: "target", maxResults: 20, maxBytes: 1024 }],
+      ["find_imports", { maxResults: 20, maxBytes: 1024 }],
+      ["find_exports", { maxResults: 20, maxBytes: 1024 }],
+    ] as const;
+
+    for (const [index, [name, argumentsValue]] of calls.entries()) {
+      const response = await handler(
+        requestFor(index + 1, "tools/call", { name, arguments: argumentsValue }),
+      );
+      assert.equal(response.status, 200);
+      const body = (await response.json()) as { result: { structuredContent: unknown } };
+      assert.ok(
+        Buffer.byteLength(JSON.stringify(body.result.structuredContent), "utf8") <= 1024,
+        name,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("low-level read and command outputs honor maxBytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-output-budget-"));
+  try {
+    await writeFile(path.join(root, "one.txt"), "x".repeat(5000));
+    await writeFile(path.join(root, "two.txt"), "y".repeat(5000));
+    await writeFile(path.join(root, "patch.txt"), `before\n${"z".repeat(5000)}`);
+
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { check: "node -e 'console.log(\"x\".repeat(5000))'" } }),
+    );
+    const handler = createMcpHandler(root, {
+      npm: { allowedScripts: ["check"] },
+    });
+
+    const range = await handler(
+      requestFor(1, "tools/call", {
+        name: "read_range",
+        arguments: { path: "one.txt", startLine: 1, endLine: 1, maxBytes: 1024 },
+      }),
+    );
+    const rangeBody = (await range.json()) as {
+      result: { structuredContent: { content: string } };
+    };
+    assert.ok(Buffer.byteLength(rangeBody.result.structuredContent.content, "utf8") <= 1024);
+
+    const files = await handler(
+      requestFor(2, "tools/call", {
+        name: "read_files",
+        arguments: { paths: ["one.txt", "two.txt"], maxBytes: 1024 },
+      }),
+    );
+    const filesBody = (await files.json()) as {
+      result: { structuredContent: Array<{ content: string }> };
+    };
+    assert.equal(filesBody.result.structuredContent.length, 1);
+    assert.ok(
+      Buffer.byteLength(filesBody.result.structuredContent[0]?.content ?? "", "utf8") <= 1024,
+    );
+
+    const patched = await handler(
+      requestFor(3, "tools/call", {
+        name: "patch_files",
+        arguments: {
+          dryRun: true,
+          files: [{ path: "patch.txt", patches: [{ search: "before", replace: "after" }] }],
+          maxBytes: 1024,
+        },
+      }),
+    );
+    const patchedBody = (await patched.json()) as {
+      result: { structuredContent: Array<{ content: string }> };
+    };
+    assert.ok(
+      Buffer.byteLength(patchedBody.result.structuredContent[0]?.content ?? "", "utf8") <= 1024,
+    );
+
+    const command = await handler(
+      requestFor(4, "tools/call", {
+        name: "run_npm_batch",
+        arguments: { scripts: ["check"], maxBytes: 1024 },
+      }),
+    );
+    const commandBody = (await command.json()) as {
+      result: { structuredContent: Array<{ stdout: string; stderr: string }> };
+    };
+    const commandResult = commandBody.result.structuredContent[0];
+    assert.ok(commandResult);
+    assert.ok(Buffer.byteLength(JSON.stringify(commandResult), "utf8") <= 1024);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("inspect unifies file, symbol, and code context with bounded output", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-inspect-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "sample.ts"),
+      [
+        "export function greet(name: string) {",
+        "  const message = `Hello " + "$" + "{name}" + "`;",
+        "  return message;",
+        "}",
+        "",
+        'export const other = greet("world");',
+      ].join("\\n"),
+    );
+    const handler = createMcpHandler(root);
+
+    const fileResponse = await handler(
+      requestFor(1, "tools/call", {
+        name: "inspect",
+        arguments: { target: "src/sample.ts", kind: "file", maxBytes: 1024 },
+      }),
+    );
+    const fileBody = (await fileResponse.json()) as {
+      result: {
+        structuredContent: { kind: string; path: string; content: string; truncated: boolean };
+      };
+    };
+    assert.equal(fileBody.result.structuredContent.kind, "file");
+    assert.equal(fileBody.result.structuredContent.path, "src/sample.ts");
+    assert.match(fileBody.result.structuredContent.content, /greet/);
+    assert.equal(fileBody.result.structuredContent.truncated, false);
+
+    const symbolResponse = await handler(
+      requestFor(2, "tools/call", {
+        name: "inspect",
+        arguments: { target: "greet", kind: "symbol", includeReferences: true, contextLines: 1 },
+      }),
+    );
+    const symbolBody = (await symbolResponse.json()) as {
+      result: {
+        structuredContent: { kind: string; definitions: unknown[]; references: unknown[] };
+      };
+    };
+    assert.equal(symbolBody.result.structuredContent.kind, "symbol");
+    assert.equal(symbolBody.result.structuredContent.definitions.length, 1);
+    assert.equal(symbolBody.result.structuredContent.references.length, 1);
+
+    const codeResponse = await handler(
+      requestFor(3, "tools/call", {
+        name: "inspect",
+        arguments: { target: "return message", kind: "code", contextLines: 1 },
+      }),
+    );
+    const codeBody = (await codeResponse.json()) as {
+      result: { structuredContent: { kind: string; matches: Array<{ context: string }> } };
+    };
+    assert.equal(codeBody.result.structuredContent.kind, "code");
+    assert.equal(codeBody.result.structuredContent.matches.length, 1);
+    assert.match(codeBody.result.structuredContent.matches[0]?.context ?? "", /return message/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validate composes diagnostics with explicitly allowed npm scripts", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { check: "node -e 'process.exit(0)'" } }),
+    );
+    const handler = createMcpHandler(root, { npm: { allowedScripts: ["check"] } });
+    const response = await handler(
+      requestFor(4, "tools/call", {
+        name: "validate",
+        arguments: { level: "scripts", scripts: ["check"] },
+      }),
+    );
+    const body = (await response.json()) as {
+      result: {
+        structuredContent: {
+          ok: boolean;
+          checks: Array<{ kind: string; script?: string; ok: boolean }>;
+        };
+      };
+    };
+    assert.equal(body.result.structuredContent.ok, true);
+    assert.deepEqual(
+      body.result.structuredContent.checks.map((check) => [check.kind, check.script, check.ok]),
+      [
+        ["diagnostics", undefined, true],
+        ["npm", "check", true],
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("allowed_commands reports the active command policy", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
@@ -231,7 +610,7 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
       resources: { listChanged: true, subscribe: true },
       extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
     });
-    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.1.4" });
+    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.2.0" });
     assert.match(String(body.result.instructions), /minimum necessary tool calls/);
     assert.match(String(body.result.instructions), /Allowed npm scripts/);
   } finally {
@@ -672,7 +1051,153 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
       npmScripts: ["check", "test"],
       commands: ["git", "rg"],
     });
-    assert.equal(capabilityDocument.efficiency.preferred.orientation, "project_overview");
+    assert.equal(capabilityDocument.efficiency.preferred.orientation, "project_context");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LLM-oriented tools reduce orientation, reading, and Git round trips", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "demo",
+        version: "1.0.0",
+        scripts: { check: "tsc --noEmit", test: "node --test" },
+      }),
+    );
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "src", "demo.ts"),
+      "export function target(value: string) {\n  return value.trim();\n}\n",
+    );
+
+    const handler = createMcpHandler(root, {
+      npm: { allowedScripts: ["check"] },
+      commands: ["git"],
+    });
+
+    const contextResponse = await handler(requestFor(1, "tools/call", { name: "project_context" }));
+    const context = (await contextResponse.json()) as {
+      result: {
+        structuredContent: {
+          package: { name: string };
+          execution: { npmScripts: string[]; commands: string[] };
+        };
+      };
+    };
+    assert.equal(context.result.structuredContent.package.name, "demo");
+    assert.deepEqual(context.result.structuredContent.execution, {
+      npmScripts: ["check"],
+      commands: ["git"],
+    });
+
+    const relevantResponse = await handler(
+      requestFor(2, "tools/call", {
+        name: "read_relevant",
+        arguments: { query: "target", contextLines: 1, maxResults: 1 },
+      }),
+    );
+    const relevant = (await relevantResponse.json()) as {
+      result: {
+        structuredContent: { matches: Array<{ path: string; line: number; context: string }> };
+      };
+    };
+    assert.equal(relevant.result.structuredContent.matches[0]?.path, "src/demo.ts");
+    assert.equal(relevant.result.structuredContent.matches[0]?.line, 1);
+    assert.match(relevant.result.structuredContent.matches[0]?.context ?? "", /return value\.trim/);
+
+    const changesResponse = await handler(
+      requestFor(3, "tools/call", { name: "git_changes", arguments: { includeDiff: false } }),
+    );
+    const changes = (await changesResponse.json()) as {
+      result: { structuredContent: { status: { command: string }; diff?: unknown } };
+    };
+    assert.equal(typeof changes.result.structuredContent.status.command, "string");
+    assert.equal(changes.result.structuredContent.diff, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("locate provides bounded intent-oriented discovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-locate-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(path.join(root, "src", "demo.ts"), "export const target = 1;\n");
+    await writeFile(path.join(root, "src", "other.ts"), "export const other = 2;\n");
+
+    const handler = createMcpHandler(root);
+    const response = await handler(
+      requestFor(1, "tools/call", {
+        name: "locate",
+        arguments: { query: "target", kind: "code", maxResults: 1 },
+      }),
+    );
+    const body = (await response.json()) as {
+      result: {
+        structuredContent: {
+          kind: string;
+          count: number;
+          truncated: boolean;
+          items: Array<{ path: string }>;
+        };
+      };
+    };
+    assert.equal(body.result.structuredContent.kind, "code");
+    assert.equal(body.result.structuredContent.count, 1);
+    assert.equal(body.result.structuredContent.truncated, true);
+    assert.equal(body.result.structuredContent.items[0]?.path, "src/demo.ts");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("mutation dry-run previews without changing files", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-dry-run-"));
+  try {
+    await writeFile(path.join(root, "demo.txt"), "before\n");
+    const handler = createMcpHandler(root);
+
+    const patchResponse = await handler(
+      requestFor(1, "tools/call", {
+        name: "patch_files",
+        arguments: {
+          dryRun: true,
+          files: [{ path: "demo.txt", patches: [{ search: "before", replace: "after" }] }],
+        },
+      }),
+    );
+    assert.equal(patchResponse.status, 200);
+    assert.equal(await readFile(path.join(root, "demo.txt"), "utf8"), "before\n");
+    const patchResult = (await patchResponse.json()) as {
+      result: { structuredContent: Array<{ content: string; dryRun: boolean }> };
+    };
+    assert.equal(patchResult.result.structuredContent[0]?.content, "after\n");
+    assert.equal(patchResult.result.structuredContent[0]?.dryRun, true);
+
+    const writeResponse = await handler(
+      requestFor(2, "tools/call", {
+        name: "write_files",
+        arguments: {
+          dryRun: true,
+          files: [{ path: "new.txt", content: "new" }],
+        },
+      }),
+    );
+    assert.equal(writeResponse.status, 200);
+    await assert.rejects(access(path.join(root, "new.txt")));
+
+    const deleteResponse = await handler(
+      requestFor(3, "tools/call", {
+        name: "delete_files",
+        arguments: { dryRun: true, paths: ["demo.txt"] },
+      }),
+    );
+    assert.equal(deleteResponse.status, 200);
+    await access(path.join(root, "demo.txt"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -877,6 +1402,13 @@ test("skills/list paginates with opaque cursors", async () => {
     };
     assert.equal(secondResult.result.skills.length, 1);
     assert.equal(secondResult.result.nextCursor, undefined);
+
+    const malformed = await handler(requestFor(3, "skills/list", { cursor: "!!!" }));
+    const malformedResult = (await malformed.json()) as {
+      error: { code: number; message: string };
+    };
+    assert.equal(malformedResult.error.code, -32602);
+    assert.equal(malformedResult.error.message, "Invalid pagination cursor.");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
