@@ -178,6 +178,19 @@ Avoid allowing `sh`, `bash`, `zsh`, `cmd`, `node`, or `python` unless you intent
 
 ## Agent Skills
 
+### Agent-aware instructions and capabilities
+
+Agent Dir automatically describes how an AI agent should use the server. MCP initialization and `server/discover` return dynamically generated instructions, and `resources/list` exposes two virtual resources:
+
+```text
+agent-dir://instructions
+agent-dir://capabilities
+```
+
+The instructions emphasize efficient tool selection: targeted search before reading, bounded ranges before whole-file reads, dedicated tools before generic commands, batched related operations, narrow validation before full checks, and scoped Git inspection before full diffs. The execution policy is generated from the active profile, so changing `allowedScripts` or `commands` automatically changes what the agent is told it can execute.
+
+The capabilities resource is machine-readable and includes the running Agent Dir version, registered tool names, execution policy, and preferred/avoid tool-selection patterns. This keeps the MCP server itself as the source of truth; client-specific instruction files do not need to be maintained when Agent Dir changes.
+
 The server implements the stable MCP Skills extension (`io.modelcontextprotocol/skills`) over the standard Resources primitive. It discovers project-local `SKILL.md` files under:
 
 ```text

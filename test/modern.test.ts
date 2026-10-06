@@ -224,21 +224,16 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
       }),
     );
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      jsonrpc: "2.0",
-      id: 1,
-      result: {
-        protocolVersion: "2025-11-25",
-        capabilities: {
-          tools: { listChanged: true },
-          resources: { listChanged: true, subscribe: true },
-          extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
-        },
-        serverInfo: { name: "agent-dir", version: "0.1.3" },
-        instructions:
-          "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
-      },
+    const body = (await response.json()) as { result: Record<string, unknown> };
+    assert.equal(body.result.protocolVersion, "2025-11-25");
+    assert.deepEqual(body.result.capabilities, {
+      tools: { listChanged: true },
+      resources: { listChanged: true, subscribe: true },
+      extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
     });
+    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.1.3" });
+    assert.match(String(body.result.instructions), /minimum necessary tool calls/);
+    assert.match(String(body.result.instructions), /Allowed npm scripts/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -631,6 +626,56 @@ test("invalid x-mcp-header annotations are rejected", () => {
       ),
     /Duplicate x-mcp-header/,
   );
+});
+
+test("Agent Dir instruction resources reflect the active execution policy", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
+  try {
+    const handler = createMcpHandler(root, {
+      npm: { allowedScripts: ["check", "test"] },
+      commands: ["git", "rg"],
+    });
+    const listed = await handler(requestFor(1, "resources/list"));
+    const listedResult = (await listed.json()) as { result: { resources: Array<{ uri: string }> } };
+    assert.ok(
+      listedResult.result.resources.some((resource) => resource.uri === "agent-dir://instructions"),
+    );
+    assert.ok(
+      listedResult.result.resources.some((resource) => resource.uri === "agent-dir://capabilities"),
+    );
+
+    const instructions = await handler(
+      requestFor(2, "resources/read", { uri: "agent-dir://instructions" }),
+    );
+    const instructionsResult = (await instructions.json()) as {
+      result: { contents: Array<{ text: string }> };
+    };
+    const instructionText = instructionsResult.result.contents[0]?.text;
+    assert.ok(instructionText);
+    assert.match(instructionText, /minimum necessary tool calls/);
+    assert.ok(instructionText.includes("- check\n- test"));
+    assert.ok(instructionText.includes("- git\n- rg"));
+
+    const capabilities = await handler(
+      requestFor(3, "resources/read", { uri: "agent-dir://capabilities" }),
+    );
+    const capabilitiesResult = (await capabilities.json()) as {
+      result: { contents: Array<{ text: string }> };
+    };
+    const capabilityText = capabilitiesResult.result.contents[0]?.text;
+    assert.ok(capabilityText);
+    const capabilityDocument = JSON.parse(capabilityText) as {
+      execution: { npmScripts: string[]; commands: string[] };
+      efficiency: { preferred: { orientation: string } };
+    };
+    assert.deepEqual(capabilityDocument.execution, {
+      npmScripts: ["check", "test"],
+      commands: ["git", "rg"],
+    });
+    assert.equal(capabilityDocument.efficiency.preferred.orientation, "project_overview");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("skills preserve nested URI paths and complete manifests", async () => {

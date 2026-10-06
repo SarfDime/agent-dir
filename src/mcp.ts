@@ -51,6 +51,8 @@ const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
 const CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
 const PAGE_SIZE = 50;
+const INSTRUCTIONS_URI = "agent-dir://instructions";
+const CAPABILITIES_URI = "agent-dir://capabilities";
 const SUBSCRIPTION_ID_META = "io.modelcontextprotocol/subscriptionId";
 
 interface Subscription {
@@ -119,7 +121,7 @@ const commandResultSchema = objectOutput(
 const baseTools: ToolDefinition[] = [
   tool(
     "list_files",
-    "List all visible project files and directories recursively up to the server's discovery depth.",
+    "List all visible project files and directories recursively up to the server's discovery depth. Prefer project_overview, find_files, search_code, or list_dirs for targeted discovery; use this only when broad recursive discovery is actually needed.",
     {},
     arrayOutput(fileEntrySchema),
   ),
@@ -156,7 +158,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "read_files",
-    "Read one or more UTF-8 project files in one call.",
+    "Read one or more UTF-8 project files in one call. Prefer read_range when only a bounded section is needed; batch related files here to reduce round trips.",
     { paths: { type: "array", items: pathSchema, minItems: 1 } },
     arrayOutput(objectOutput({ path: stringSchema, content: stringSchema }, ["path", "content"])),
     ["paths"],
@@ -178,7 +180,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "patch_files",
-    "Apply exact text replacements to one or more UTF-8 files.",
+    "Apply exact text replacements to one or more UTF-8 files. Prefer this for targeted edits instead of rewriting whole files; batch related patches in one call.",
     {
       files: {
         type: "array",
@@ -223,7 +225,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_files",
-    "Search text across visible project files.",
+    "Search text across visible project files. Prefer this over broad file reads; use search_code for source-only searches and keep maxResults tight.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
@@ -234,7 +236,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_files",
-    "Find project files by a simple glob pattern using * and ?.",
+    "Find project files by a simple glob pattern using * and ?. Prefer this over list_files when you know the filename pattern.",
     {
       pattern: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -244,7 +246,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search source-like project files for text or a regular expression.",
+    "Search source-like project files for text or a regular expression. Prefer this over reading files broadly; start with a narrow query and expand only if needed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
@@ -255,7 +257,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_symbol",
-    "Find likely symbol definitions across source files.",
+    "Find likely symbol definitions across source files. Prefer this over reading whole modules when locating an implementation.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
@@ -274,7 +276,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_definition",
-    "Find likely definitions of a symbol.",
+    "Find likely definitions of a symbol. Use this before reading a large file when you need one implementation.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
@@ -293,7 +295,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_references",
-    "Find source-code references to a symbol.",
+    "Find source-code references to a symbol. Use this instead of searching entire files when tracing usage of a known symbol.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -333,7 +335,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "git_status",
-    "Show Git working-tree status and branch information.",
+    "Show Git working-tree status and branch information. Use this as the lightweight first Git check; do not run a full diff unless changes need inspection.",
     {},
     commandResultSchema,
   ),
@@ -373,19 +375,19 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "git_diff",
-    "Show a read-only Git diff, optionally staged or limited to a path.",
+    "Show a read-only Git diff, optionally staged or limited to a path. Prefer path-scoped or staged diffs over dumping the entire repository diff.",
     { staged: { type: "boolean", default: false }, path: pathSchema },
     commandResultSchema,
   ),
   tool(
     "git_log",
-    "Show recent Git commits in a compact, read-only form.",
+    "Show recent Git commits in a compact, read-only form. Keep the limit small and scope by path when history context is local.",
     { limit: { type: "integer", minimum: 1, maximum: 200, default: 20 }, path: pathSchema },
     commandResultSchema,
   ),
   tool(
     "project_overview",
-    "Summarize project structure, languages, package managers, project metadata files, and Git state.",
+    "Summarize project structure, languages, package managers, project metadata files, and Git state in one lightweight call. Prefer this before broad discovery.",
     {},
     objectOutput(
       {
@@ -427,7 +429,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "diagnostics",
-    "Run project-independent diagnostics without invoking tests, linters, or typecheckers.",
+    "Run lightweight project-independent diagnostics without invoking tests, linters, or typecheckers. Prefer this before expensive validation when checking basic file/JSON/conflict issues.",
     { maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 } },
     arrayOutput(
       objectOutput(
@@ -444,14 +446,14 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "run_npm_batch",
-    "Run one or more explicitly allowed npm scripts sequentially.",
+    "Run one or more explicitly allowed npm scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
     { scripts: { type: "array", items: stringSchema, minItems: 1 } },
     arrayOutput(commandResultSchema),
     ["scripts"],
   ),
   tool(
     "run_command_batch",
-    "Run one or more explicitly allowed commands sequentially without a shell.",
+    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead.",
     {
       commands: {
         type: "array",
@@ -575,8 +577,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
           protocolVersion: LEGACY_PROTOCOL_VERSION,
           capabilities: capabilities(),
           serverInfo: SERVER_INFO,
-          instructions:
-            "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
+          instructions: buildAgentInstructions(npmAllowed, allowedCommands),
         },
       });
     }
@@ -623,8 +624,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
               supportedVersions: [PROTOCOL_VERSION],
               capabilities: capabilities(),
               _meta: SERVER_INFO_META,
-              instructions:
-                "Expose and edit the project through secure filesystem tools, code intelligence, read-only Git inspection, project metadata, diagnostics, and project-local Agent Skills.",
+              instructions: buildAgentInstructions(npmAllowed, allowedCommands),
               ttlMs: 0,
               cacheScope: "private",
             },
@@ -684,10 +684,26 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
           });
         }
         case "resources/list": {
-          const resources = (await listSkillResources(root)).map((item) => ({
-            ...item,
-            description: "Agent Skill resource",
-          }));
+          const resources = [
+            {
+              uri: INSTRUCTIONS_URI,
+              name: "Agent Dir usage instructions",
+              description:
+                "Dynamically generated, efficiency-focused instructions for using this Agent Dir server.",
+              mimeType: "text/markdown",
+            },
+            {
+              uri: CAPABILITIES_URI,
+              name: "Agent Dir capabilities",
+              description:
+                "Machine-readable current tools and execution policy for this Agent Dir server.",
+              mimeType: "application/json",
+            },
+            ...(await listSkillResources(root)).map((item) => ({
+              ...item,
+              description: "Agent Skill resource",
+            })),
+          ];
           const page = paginate(resources, params.cursor);
           return json({
             jsonrpc: "2.0",
@@ -710,6 +726,46 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
               "resources/read uri must be a non-empty string.",
               400,
             );
+          if (params.uri === INSTRUCTIONS_URI)
+            return json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                resultType: "complete",
+                contents: [
+                  {
+                    uri: INSTRUCTIONS_URI,
+                    mimeType: "text/markdown",
+                    text: buildAgentInstructions(npmAllowed, allowedCommands),
+                  },
+                ],
+                ttlMs: 0,
+                cacheScope: "private",
+                _meta: SERVER_INFO_META,
+              },
+            });
+          if (params.uri === CAPABILITIES_URI)
+            return json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                resultType: "complete",
+                contents: [
+                  {
+                    uri: CAPABILITIES_URI,
+                    mimeType: "application/json",
+                    text: JSON.stringify(
+                      buildAgentCapabilities(npmAllowed, allowedCommands),
+                      null,
+                      2,
+                    ),
+                  },
+                ],
+                ttlMs: 0,
+                cacheScope: "private",
+                _meta: SERVER_INFO_META,
+              },
+            });
           const value = await readSkillResource(root, params.uri);
           return json({
             jsonrpc: "2.0",
@@ -845,6 +901,44 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
   };
 
   return handler;
+}
+
+function buildAgentInstructions(npmAllowed: string[], allowedCommands: string[]): string {
+  const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
+  const commands = allowedCommands.length
+    ? allowedCommands.map((item) => `- ${item}`).join("\n")
+    : "- none";
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_overview for initial orientation instead of list_files plus package/config reads.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nOnly use commands from the execution policy. Do not attempt to bypass it with shells or alternate executables.\n\n## Tool selection\n- Discovery: project_overview > find_files/list_dirs > list_files.\n- Code location: find_definition/find_symbol > search_code > broad file reads.\n- File reading: read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.`;
+}
+
+function buildAgentCapabilities(
+  npmAllowed: string[],
+  allowedCommands: string[],
+): Record<string, unknown> {
+  return {
+    version: packageVersion,
+    tools: baseTools.map((item) => item.name),
+    resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
+    execution: { npmScripts: [...npmAllowed], commands: [...allowedCommands] },
+    efficiency: {
+      preferred: {
+        orientation: "project_overview",
+        discovery: ["find_files", "list_dirs", "search_code"],
+        symbolNavigation: ["find_definition", "find_symbol", "find_references"],
+        reading: ["read_range", "read_files"],
+        editing: ["patch_files", "write_files"],
+        validation: ["diagnostics", "targeted npm script"],
+        gitInspection: ["git_status", "git_diff", "git_log"],
+      },
+      avoid: [
+        "recursive discovery when targeted search is enough",
+        "whole-file reads when a line range is enough",
+        "full-repository diffs when a path-scoped diff is enough",
+        "expensive validation when a targeted check answers the question",
+        "generic command execution when a dedicated Agent Dir tool exists",
+      ],
+    },
+  };
 }
 
 function capabilities(): Record<string, unknown> {
