@@ -2,6 +2,10 @@
   "name": "agent-dir",
   "version": "0.1.0",
   "description": "Expose a local project to an AI agent through authenticated MCP, filesystem tools, and allowlisted development commands",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SarfDime/agent-dir.git"
+  },
   "type": "module",
   "bin": {
     "agent-dir": "./dist/bin/agent-dir.js"
