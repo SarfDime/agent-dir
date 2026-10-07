@@ -1,17 +1,34 @@
 {
-  "branches": ["main"],
+  "branches": [
+    "main"
+  ],
   "tagFormat": "v${version}",
   "plugins": [
-    "@semantic-release/commit-analyzer",
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "releaseRules": [
+          {
+            "type": "fix",
+            "scope": "ci",
+            "release": false
+          }
+        ]
+      }
+    ],
     "@semantic-release/release-notes-generator",
     "@semantic-release/npm",
     "@semantic-release/github",
     [
       "@semantic-release/git",
       {
-        "assets": ["package.json", "package-lock.json"],
+        "assets": [
+          "package.json",
+          "package-lock.json"
+        ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
       }
     ]
-  ]
+  ],
+  "repositoryUrl": "git@github.com:SarfDime/agent-dir.git"
 }
