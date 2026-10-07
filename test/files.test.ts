@@ -21,11 +21,13 @@ test("authentication accepts Bearer and query tokens on all endpoints", () => {
   });
   const query = new Request("https://example.test/mcp?token=secret");
   const wrong = new Request("https://example.test/mcp?token=wrong");
+  const wrongLength = new Request("https://example.test/mcp?token=x");
   const rest = new Request("https://example.test/__tree?token=secret");
 
   assert.equal(authenticate(bearer, "secret"), true);
   assert.equal(authenticate(query, "secret"), true);
   assert.equal(authenticate(wrong, "secret"), false);
+  assert.equal(authenticate(wrongLength, "secret"), false);
   assert.equal(authenticate(rest, "secret"), true);
 });
 

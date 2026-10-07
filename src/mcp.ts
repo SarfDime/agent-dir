@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
+import { TelemetryRecorder } from "./telemetry/recorder.js";
+import type { TelemetryConfig } from "./telemetry/types.js";
 import {
   findDefinition,
   findExports,
@@ -695,12 +698,36 @@ function tool(
 interface McpHandler {
   (request: Request): Promise<Response>;
   closeSubscriptions: () => void;
+  telemetrySnapshot: () => ReturnType<TelemetryRecorder["snapshot"]>;
 }
 
-export function createMcpHandler(root: string, commandConfig: CommandConfig = {}): McpHandler {
+export function createMcpHandler(
+  root: string,
+  commandConfig: CommandConfig = {},
+  telemetry: TelemetryConfig = { level: "none" },
+): McpHandler {
   const codeGraph = new CodeGraphIntegration(root);
+  const telemetryRecorder = new TelemetryRecorder({
+    level: telemetry.level,
+    persist: telemetry.persist ?? false,
+    ...(telemetry.configId ? { configId: telemetry.configId } : {}),
+    sessionId: telemetry.sessionId ?? randomUUID(),
+  });
+  let sessionStartedAt: number | undefined;
+  let sessionLastActivityAt: number | undefined;
+  let sessionActiveRequestDurationMs = 0;
+  let sessionRequestCount = 0;
+  let sessionToolCallCount = 0;
+  let sessionCommandCallCount = 0;
+  let sessionRecorded = false;
+  const telemetryProjectPromise =
+    telemetry.level === "detailed"
+      ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
+      : undefined;
   const npmAllowed = commandConfig.npm?.allowedScripts ?? [];
   const allowedCommands = commandConfig.commands ?? [];
+  const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
+  const gitEnabled = commandConfig.git ?? allowedCommands.includes("git");
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -734,21 +761,66 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
   };
 
   const handler = async (request: Request): Promise<Response> => {
-    let message: JsonRpcRequest;
+    const requestStartedAt = performance.now();
+    if (sessionStartedAt === undefined) sessionStartedAt = requestStartedAt;
+    sessionRequestCount += 1;
+    const telemetryProject = telemetryProjectPromise ? await telemetryProjectPromise : undefined;
+    let message: JsonRpcRequest | undefined;
+    let mcpSuccess = false;
+    let runtime: import("./telemetry/types.js").TelemetryRuntimeContext | undefined;
+    let telemetryRequestErrorCategory: string | undefined;
+    const recordMcpRequest = (method = message?.method ?? "unknown") => {
+      telemetryRecorder.record(
+        {
+          event: "mcp_request",
+          method,
+          success: mcpSuccess,
+          durationMs: performance.now() - requestStartedAt,
+          ...(telemetryRequestErrorCategory
+            ? { errorCategory: telemetryRequestErrorCategory }
+            : {}),
+        },
+        runtime,
+        telemetryProject,
+      );
+    };
     try {
-      message = (await request.json()) as JsonRpcRequest;
+      const parsed = await request.json();
+      if (!isRecord(parsed)) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest("unknown");
+        return jsonRpcError(null, -32600, "Invalid Request", 400);
+      }
+      message = parsed as unknown as JsonRpcRequest;
     } catch {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest("unknown");
       return jsonRpcError(null, -32700, "Parse error", 400);
     }
-    if (message.jsonrpc !== "2.0" || typeof message.method !== "string")
+    if (message.jsonrpc !== "2.0" || typeof message.method !== "string") {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest(typeof message?.method === "string" ? message.method : "unknown");
       return jsonRpcError(message.id ?? null, -32600, "Invalid Request", 400);
+    }
     const hasId = Object.hasOwn(message, "id");
-    if (hasId && !isValidRequestId(message.id))
+    if (hasId && !isValidRequestId(message.id)) {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest(message.method);
       return jsonRpcError(null, -32600, "Invalid Request", 400);
-    if (!hasId) return new Response(null, { status: 202 });
-    if (message.params !== undefined && !isRecord(message.params))
+    }
+    if (!hasId) {
+      mcpSuccess = message.method.startsWith("notifications/");
+      if (!mcpSuccess) telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
+      return new Response(null, { status: 202 });
+    }
+    if (message.params !== undefined && !isRecord(message.params)) {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
+    }
     const params = message.params ?? {};
+    runtime = telemetryRuntime(params);
     const requestedProtocolVersion =
       typeof params.protocolVersion === "string" ? params.protocolVersion : undefined;
     const legacyInitialize = message.method === "initialize";
@@ -759,20 +831,31 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
 
     if (legacyInitialize) {
       const protocolHeader = request.headers.get("mcp-protocol-version");
-      if (protocolHeader !== null && protocolHeader !== LEGACY_PROTOCOL_VERSION)
+      if (protocolHeader !== null && protocolHeader !== LEGACY_PROTOCOL_VERSION) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
         return jsonRpcError(
           message.id ?? null,
           -32020,
           "MCP-Protocol-Version does not match the initialize protocol version.",
           400,
         );
-      if (requestedProtocolVersion !== LEGACY_PROTOCOL_VERSION)
+      }
+      if (requestedProtocolVersion !== LEGACY_PROTOCOL_VERSION) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
         return jsonRpcError(message.id ?? null, -32602, "Unsupported protocol version.", 400, {
           supported: [LEGACY_PROTOCOL_VERSION],
           requested: requestedProtocolVersion,
         });
-      if (!isRecord(params.capabilities) || !isRecord(params.clientInfo))
+      }
+      if (!isRecord(params.capabilities) || !isRecord(params.clientInfo)) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
         return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
+      }
+      mcpSuccess = true;
+      recordMcpRequest();
       return json({
         jsonrpc: "2.0",
         id: message.id,
@@ -783,6 +866,8 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
           instructions: buildAgentInstructions(
             npmAllowed,
             allowedCommands,
+            blacklistedCommands,
+            gitEnabled,
             await codeGraph.capability(),
           ),
         },
@@ -790,39 +875,55 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
     }
 
     if (legacyRequest) {
-      if (request.headers.get("mcp-protocol-version") !== LEGACY_PROTOCOL_VERSION)
+      if (request.headers.get("mcp-protocol-version") !== LEGACY_PROTOCOL_VERSION) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
         return jsonRpcError(
           message.id ?? null,
           -32020,
           "MCP-Protocol-Version must be 2025-11-25 for legacy requests.",
           400,
         );
-    } else if (!isRecord(params._meta))
+      }
+    } else if (!isRecord(params._meta)) {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
       return jsonRpcError(message.id ?? null, -32602, "Missing required request metadata.", 400);
+    }
     const meta = isRecord(params._meta) ? params._meta : {};
     const version = meta[PROTOCOL_META];
-    if (!legacyRequest && typeof version !== "string")
+    if (!legacyRequest && typeof version !== "string") {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
       return jsonRpcError(
         message.id ?? null,
         -32602,
         "Missing required protocol version metadata.",
         400,
       );
-    if (!legacyRequest && version !== PROTOCOL_VERSION)
+    }
+    if (!legacyRequest && version !== PROTOCOL_VERSION) {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
       return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
         supported: [PROTOCOL_VERSION],
         requested: version,
       });
-    if (!legacyRequest && !isRecord(meta[CLIENT_CAPABILITIES_META]))
+    }
+    if (!legacyRequest && !isRecord(meta[CLIENT_CAPABILITIES_META])) {
+      telemetryRequestErrorCategory = "invalid_input";
+      recordMcpRequest();
       return jsonRpcError(
         message.id ?? null,
         -32602,
         "Missing required client capabilities metadata.",
         400,
       );
+    }
     try {
       switch (message.method) {
         case "server/discover":
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -834,6 +935,8 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
               instructions: buildAgentInstructions(
                 npmAllowed,
                 allowedCommands,
+                blacklistedCommands,
+                gitEnabled,
                 await codeGraph.capability(),
               ),
               codeGraph: await codeGraph.capability(),
@@ -842,7 +945,8 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
             },
           });
         case "tools/list": {
-          const page = paginate(await availableTools(codeGraph), params.cursor);
+          const page = paginate(await availableTools(codeGraph, gitEnabled), params.cursor);
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -857,46 +961,127 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
           });
         }
         case "tools/call": {
-          if (typeof params.name !== "string" || params.name.length === 0)
+          if (typeof params.name !== "string" || params.name.length === 0) {
+            telemetryRequestErrorCategory = "invalid_input";
             return jsonRpcError(
               message.id ?? null,
               -32602,
               "tools/call name must be a non-empty string.",
               400,
             );
+          }
           const toolName = params.name;
-          const toolDefinition = (await availableTools(codeGraph)).find(
+          const toolDefinition = (await availableTools(codeGraph, gitEnabled)).find(
             (item) => item.name === toolName,
           );
           if (!toolDefinition) throw new Error(`Unknown tool: ${toolName}`);
-          if (params.arguments !== undefined && !isRecord(params.arguments))
+          if (params.arguments !== undefined && !isRecord(params.arguments)) {
+            telemetryRequestErrorCategory = "invalid_input";
             return jsonRpcError(
               message.id ?? null,
               -32602,
               "tools/call arguments must be an object.",
               400,
             );
+          }
           const argumentsValue = params.arguments ?? {};
           const headerError = validateMcpParamHeaders(
             toolDefinition.inputSchema,
             argumentsValue,
             request.headers,
           );
-          if (headerError) return jsonRpcError(message.id ?? null, -32020, headerError, 400);
-          return json({
-            jsonrpc: "2.0",
-            id: message.id,
-            result: await callTool(
+          if (headerError) {
+            telemetryRequestErrorCategory = "invalid_input";
+            return jsonRpcError(message.id ?? null, -32020, headerError, 400);
+          }
+          sessionToolCallCount += 1;
+          const startedAt = performance.now();
+          try {
+            const result = await callTool(
               toolName,
               argumentsValue,
               root,
               npmAllowed,
               allowedCommands,
+              blacklistedCommands,
+              gitEnabled,
               notify,
               request.signal,
               codeGraph,
-            ),
-          });
+            );
+            const durationMs = performance.now() - startedAt;
+            const count = resultCount(result);
+            const runtime = telemetryRuntime(params);
+            telemetryRecorder.record(
+              {
+                event: "tool_call",
+                tool: toolName,
+                success: true,
+                durationMs,
+                inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
+                outputBytes: Buffer.byteLength(JSON.stringify(result), "utf8"),
+                ...(count === undefined ? {} : { resultCount: count }),
+                ...toolTelemetryMetrics(toolName, result),
+              },
+              runtime,
+              telemetryProject,
+            );
+            const command = commandTelemetryDescriptor(toolName);
+            if (command) {
+              sessionCommandCallCount += 1;
+              telemetryRecorder.record(
+                {
+                  event: "command_call",
+                  commandFamily: command.family,
+                  operation: command.operation,
+                  success: true,
+                  durationMs,
+                  outputBytes: Buffer.byteLength(JSON.stringify(result), "utf8"),
+                },
+                runtime,
+                telemetryProject,
+              );
+            }
+            mcpSuccess = true;
+            return json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result,
+            });
+          } catch (error) {
+            const durationMs = performance.now() - startedAt;
+            const runtime = telemetryRuntime(params);
+            const errorCategory = classifyTelemetryError(error);
+            telemetryRecorder.record(
+              {
+                event: "tool_call",
+                tool: toolName,
+                success: false,
+                durationMs,
+                inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
+                errorCategory,
+              },
+              runtime,
+              telemetryProject,
+            );
+            const command = commandTelemetryDescriptor(toolName);
+            if (command) {
+              sessionCommandCallCount += 1;
+              telemetryRecorder.record(
+                {
+                  event: "command_call",
+                  commandFamily: command.family,
+                  operation: command.operation,
+                  success: false,
+                  durationMs,
+                  errorCategory,
+                },
+                runtime,
+                telemetryProject,
+              );
+            }
+            throw error;
+          }
         }
         case "resources/list": {
           const resources = [
@@ -920,6 +1105,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
             })),
           ];
           const page = paginate(resources, params.cursor);
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -941,7 +1127,8 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
               "resources/read uri must be a non-empty string.",
               400,
             );
-          if (params.uri === INSTRUCTIONS_URI)
+          if (params.uri === INSTRUCTIONS_URI) {
+            mcpSuccess = true;
             return json({
               jsonrpc: "2.0",
               id: message.id,
@@ -954,6 +1141,8 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
                     text: buildAgentInstructions(
                       npmAllowed,
                       allowedCommands,
+                      blacklistedCommands,
+                      gitEnabled,
                       await codeGraph.capability(),
                     ),
                   },
@@ -963,7 +1152,9 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
                 _meta: SERVER_INFO_META,
               },
             });
-          if (params.uri === CAPABILITIES_URI)
+          }
+          if (params.uri === CAPABILITIES_URI) {
+            mcpSuccess = true;
             return json({
               jsonrpc: "2.0",
               id: message.id,
@@ -974,7 +1165,12 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
                     uri: CAPABILITIES_URI,
                     mimeType: "application/json",
                     text: JSON.stringify(
-                      buildAgentCapabilities(npmAllowed, allowedCommands),
+                      buildAgentCapabilities(
+                        npmAllowed,
+                        allowedCommands,
+                        blacklistedCommands,
+                        gitEnabled,
+                      ),
                       null,
                       2,
                     ),
@@ -985,7 +1181,9 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
                 _meta: SERVER_INFO_META,
               },
             });
+          }
           const value = await readSkillResource(root, params.uri);
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -1008,6 +1206,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
             );
           const resources = await readSkillDirectory(root, params.uri);
           const page = paginate(resources, params.cursor);
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -1023,6 +1222,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
         }
         case "skills/list": {
           const page = paginate(await listSkills(root), params.cursor);
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -1038,6 +1238,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
         }
         case "subscriptions/listen": {
           const notifications = subscriptionNotifications(params.notifications);
+          mcpSuccess = true;
           return subscriptionResponse(message.id, notifications, subscriptions);
         }
         case "skills/get":
@@ -1048,6 +1249,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
               "skills/get uri must be a non-empty string.",
               400,
             );
+          mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
             id: message.id,
@@ -1060,6 +1262,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
             },
           });
         default:
+          telemetryRequestErrorCategory = "not_found";
           return jsonRpcError(
             message.id ?? null,
             -32601,
@@ -1068,6 +1271,7 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
           );
       }
     } catch (error) {
+      telemetryRequestErrorCategory = classifyTelemetryError(error);
       if (message.method === "tools/call")
         return json(
           {
@@ -1099,10 +1303,37 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
         error instanceof Error ? error.message : String(error),
         code === -32602 ? 400 : 500,
       );
+    } finally {
+      const requestDurationMs = performance.now() - requestStartedAt;
+      sessionActiveRequestDurationMs += requestDurationMs;
+      sessionLastActivityAt = performance.now();
+      recordMcpRequest();
     }
   };
 
+  handler.telemetrySnapshot = () => telemetryRecorder.snapshot();
+
   handler.closeSubscriptions = () => {
+    if (!sessionRecorded && sessionRequestCount > 0 && telemetry.level !== "none") {
+      sessionRecorded = true;
+      telemetryRecorder.record({
+        event: "session",
+        wallClockDurationMs: Math.max(
+          0,
+          (sessionLastActivityAt ?? performance.now()) - (sessionStartedAt ?? performance.now()),
+        ),
+        activeRequestDurationMs: sessionActiveRequestDurationMs,
+        idleGapDurationMs: Math.max(
+          0,
+          (sessionLastActivityAt ?? performance.now()) -
+            (sessionStartedAt ?? performance.now()) -
+            sessionActiveRequestDurationMs,
+        ),
+        requestCount: sessionRequestCount,
+        toolCallCount: sessionToolCallCount,
+        commandCallCount: sessionCommandCallCount,
+      });
+    }
     for (const subscription of subscriptions) {
       writeSse(subscription.controller, {
         jsonrpc: "2.0",
@@ -1124,23 +1355,33 @@ export function createMcpHandler(root: string, commandConfig: CommandConfig = {}
   return handler;
 }
 
-async function availableTools(codeGraph: CodeGraphIntegration): Promise<ToolDefinition[]> {
+async function availableTools(
+  codeGraph: CodeGraphIntegration,
+  gitEnabled: boolean,
+): Promise<ToolDefinition[]> {
   const capability = await codeGraph.capability();
-  return capability.status === "available" ||
+  const tools =
+    capability.status === "available" ||
     capability.status === "startup_failed" ||
     capability.status === "runtime_failed"
-    ? [...baseTools, codeGraphTool]
-    : baseTools;
+      ? [...baseTools, codeGraphTool]
+      : baseTools;
+  return gitEnabled ? tools : tools.filter((item) => !item.name.startsWith("git_"));
 }
 
 function buildAgentInstructions(
   npmAllowed: string[],
   allowedCommands: string[],
+  blacklistedCommands: string[],
+  gitEnabled: boolean,
   codeGraph: CodeGraphCapability,
 ): string {
   const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
   const commands = allowedCommands.length
     ? allowedCommands.map((item) => `- ${item}`).join("\n")
+    : "- none";
+  const blacklist = blacklistedCommands.length
+    ? blacklistedCommands.map((item) => `- ${item}`).join("\n")
     : "- none";
   const codeGraphSection =
     codeGraph.status === "available" ||
@@ -1151,18 +1392,27 @@ function buildAgentInstructions(
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. Use project_overview when package metadata is unnecessary.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges. Use read_relevant when one call can locate and return the needed source context.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nOnly use commands from the execution policy. Do not attempt to bypass it with shells or alternate executables.\n\n## Tool selection\n- Discovery: project_context > locate > project_overview > find_files/list_dirs > list_files.\n- Code location: inspect_symbol > find_definition/find_symbol > locate > search_code > broad file reads.\n- File reading: read_relevant > read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_changes > git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. Use project_overview when package metadata is unnecessary.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges. Use read_relevant when one call can locate and return the needed source context.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git capability\nDedicated Git MCP tools are ${gitEnabled ? "enabled" : "disabled"} for this profile.\n\n## Tool selection\n- Discovery: project_context > locate > project_overview > find_files/list_dirs > list_files.\n- Code location: inspect_symbol > find_definition/find_symbol > locate > search_code > broad file reads.\n- File reading: read_relevant > read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_changes > git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function buildAgentCapabilities(
   npmAllowed: string[],
   allowedCommands: string[],
+  blacklistedCommands: string[],
+  gitEnabled: boolean,
 ): Record<string, unknown> {
   return {
     version: packageVersion,
-    tools: baseTools.map((item) => item.name),
+    tools: baseTools
+      .filter((item) => gitEnabled || !item.name.startsWith("git_"))
+      .map((item) => item.name),
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
-    execution: { npmScripts: [...npmAllowed], commands: [...allowedCommands] },
+    execution: {
+      npmScripts: [...npmAllowed],
+      commands: [...allowedCommands],
+      blacklistedCommands: [...blacklistedCommands],
+      git: gitEnabled,
+    },
     efficiency: {
       preferred: {
         orientation: "project_context",
@@ -1200,6 +1450,8 @@ async function callTool(
   root: string,
   npmAllowed: string[],
   allowedCommands: string[],
+  blacklistedCommands: string[],
+  gitEnabled: boolean,
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1219,6 +1471,10 @@ async function callTool(
       args.maxFiles === undefined ? undefined : Number(args.maxFiles),
     );
   }
+  if (name.startsWith("git_") && !gitEnabled) {
+    throw new Error("Dedicated Git tools are disabled for this profile.");
+  }
+
   switch (name) {
     case "list_files": {
       const items = await listFiles(root);
@@ -1775,6 +2031,7 @@ async function callTool(
       structuredContent = {
         npmScripts: [...npmAllowed],
         commands: [...allowedCommands],
+        blacklistedCommands: [...blacklistedCommands],
       };
       break;
     case "file_info":
@@ -1818,6 +2075,7 @@ async function callTool(
           String(item.command),
           Array.isArray(item.args) ? item.args.map(String) : [],
           allowedCommands,
+          blacklistedCommands,
           120000,
           signal,
         );
@@ -1976,6 +2234,117 @@ function completeToolResult(structuredContent: unknown): Record<string, unknown>
     _meta: SERVER_INFO_META,
   };
 }
+function telemetryRuntime(
+  params: Record<string, unknown>,
+): import("./telemetry/types.js").TelemetryRuntimeContext {
+  const clientInfo = isRecord(params.clientInfo) ? params.clientInfo : undefined;
+  return {
+    agentDirVersion: packageVersion,
+    nodeMajor: Number(process.versions.node.split(".")[0]),
+    os:
+      process.platform === "darwin"
+        ? "macos"
+        : process.platform === "linux"
+          ? "linux"
+          : process.platform === "win32"
+            ? "windows"
+            : "other",
+    arch: process.arch,
+    ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
+    ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
+  };
+}
+
+function toolTelemetryMetrics(
+  toolName: string,
+  result: Record<string, unknown>,
+): { affectedFiles?: number; truncated?: boolean; paginated?: boolean } {
+  const structured = result.structuredContent;
+  if (!Array.isArray(structured) && !isRecord(structured)) return {};
+  const paths = new Set<string>();
+  let truncated = false;
+  let paginated = false;
+  const visit = (value: unknown): void => {
+    if (!isRecord(value)) return;
+    if (typeof value.path === "string") paths.add(value.path);
+    if (value.truncated === true) truncated = true;
+    if (value.nextCursor !== undefined) paginated = true;
+    for (const child of Object.values(value)) {
+      if (Array.isArray(child)) for (const item of child) visit(item);
+      else if (isRecord(child)) visit(child);
+    }
+  };
+  visit(structured);
+  return {
+    ...(paths.size > 0 && /^(write|patch|delete|read|file|git_changes|inspect)/.test(toolName)
+      ? { affectedFiles: paths.size }
+      : {}),
+    ...(truncated ? { truncated: true } : {}),
+    ...(paginated ? { paginated: true } : {}),
+  };
+}
+
+function commandTelemetryDescriptor(
+  toolName: string,
+): { family: string; operation: string } | undefined {
+  if (toolName === "run_npm_batch") return { family: "npm", operation: "batch" };
+  if (toolName === "run_command_batch") return { family: "command", operation: "batch" };
+  if (toolName === "validate") return { family: "npm", operation: "validate" };
+  if (toolName.startsWith("git_"))
+    return { family: "git", operation: toolName.slice("git_".length) };
+  return undefined;
+}
+
+async function buildTelemetryProjectContext(
+  root: string,
+  codeGraph: CodeGraphIntegration,
+): Promise<import("./telemetry/types.js").TelemetryProjectContext> {
+  const overview = await projectOverview(root);
+  const extension = overview.languages[0]?.extension;
+  const language =
+    extension === ".ts" || extension === ".tsx"
+      ? "typescript"
+      : extension === ".js" || extension === ".jsx"
+        ? "javascript"
+        : extension === ".py"
+          ? "python"
+          : extension === ".go"
+            ? "go"
+            : extension === ".rs"
+              ? "rust"
+              : extension === ".java"
+                ? "java"
+                : undefined;
+  const packageManager = overview.packageManagers[0];
+  const projectSize = overview.files < 100 ? "small" : overview.files < 1000 ? "medium" : "large";
+  const capability = await codeGraph.capability();
+  return {
+    ...(language ? { language } : {}),
+    ...(packageManager && ["npm", "pnpm", "yarn", "bun"].includes(packageManager)
+      ? { packageManager: packageManager as "npm" | "pnpm" | "yarn" | "bun" }
+      : {}),
+    hasGit: overview.git.available,
+    hasCodegraph: capability.installed && capability.indexed,
+    projectSize,
+  };
+}
+
+function resultCount(result: Record<string, unknown>): number | undefined {
+  const structured = result.structuredContent;
+  return Array.isArray(structured) ? structured.length : undefined;
+}
+
+function classifyTelemetryError(error: unknown): string {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.includes("not found")) return "not_found";
+  if (message.includes("invalid") || message.includes("must be")) return "invalid_input";
+  if (message.includes("blocked") || message.includes("not allowed")) return "authorization";
+  if (message.includes("timeout") || message.includes("timed out")) return "timeout";
+  if (message.includes("authentication") || message.includes("unauthorized"))
+    return "authentication";
+  return "execution";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

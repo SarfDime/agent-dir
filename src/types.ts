@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import type { TelemetryConfig } from "./telemetry/types.js";
 
 export interface NpmConfig {
   allowedScripts: string[];
@@ -12,16 +13,21 @@ export interface Profile {
   token?: string;
   npm?: NpmConfig;
   commands?: string[];
+  blacklistedCommands?: string[];
+  git?: boolean;
 }
 
 export interface AgentConfig {
   version: 1;
   profiles: Record<string, Profile>;
+  telemetry?: TelemetryConfig;
 }
 
 export interface CommandConfig {
   npm?: NpmConfig;
   commands?: string[];
+  blacklistedCommands?: string[];
+  git?: boolean;
 }
 
 export interface ServerOptions {
@@ -29,6 +35,7 @@ export interface ServerOptions {
   port: number;
   token: string;
   commandConfig?: CommandConfig;
+  telemetry?: TelemetryConfig;
 }
 
 export interface RequestLog {

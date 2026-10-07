@@ -11,7 +11,186 @@ test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
     encoding: "utf8",
   });
-  assert.equal(output.trim(), "0.2.0");
+  assert.equal(output.trim(), "0.3.0");
+});
+
+test("CLI exposes blacklist configuration", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-blacklist-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    const output = execFileSync(
+      process.execPath,
+      [
+        "dist/bin/agent-dir.js",
+        "config",
+        "add",
+        "demo",
+        "--directory",
+        home,
+        "--command",
+        "git,rg",
+        "--blacklist",
+        "git commit,git push --force",
+        "--git",
+      ],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    assert.match(output, /Saved profile 'demo'/);
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<
+        string,
+        { commands?: string[]; blacklistedCommands?: string[]; git?: boolean }
+      >;
+    };
+    const profile = saved.profiles.demo;
+    assert.ok(profile);
+    assert.deepEqual(profile.commands, ["git", "rg"]);
+    assert.deepEqual(profile.blacklistedCommands, ["git commit", "git push --force"]);
+    assert.equal(profile.git, true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI retrieves and rotates profile authentication tokens", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-token-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        version: 1,
+        profiles: {
+          demo: { directory: home, port: 3002, tunnel: "none", token: "original-token" },
+        },
+      }),
+    );
+
+    const retrieved = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "token", "demo"],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    assert.equal(retrieved.trim(), "original-token");
+
+    const rotated = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "token", "demo", "--rotate"],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    const rotatedToken = rotated.trim().split("\n").at(-1);
+    assert.ok(rotatedToken);
+    assert.notEqual(rotatedToken, "original-token");
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<string, { token?: string }>;
+    };
+    assert.equal(saved.profiles.demo?.token, rotatedToken);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI deletes a named config profile with --yes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-delete-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        version: 1,
+        profiles: {
+          demo: {
+            directory: home,
+            port: 3002,
+            tunnel: "none",
+            token: "token",
+          },
+        },
+      }),
+    );
+
+    const output = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "delete", "demo", "--yes"],
+      { encoding: "utf8", env: { ...process.env, HOME: home }, input: "y\n" },
+    );
+    assert.match(output, /Deleted profile 'demo'/);
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<string, unknown>;
+    };
+    assert.deepEqual(saved.profiles, {});
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI deletes all config profiles with --yes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-delete-all-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        version: 1,
+        profiles: {
+          one: { directory: home, port: 3002, tunnel: "none", token: "one" },
+          two: { directory: home, port: 3003, tunnel: "none", token: "two" },
+        },
+      }),
+    );
+
+    const output = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "delete", "--all", "--yes"],
+      { encoding: "utf8", env: { ...process.env, HOME: home }, input: "y\n" },
+    );
+    assert.match(output, /Deleted 2 profiles/);
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<string, unknown>;
+    };
+    assert.deepEqual(saved.profiles, {});
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI cancels config deletion when confirmation is declined", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-cancel-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        version: 1,
+        profiles: {
+          demo: { directory: home, port: 3002, tunnel: "none", token: "token" },
+        },
+      }),
+    );
+
+    const output = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "delete", "demo"],
+      { encoding: "utf8", env: { ...process.env, HOME: home }, input: "n\n" },
+    );
+    assert.match(output, /Deletion cancelled/);
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<string, unknown>;
+    };
+    assert.ok(saved.profiles.demo);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });
 
 const META = {
@@ -34,6 +213,79 @@ function requestFor(id: number, method: string, params: Record<string, unknown> 
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params: { ...params, _meta: META } }),
   });
 }
+
+test("Git MCP tools are capability-gated", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-git-gating-"));
+  try {
+    const disabled = createMcpHandler(root);
+    const disabledList = await disabled(requestFor(1, "tools/list"));
+    const disabledBody = (await disabledList.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    assert.equal(
+      disabledBody.result.tools.some((tool) => tool.name === "git_push"),
+      false,
+    );
+
+    const enabled = createMcpHandler(root, { git: true });
+    const enabledList = await enabled(requestFor(2, "tools/list"));
+    const enabledBody = (await enabledList.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    assert.equal(
+      enabledBody.result.tools.some((tool) => tool.name === "git_push"),
+      true,
+    );
+
+    const direct = await disabled(
+      requestFor(3, "tools/call", {
+        name: "git_status",
+        arguments: {},
+      }),
+    );
+    const directBody = (await direct.json()) as {
+      result: { isError?: boolean; structuredContent?: { error?: string } };
+    };
+    assert.equal(directBody.result.isError, true);
+    assert.match(directBody.result.structuredContent?.error ?? "", /Unknown tool: git_status/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP protocol requests are included in telemetry", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-telemetry-"));
+  try {
+    const handler = createMcpHandler(root, {}, { level: "anonymous", configId: "telemetry-test" });
+    const before = handler.telemetrySnapshot().length;
+    await handler(requestFor(1, "server/discover"));
+    await handler(requestFor(2, "tools/list"));
+    await handler(requestFor(3, "resources/list"));
+    const notification = new Request("http://localhost/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+    const notificationResponse = await handler(notification);
+    assert.equal(notificationResponse.status, 202);
+
+    const events = handler
+      .telemetrySnapshot()
+      .slice(before)
+      .map((item) => item.event);
+    assert.deepEqual(
+      events.map((event) => event.event === "mcp_request" && [event.method, event.success]),
+      [
+        ["server/discover", true],
+        ["tools/list", true],
+        ["resources/list", true],
+        ["notifications/initialized", true],
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("apply_changes preflights and atomically applies related file edits", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
@@ -414,12 +666,50 @@ test("validate composes diagnostics with explicitly allowed npm scripts", async 
   }
 });
 
+test("request logs redact command arguments and Git secrets", async () => {
+  assert.match(
+    getMcpLog(
+      Buffer.from(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "run_command_batch",
+            arguments: {
+              commands: [{ command: "git", args: ["commit", "-m", "secret commit message"] }],
+            },
+          },
+        }),
+      ),
+    )?.detail ?? "",
+    /git \(args: 3\)/,
+  );
+  assert.doesNotMatch(
+    getMcpLog(
+      Buffer.from(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "git_commit",
+            arguments: { message: "super secret commit message" },
+          },
+        }),
+      ),
+    )?.detail ?? "",
+    /super secret commit message/,
+  );
+});
+
 test("allowed_commands reports the active command policy", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     const handler = createMcpHandler(root, {
       npm: { allowedScripts: ["check", "test"] },
       commands: ["git", "node", "npm"],
+      blacklistedCommands: ["git commit"],
     });
     const response = await handler(
       requestFor(1, "tools/call", {
@@ -434,6 +724,7 @@ test("allowed_commands reports the active command policy", async () => {
     assert.deepEqual(result.result.structuredContent, {
       npmScripts: ["check", "test"],
       commands: ["git", "node", "npm"],
+      blacklistedCommands: ["git commit"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -453,7 +744,11 @@ test("allowed_commands defaults to empty policy", async () => {
     const result = (await response.json()) as {
       result: { structuredContent: { npmScripts: string[]; commands: string[] } };
     };
-    assert.deepEqual(result.result.structuredContent, { npmScripts: [], commands: [] });
+    assert.deepEqual(result.result.structuredContent, {
+      npmScripts: [],
+      commands: [],
+      blacklistedCommands: [],
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -610,7 +905,7 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
       resources: { listChanged: true, subscribe: true },
       extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
     });
-    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.2.0" });
+    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.3.0" });
     assert.match(String(body.result.instructions), /minimum necessary tool calls/);
     assert.match(String(body.result.instructions), /Allowed npm scripts/);
   } finally {
@@ -1044,12 +1339,19 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
     const capabilityText = capabilitiesResult.result.contents[0]?.text;
     assert.ok(capabilityText);
     const capabilityDocument = JSON.parse(capabilityText) as {
-      execution: { npmScripts: string[]; commands: string[] };
+      execution: {
+        npmScripts: string[];
+        commands: string[];
+        blacklistedCommands: string[];
+        git: boolean;
+      };
       efficiency: { preferred: { orientation: string } };
     };
     assert.deepEqual(capabilityDocument.execution, {
       npmScripts: ["check", "test"],
       commands: ["git", "rg"],
+      blacklistedCommands: [],
+      git: true,
     });
     assert.equal(capabilityDocument.efficiency.preferred.orientation, "project_context");
   } finally {

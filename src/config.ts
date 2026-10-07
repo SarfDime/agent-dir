@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { isTelemetryLevel } from "./telemetry/config.js";
 import type { AgentConfig, CommandConfig, Profile } from "./types.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "agent-dir");
@@ -47,6 +48,10 @@ function isAgentConfig(value: unknown): value is AgentConfig {
   if (!value || typeof value !== "object") return false;
   const config = value as Record<string, unknown>;
   if (config.version !== 1 || !config.profiles || typeof config.profiles !== "object") return false;
+  if (config.telemetry !== undefined) {
+    if (!config.telemetry || typeof config.telemetry !== "object") return false;
+    if (!isTelemetryLevel((config.telemetry as Record<string, unknown>).level)) return false;
+  }
 
   for (const [name, profile] of Object.entries(config.profiles)) {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) || !isProfile(profile)) return false;
@@ -80,5 +85,13 @@ function isProfile(value: unknown): value is Profile {
     )
       return false;
   }
+  if (profile.blacklistedCommands !== undefined) {
+    if (
+      !Array.isArray(profile.blacklistedCommands) ||
+      profile.blacklistedCommands.some((item) => typeof item !== "string")
+    )
+      return false;
+  }
+  if (profile.git !== undefined && typeof profile.git !== "boolean") return false;
   return true;
 }

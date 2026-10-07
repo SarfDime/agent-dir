@@ -133,18 +133,32 @@ export function printHelp(): void {
   writeLine("      --directory <path>     Directory to expose");
   writeLine("      --npm <scripts>        Comma-separated allowed npm scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
+  writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
+  writeLine("      --git                  Enable dedicated Git MCP tools");
+  writeLine("      --no-git               Disable dedicated Git MCP tools");
   writeLine("      --token <token>        Explicit Bearer token");
   writeLine("      --no-tunnel            Disable tunneling");
   writeLine("      --random               Use a random Wormhole URL (no subdomain)");
   writeLine("  -h, --help                 Show this help");
   writeLine("  -v, --version              Show the installed version");
   writeLine("");
+  writeLine("Telemetry:");
+  writeLine("  agent-dir telemetry status");
+  writeLine("  agent-dir telemetry enable <anonymous|basic|detailed>");
+  writeLine("  agent-dir telemetry disable");
+  writeLine("  agent-dir telemetry schema");
+  writeLine("  agent-dir telemetry show [--follow]");
+  writeLine("  agent-dir telemetry summary");
+  writeLine("  agent-dir telemetry reset          Reset settings and clear all recorded data");
+  writeLine("");
   writeLine("Config:");
   writeLine("  agent-dir config add <name> ...");
   writeLine("  agent-dir config list");
   writeLine("  agent-dir config show <name>");
-  writeLine("  agent-dir config remove <name>");
-  writeLine("  agent-dir config token <name>");
+  writeLine("  agent-dir config delete <name> [--yes]");
+  writeLine("  agent-dir config delete --all [--yes]");
+  writeLine("  agent-dir config remove <name>    Alias for delete");
+  writeLine("  agent-dir config token <name> [--rotate]");
 }
 
 export function printBanner(options: {
@@ -156,6 +170,8 @@ export function printBanner(options: {
   token?: string;
   npmScripts?: string[];
   commands?: string[];
+  blacklistedCommands?: string[];
+  gitEnabled?: boolean;
 }): void {
   writeLine("");
   const banner = [
@@ -173,6 +189,9 @@ export function printBanner(options: {
   writeLine(`  Port         ${options.port}`);
   writeLine(`  Config       ${options.profileName ?? "CLI options"}`);
   writeLine(`  Tunnel       ${options.tunnel}`);
+  if (options.blacklistedCommands?.length) {
+    writeLine(`  Blocked      ${options.blacklistedCommands.join(", ")}`);
+  }
   if (options.subdomain) writeLine(`  Domain       https://${options.subdomain}.wormhole.bar`);
   writeLine("");
   writeLine("  MCP");
@@ -196,14 +215,16 @@ export function printBanner(options: {
   writeLine(`    ${color(toolLabel("find_references"), GREEN)}`);
   writeLine(`    ${color(toolLabel("find_imports"), BRIGHT_GREEN)}`);
   writeLine(`    ${color(toolLabel("find_exports"), BRIGHT_GREEN)}`);
-  writeLine(`    ${color(toolLabel("git_status"), CYAN)}`);
-  writeLine(`    ${color(toolLabel("git_stage"), YELLOW)}`);
-  writeLine(`    ${color(toolLabel("git_unstage"), MAGENTA)}`);
-  writeLine(`    ${color(toolLabel("git_commit"), BRIGHT_GREEN)}`);
-  writeLine(`    ${color(toolLabel("git_restore"), RED)}`);
-  writeLine(`    ${color(toolLabel("git_push"), BRIGHT_BLUE)}`);
-  writeLine(`    ${color(toolLabel("git_diff"), CYAN)}`);
-  writeLine(`    ${color(toolLabel("git_log"), CYAN)}`);
+  if (options.gitEnabled) {
+    writeLine(`    ${color(toolLabel("git_status"), CYAN)}`);
+    writeLine(`    ${color(toolLabel("git_stage"), YELLOW)}`);
+    writeLine(`    ${color(toolLabel("git_unstage"), MAGENTA)}`);
+    writeLine(`    ${color(toolLabel("git_commit"), BRIGHT_GREEN)}`);
+    writeLine(`    ${color(toolLabel("git_restore"), RED)}`);
+    writeLine(`    ${color(toolLabel("git_push"), BRIGHT_BLUE)}`);
+    writeLine(`    ${color(toolLabel("git_diff"), CYAN)}`);
+    writeLine(`    ${color(toolLabel("git_log"), CYAN)}`);
+  }
   writeLine(`    ${color(toolLabel("project_overview"), BRIGHT_CYAN)}`);
   writeLine(`    ${color(toolLabel("package_info"), YELLOW)}`);
   writeLine(`    ${color(toolLabel("allowed_commands"), YELLOW)}`);

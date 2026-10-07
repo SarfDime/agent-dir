@@ -9,17 +9,32 @@ export interface CommandResult {
   stderr: string;
 }
 
+export function isCommandBlacklisted(
+  command: string,
+  args: string[] = [],
+  blacklistedCommands: string[] = [],
+): boolean {
+  const invocation = [command, ...args];
+  return blacklistedCommands.some((entry) => {
+    const tokens = entry.trim().split(/\s+/).filter(Boolean);
+    return tokens.length > 0 && tokens.every((token, index) => invocation[index] === token);
+  });
+}
+
 export function runCommand(
   root: string,
   command: string,
   args: string[] = [],
   allowedCommands: string[] = [],
+  blacklistedCommands: string[] = [],
   timeoutMs = 120000,
   signal?: AbortSignal,
 ): Promise<CommandResult> {
   if (!SAFE_NAME.test(command)) throw new Error("Invalid command name.");
   if (!allowedCommands.includes(command))
     throw new Error(`Command '${command}' is not allowed by this profile.`);
+  if (isCommandBlacklisted(command, args, blacklistedCommands))
+    throw new Error(`Command '${[command, ...args].join(" ")}' is blocked by this profile.`);
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
     throw new Error("Command arguments must be strings.");
 

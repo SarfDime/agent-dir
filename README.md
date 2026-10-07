@@ -47,9 +47,33 @@ The Wormhole URL is only the transport endpoint. `agent-dir` authentication is e
 >
 > A subdomain can remain registered while another `wormhole` process is still running, so stop unused Wormhole tunnels before creating another one. If a configured subdomain is unavailable, `agent-dir` will report the Wormhole registration failure instead of silently starting without a tunnel.
 
+## First-run setup
+
+On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating your first saved profile. It asks for the profile name, directory, port, tunnel, optional Wormhole subdomain, optional npm scripts, optional allowed commands, and telemetry preference. The generated authentication token is saved with the profile.
+
+Telemetry is optional and stays local. During setup, `agent-dir` explains the available levels: **none**, **anonymous**, **basic**, and **detailed**. Telemetry is disabled by default if you choose the default option. The same choices can later be changed with `agent-dir telemetry enable|disable`.
+
+You can also run the setup wizard explicitly at any time:
+
+```bash
+agent-dir setup
+```
+
+This is useful for creating another profile or replacing an existing profile. The wizard saves the profile and exits without starting a tunnel.
+
+You can skip setup completely when you only want a temporary random Wormhole URL:
+
+```bash
+agent-dir . --random --tunnel wormhole
+```
+
+If you answer **No** at the setup prompt, `agent-dir` automatically starts that temporary random tunnel and does not create a config file.
+
+Non-interactive invocations and invocations with explicit launch options do not start the setup wizard.
+
 ## Profiles
 
-Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, and allowed non-npm commands.
+Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, allowed non-npm commands, blocked command prefixes, and whether dedicated Git MCP tools are enabled. Dedicated Git tools are enabled automatically when `git` is in the allowed command list, or explicitly with `--git`; use `--no-git` to disable them for a run.
 
 ```bash
 agent-dir config add my-project \
@@ -57,7 +81,8 @@ agent-dir config add my-project \
   --tunnel wormhole \
   --subdomain my-project-x7k4m2 \
   --npm typecheck,lint,format,test,build \
-  --command grep,find,rg,git
+  --command grep,find,rg,git \
+  --blacklist "git commit,git push --force"
 ```
 
 Then:
@@ -71,10 +96,62 @@ Manage profiles with:
 ```bash
 agent-dir config list
 agent-dir config show my-project
-agent-dir config remove my-project
+agent-dir config delete my-project
+agent-dir config delete --all
 ```
 
+Deletion asks for confirmation by default. Use `--yes` for automation:
+
+```bash
+agent-dir config delete my-project --yes
+agent-dir config delete --all --yes
+```
+
+The older `config remove <name>` command remains an alias for `config delete <name>`.
+
+Retrieve or rotate a profile's authentication token with:
+
+```bash
+agent-dir config token my-project
+agent-dir config token my-project --rotate
+```
+
+The token command prints the secret intentionally; avoid sharing or committing its output.
+
 Profiles are stored per-user at `~/.config/agent-dir/config.json`, not in the project repository. The config directory and file are written with user-only permissions. Command-line options can override saved values for one run.
+
+## Telemetry
+
+Telemetry is **disabled by default** and is local-only. When enabled, events are stored in `~/.config/agent-dir/telemetry.jsonl` with user-only permissions; no telemetry is sent to a remote service.
+
+Enable a privacy level with:
+
+```bash
+agent-dir telemetry enable anonymous
+agent-dir telemetry enable basic
+agent-dir telemetry enable detailed
+```
+
+Levels add bounded operational context:
+
+- **anonymous** — MCP methods, tool/command families, success, duration, sizes, result counts, truncation/pagination, and safe error categories.
+- **basic** — anonymous data plus bounded Agent Dir/Node/platform and MCP client version information.
+- **detailed** — basic data plus coarse project classification such as language, package manager, Git/CodeGraph availability, and project size.
+
+Telemetry never records file contents, command arguments, authentication tokens, environment variables, or project paths. Session telemetry separates wall-clock session lifetime from active MCP request time and the gaps between requests; those gaps may include agent reasoning, network delay, or other idle time and are not presented as agent thinking time. Persistence failures do not affect MCP requests.
+
+Manage telemetry with:
+
+```bash
+agent-dir telemetry status
+agent-dir telemetry schema
+agent-dir telemetry show [--follow]
+agent-dir telemetry summary
+agent-dir telemetry disable
+agent-dir telemetry reset
+```
+
+For the event model, metric definitions, privacy levels, and guidance for interpreting raw and aggregated telemetry, see [Telemetry interpretation](docs/telemetry.md).
 
 ## MCP transport and compatibility
 
@@ -197,7 +274,7 @@ Normal executables use a separate allowlist:
 --command grep,find,rg,git
 ```
 
-Commands are launched with `shell: false`; the MCP client supplies the executable and arguments separately. An executable that is not in the allowlist is rejected.
+Commands are launched with `shell: false`; the MCP client supplies the executable and arguments separately. Dedicated Git MCP tools are separately capability-gated; they are exposed only when Git is enabled for the active profile. If Git is disabled, direct calls to Git tools are rejected even if a client attempts to invoke them by name. An executable that is not in the allowlist is rejected. A configured `blacklistedCommands` entry overrides the allowlist and blocks matching command prefixes, so `git` can be allowed while `git commit` is blocked and `git status` remains available. Entries are whitespace-separated command/argument prefixes, for example `git commit` or `git push --force`.
 
 Avoid allowing `sh`, `bash`, `zsh`, `cmd`, `node`, or `python` unless you intentionally want to grant a much broader execution capability.
 
@@ -212,7 +289,7 @@ agent-dir://instructions
 agent-dir://capabilities
 ```
 
-The instructions emphasize efficient tool selection: targeted search before reading, bounded ranges before whole-file reads, dedicated tools before generic commands, batched related operations, narrow validation before full checks, and scoped Git inspection before full diffs. The execution policy is generated from the active profile, so changing `allowedScripts` or `commands` automatically changes what the agent is told it can execute.
+The instructions emphasize efficient tool selection: targeted search before reading, bounded ranges before whole-file reads, dedicated tools before generic commands, batched related operations, narrow validation before full checks, and scoped Git inspection before full diffs. The execution policy is generated from the active profile, so changing `allowedScripts`, `commands`, or `blacklistedCommands` automatically changes what the agent is told it can execute.
 
 The capabilities resource is machine-readable and includes the running Agent Dir version, registered tool names, execution policy, and preferred/avoid tool-selection patterns. This keeps the MCP server itself as the source of truth; client-specific instruction files do not need to be maintained when Agent Dir changes.
 

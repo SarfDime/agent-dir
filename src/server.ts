@@ -16,8 +16,9 @@ export function startServer({
   port,
   token,
   commandConfig = {},
+  telemetry = { level: "none" },
 }: ServerOptions): Promise<ServerHandle> {
-  const mcp = createMcpHandler(root, commandConfig);
+  const mcp = createMcpHandler(root, commandConfig, telemetry);
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     try {
@@ -430,7 +431,7 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
             : "";
         }
         case "git_commit":
-          return typeof args.message === "string" ? args.message : "";
+          return "commit (message omitted)";
         case "find_imports": {
           const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
           return maxResults !== undefined ? `all imports (max ${maxResults})` : "all imports";
@@ -445,11 +446,8 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
         }
         case "git_restore":
           return paths.join(", ");
-        case "git_push": {
-          const remote = typeof args.remote === "string" ? args.remote : "";
-          const branch = typeof args.branch === "string" ? args.branch : "";
-          return remote && branch ? `${remote}/${branch}` : remote || branch;
-        }
+        case "git_push":
+          return "push (remote/branch omitted)";
         case "git_diff": {
           const staged = args.staged === true ? "staged" : "working tree";
           const path = typeof args.path === "string" ? args.path : "";
@@ -556,8 +554,8 @@ function getMcpMethodDetail(method: string, params: Record<string, unknown> | un
 
 function formatCommand(command: unknown, args: unknown): string {
   if (typeof command !== "string") return "";
-  const extra = Array.isArray(args) ? args.map(String).join(" ") : "";
-  return extra ? `${command} ${extra}` : command;
+  const count = Array.isArray(args) ? args.length : 0;
+  return count ? `${command} (args: ${count})` : command;
 }
 
 function toFetchHeaders(headers: IncomingMessage["headers"]): Headers {

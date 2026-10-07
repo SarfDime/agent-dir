@@ -36,6 +36,146 @@ async function request(
   return (await response.json()) as Record<string, unknown>;
 }
 
+test("MCP protocol requests are recorded separately from tool calls", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
+  try {
+    const configId = `test-mcp-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+    await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "server/discover",
+          params: { _meta: META },
+        }),
+      }),
+    );
+    await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+          params: { _meta: META },
+        }),
+      }),
+    );
+    const events = handler.telemetrySnapshot().filter((event) => event.configId === configId);
+    assert.deepEqual(
+      events.map((envelope) => envelope.event.event),
+      ["mcp_request", "mcp_request"],
+    );
+    assert.deepEqual(
+      events.map((envelope) =>
+        envelope.event.event === "mcp_request" ? envelope.event.method : "",
+      ),
+      ["server/discover", "tools/list"],
+    );
+    assert.ok(
+      events.every((envelope) => envelope.event.event !== "mcp_request" || envelope.event.success),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP telemetry records command, session, and detailed project context", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-telemetry-"));
+  try {
+    await fsWriteFile(path.join(root, "package.json"), JSON.stringify({ name: "telemetry-test" }));
+    const configId = `test-mcp-commands-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(
+      root,
+      { npm: { allowedScripts: ["check"] }, commands: ["git"] },
+      { level: "detailed", configId },
+    );
+
+    await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/call",
+          "mcp-name": "run_command_batch",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "run_command_batch",
+            arguments: { commands: ["git status --short"] },
+            _meta: META,
+          },
+        }),
+      }),
+    );
+    handler.closeSubscriptions();
+
+    const events = handler.telemetrySnapshot().filter((event) => event.configId === configId);
+    const command = events.find((event) => event.event.event === "command_call");
+    const session = events.find((event) => event.event.event === "session");
+    const tool = events.find((event) => event.event.event === "tool_call");
+    assert.ok(command);
+    assert.equal(command?.event.event, "command_call");
+    if (command?.event.event === "command_call") {
+      assert.equal(command.event.commandFamily, "command");
+      assert.equal(command.event.operation, "batch");
+    }
+    assert.ok(tool);
+    assert.ok(session);
+    if (session?.event.event === "session") {
+      assert.equal(session.event.requestCount, 1);
+      assert.equal(session.event.toolCallCount, 1);
+      assert.equal(session.event.commandCallCount, 1);
+    }
+    assert.ok(events.some((event) => event.project?.projectSize === "small"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("MCP telemetry records malformed requests as invalid input", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
+  try {
+    const configId = `test-mcp-invalid-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "null",
+      }),
+    );
+
+    assert.equal(response.status, 400);
+    assert.deepEqual(
+      handler
+        .telemetrySnapshot()
+        .filter((event) => event.configId === configId)
+        .map((event) => event.event),
+      [
+        {
+          event: "mcp_request",
+          method: "unknown",
+          success: false,
+          durationMs: (handler.telemetrySnapshot()[0]?.event as { durationMs: number })?.durationMs,
+          errorCategory: "invalid_input",
+        },
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("modern MCP discovery is stateless and advertises skills", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {
