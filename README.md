@@ -340,6 +340,40 @@ POST    /mcp
 
 All HTTP endpoints are authenticated by default.
 
+## Releases
+
+Releases are automated with [semantic-release](https://github.com/semantic-release/semantic-release) from the `main` branch. Developers should **not** manually edit the version in `package.json` for normal releases.
+
+Use [Conventional Commits](https://www.conventionalcommits.org/) for commits that should communicate release impact:
+
+| Commit | Release |
+| --- | --- |
+| `fix: handle tunnel reconnect` | Patch (`0.3.0` → `0.3.1`) |
+| `feat: add project snapshots` | Minor (`0.3.0` → `0.4.0`) |
+| `feat!: change authentication protocol` | Major (`0.3.0` → `1.0.0`) |
+| `feat: change API` with a `BREAKING CHANGE:` footer | Major |
+| `docs:`, `test:`, `chore:`, `refactor:`, `ci:`, etc. | No release by default |
+
+After a pull request is reviewed and merged into `main`, the release workflow runs the normal validation (`npm run check`, `npm test`, and `npm pack --dry-run`). If validation succeeds, semantic-release determines the next SemVer version from the Conventional Commit history, updates `package.json` and `package-lock.json`, creates the release commit, creates the `vX.Y.Z` Git tag, creates the GitHub Release, and publishes the package to npm.
+
+The release commit is marked `[skip ci]`, so it does not start another release cycle. A push to `main` that contains no release-worthy Conventional Commit produces no release.
+
+For an intentional breaking release, use the `!` marker on the commit type/scope or add a `BREAKING CHANGE:` footer, for example:
+
+```text
+feat!: change authentication protocol
+```
+
+or:
+
+```text
+feat: change authentication protocol
+
+BREAKING CHANGE: clients must use the new authentication protocol
+```
+
+Do not use arbitrary keywords such as `bump` to control releases. The existing `v0.3.0` release is the baseline for this automation.
+
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for development setup, testing requirements, MCP compatibility guidance, and pull-request expectations.
