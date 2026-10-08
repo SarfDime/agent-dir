@@ -1,10 +1,16 @@
 # Telemetry interpretation
 
-Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths.
+Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths at standard levels. The opt-in diagnostic level additionally records local troubleshooting metadata, including project paths, hostname, username, process identifiers, Node version, memory usage, and process uptime.
 
 ## Data hierarchy
 
 Telemetry is organized as:
+
+- `none`: disabled.
+- `anonymous`: operational events without runtime/project context.
+- `basic`: anonymous events plus coarse runtime context.
+- `detailed`: basic context plus coarse project classification.
+- `diagnostic`: detailed context plus local identifying/troubleshooting metadata. Use only when diagnosing a local problem.
 
 configuration → session → event
 
@@ -78,6 +84,7 @@ Do not infer agent reasoning time, user wait time, or network latency from tool 
 - **anonymous** records operational event data only.
 - **basic** adds bounded Agent Dir/runtime and MCP client information.
 - **detailed** additionally adds coarse project classification such as language, package manager, Git/CodeGraph availability, and project size.
+- **diagnostic** additionally adds local troubleshooting metadata such as project paths, hostname, username, process identifiers, Node version, memory usage, and process uptime. This level is opt-in and should only be enabled when needed for local diagnosis.
 
 Telemetry is persisted locally only when enabled. Persistence failures must never affect MCP request handling.
 

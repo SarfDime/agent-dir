@@ -7,9 +7,16 @@ export interface TelemetrySummary {
     string,
     {
       eventCount: number;
+      httpRequests: number;
+      httpAuthFailures: number;
+      httpErrors: number;
       mcpRequests: number;
       toolCalls: number;
       commandCalls: number;
+      tunnelEvents: number;
+      tunnelDisconnects: number;
+      tunnelReconnects: number;
+      tunnelFailures: number;
       mcpSuccessRate: number | null;
       toolSuccessRate: number | null;
       commandSuccessRate: number | null;
@@ -98,7 +105,7 @@ function rateForEvents(
   return matching.length === 0
     ? null
     : rate(
-        matching.filter((item) => item.event.event !== "session" && item.event.success).length,
+        matching.filter((item) => "success" in item.event && item.event.success).length,
         matching.length,
       );
 }
@@ -109,7 +116,12 @@ function collectFailures(
 ): Record<string, number> {
   const failures: Record<string, number> = {};
   for (const envelope of events) {
-    if (envelope.event.event !== kind || envelope.event.success || !envelope.event.errorCategory)
+    if (
+      envelope.event.event !== kind ||
+      !("success" in envelope.event) ||
+      envelope.event.success ||
+      !envelope.event.errorCategory
+    )
       continue;
     failures[envelope.event.errorCategory] = (failures[envelope.event.errorCategory] ?? 0) + 1;
   }
@@ -158,9 +170,16 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
       }
     >();
     let legacySessionEvents = 0;
+    let httpRequests = 0;
+    let httpAuthFailures = 0;
+    let httpErrors = 0;
     let mcpRequests = 0;
     let toolCalls = 0;
     let commandCalls = 0;
+    let tunnelEvents = 0;
+    let tunnelDisconnects = 0;
+    let tunnelReconnects = 0;
+    let tunnelFailures = 0;
 
     for (const envelope of group) {
       const event = envelope.event;
@@ -174,6 +193,21 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
         failuresByCategory: { mcp: {}, tool: {}, command: {} },
       };
       session.eventCount += 1;
+      if (event.event === "http_request") {
+        httpRequests += 1;
+        if (event.status === 401) httpAuthFailures += 1;
+        if (event.status >= 400) httpErrors += 1;
+        sessions.set(envelope.sessionId, session);
+        continue;
+      }
+      if (event.event === "tunnel") {
+        tunnelEvents += 1;
+        if (event.state === "disconnected") tunnelDisconnects += 1;
+        if (event.state === "reconnected") tunnelReconnects += 1;
+        if (event.state === "failed") tunnelFailures += 1;
+        sessions.set(envelope.sessionId, session);
+        continue;
+      }
       if (event.event === "session") {
         if (
           Number.isFinite(event.wallClockDurationMs) &&
@@ -248,9 +282,16 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
 
     configs[configId] = {
       eventCount: group.length,
+      httpRequests,
+      httpAuthFailures,
+      httpErrors,
       mcpRequests,
       toolCalls,
       commandCalls,
+      tunnelEvents,
+      tunnelDisconnects,
+      tunnelReconnects,
+      tunnelFailures,
       mcpSuccessRate: rateForEvents(group, "mcp_request"),
       toolSuccessRate: rateForEvents(group, "tool_call"),
       commandSuccessRate: rateForEvents(group, "command_call"),

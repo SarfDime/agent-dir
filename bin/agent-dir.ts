@@ -113,7 +113,7 @@ if (command === "telemetry") {
   if (action === "enable") {
     const level = positionals[2];
     if (!level || !isTelemetryLevel(level) || level === "none")
-      fail("Usage: agent-dir telemetry enable <anonymous|basic|detailed>");
+      fail("Usage: agent-dir telemetry enable <anonymous|basic|detailed|diagnostic>");
     config.telemetry = { level };
     await saveConfig(config);
     console.log(`✓ Telemetry enabled at ${level} level.`);
@@ -140,7 +140,8 @@ if (command === "telemetry") {
             "commandCallCount",
           ],
           envelope: ["configId", "sessionId", "timestamp", "level", "event"],
-          events: ["mcp_request", "tool_call", "command_call", "session"],
+          events: ["mcp_request", "tool_call", "command_call", "tunnel", "session"],
+          levels: ["none", "anonymous", "basic", "detailed", "diagnostic"],
           successMetrics: {
             mcp: "successful mcp_request events / mcp_request events",
             tool: "successful tool_call events / tool_call events",
@@ -444,6 +445,12 @@ if (tunnel !== "none") {
     tunnelResult = await startTunnel({
       provider: "wormhole",
       port,
+      token,
+      telemetry: {
+        ...(config.telemetry ?? { level: "none" }),
+        ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
+        persist: true,
+      },
       random: randomTunnel,
       ...(subdomain && !randomTunnel ? { subdomain } : {}),
     });
@@ -462,7 +469,9 @@ const shutdown = async (): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log("\n  Stopping agent-dir...");
-  if (tunnelResult?.child && !tunnelResult.child.killed) tunnelResult.child.kill("SIGTERM");
+  tunnelResult?.stop?.();
+  if (tunnelResult?.child && !tunnelResult.stop && !tunnelResult.child.killed)
+    tunnelResult.child.kill("SIGTERM");
   await server.close();
   process.exit(0);
 };

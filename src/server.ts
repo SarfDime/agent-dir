@@ -2,6 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { authenticate, unauthorized } from "./auth.js";
 import { logRequest } from "./logging.js";
 import { createMcpHandler } from "./mcp.js";
+import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { deleteFile, listFiles, readFile, writeFile } from "./tools/files.js";
 import type { ServerOptions } from "./types.js";
 
@@ -19,8 +20,16 @@ export function startServer({
   telemetry = { level: "none" },
 }: ServerOptions): Promise<ServerHandle> {
   const mcp = createMcpHandler(root, commandConfig, telemetry);
+  const httpTelemetry = new TelemetryRecorder({
+    level: telemetry.level,
+    persist: telemetry.persist ?? false,
+    ...(telemetry.configId ? { configId: telemetry.configId } : {}),
+    sessionId: `http-${Date.now()}`,
+  });
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const startedAt = performance.now();
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    let authenticated = false;
     try {
       const body = await readBody(req);
       const requestInit: RequestInit = {
@@ -29,7 +38,8 @@ export function startServer({
       };
       if (body.length) requestInit.body = body;
       const request = new Request(url, requestInit);
-      if (!authenticate(request, token)) {
+      authenticated = authenticate(request, token);
+      if (!authenticated) {
         const response = unauthorized();
         await sendResponse(res, response);
         logRequest({
@@ -38,6 +48,14 @@ export function startServer({
           status: 401,
           detail: "unauthorized",
         });
+        recordHttpTelemetry(
+          httpTelemetry,
+          req.method ?? "UNKNOWN",
+          url.pathname,
+          401,
+          authenticated,
+          startedAt,
+        );
         return;
       }
       if (url.pathname === "/mcp") {
@@ -50,6 +68,14 @@ export function startServer({
             status: 405,
             detail: "method not allowed",
           });
+          recordHttpTelemetry(
+            httpTelemetry,
+            req.method ?? "UNKNOWN",
+            url.pathname,
+            405,
+            authenticated,
+            startedAt,
+          );
           return;
         }
         const headerError = validateMcpHeaders(request, messageBody(body));
@@ -62,6 +88,14 @@ export function startServer({
             status: headerError.status,
             detail: errorDetail ? `MCP header validation: ${errorDetail}` : "MCP header validation",
           });
+          recordHttpTelemetry(
+            httpTelemetry,
+            req.method,
+            url.pathname,
+            headerError.status,
+            authenticated,
+            startedAt,
+          );
           return;
         }
         const response = await mcp(request);
@@ -79,12 +113,21 @@ export function startServer({
             : (mcpLog?.detail ?? "MCP"),
           ...(mcpLog ? { tool: mcpLog.name } : {}),
         });
+        recordHttpTelemetry(
+          httpTelemetry,
+          req.method,
+          url.pathname,
+          response.status,
+          authenticated,
+          startedAt,
+        );
         return;
       }
       if (url.pathname === "/__tree" && req.method === "GET") {
         const tree = await listFiles(root);
         sendText(res, 200, JSON.stringify(tree, null, 2), "application/json; charset=utf-8");
         logRequest({ method: req.method, path: url.pathname, status: 200, detail: "directory" });
+        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
       const relative = decodeURIComponent(url.pathname.slice(1));
@@ -96,23 +139,34 @@ export function startServer({
           status: 200,
           detail: "server",
         });
+        recordHttpTelemetry(
+          httpTelemetry,
+          req.method ?? "UNKNOWN",
+          url.pathname,
+          200,
+          authenticated,
+          startedAt,
+        );
         return;
       }
       if (req.method === "GET") {
         sendText(res, 200, await readFile(root, relative), "text/plain; charset=utf-8");
         logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST GET" });
+        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
       if (req.method === "PUT") {
         await writeFile(root, relative, body.toString("utf8"));
         sendText(res, 200, "File updated successfully\n");
         logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST PUT" });
+        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
       if (req.method === "DELETE") {
         await deleteFile(root, relative);
         sendText(res, 200, "File deleted successfully\n");
         logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST DELETE" });
+        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
       sendText(res, 404, "Not found\n");
@@ -122,6 +176,14 @@ export function startServer({
         status: 404,
         detail: "not found",
       });
+      recordHttpTelemetry(
+        httpTelemetry,
+        req.method ?? "UNKNOWN",
+        url.pathname,
+        404,
+        authenticated,
+        startedAt,
+      );
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       const status = code === "ENOENT" ? 404 : code === "PAYLOAD_TOO_LARGE" ? 413 : 500;
@@ -132,6 +194,14 @@ export function startServer({
         status,
         detail: error instanceof Error ? error.message : String(error),
       });
+      recordHttpTelemetry(
+        httpTelemetry,
+        req.method ?? "UNKNOWN",
+        url.pathname,
+        status,
+        authenticated,
+        startedAt,
+      );
     }
   });
 
@@ -556,6 +626,35 @@ function formatCommand(command: unknown, args: unknown): string {
   if (typeof command !== "string") return "";
   const count = Array.isArray(args) ? args.length : 0;
   return count ? `${command} (args: ${count})` : command;
+}
+
+function recordHttpTelemetry(
+  recorder: TelemetryRecorder,
+  method: string,
+  pathname: string,
+  status: number,
+  authenticated: boolean,
+  startedAt: number,
+): void {
+  const route =
+    pathname === "/mcp"
+      ? "mcp"
+      : pathname === "/__tree"
+        ? "tree"
+        : pathname === "/"
+          ? "root"
+          : pathname.startsWith("/") && pathname.length > 1
+            ? "file"
+            : "other";
+  recorder.record({
+    event: "http_request",
+    method,
+    route,
+    status,
+    success: status < 400,
+    durationMs: performance.now() - startedAt,
+    authenticated,
+  });
 }
 
 function toFetchHeaders(headers: IncomingMessage["headers"]): Headers {
