@@ -67,4 +67,5 @@ export type TunnelEvent =
   | { type: "disconnected"; reason: string }
   | { type: "reconnecting"; attempt: number; reason: string }
   | { type: "reconnected"; url: string; attempt: number }
-  | { type: "failed"; reason: string; attempts: number };
+  | { type: "failed"; reason: string; attempts: number }
+  | { type: "health"; state: "healthy" | "degraded" | "recovered" };

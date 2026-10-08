@@ -53,7 +53,8 @@ export interface TelemetryCommandEvent {
 
 export interface TelemetryTunnelEvent {
   event: "tunnel";
-  state: "online" | "disconnected" | "reconnecting" | "reconnected" | "failed";
+  state: "online" | "disconnected" | "reconnecting" | "reconnected" | "failed" | "health";
+  healthState?: "healthy" | "degraded" | "recovered";
   attempt?: number;
   attempts?: number;
   durationMs?: number;

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
-import { getMcpLog, validateMcpHeaders } from "../src/server.js";
+import { getMcpLog, startServer, validateMcpHeaders } from "../src/server.js";
 
 test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
@@ -258,6 +259,76 @@ test("Git MCP tools are capability-gated", async () => {
   }
 });
 
+test("aborted MCP requests do not prevent a fresh request from succeeding", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-server-abort-"));
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) =>
+    probe.close((error) => (error ? reject(error) : resolve())),
+  );
+
+  const server = await startServer({
+    root,
+    port,
+    token: "test-token",
+    commandConfig: { commands: ["node"] },
+  });
+  try {
+    const headers = {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: "Bearer test-token",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "tools/call",
+      "mcp-name": "run_command_batch",
+    };
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "run_command_batch",
+        arguments: {
+          commands: [{ command: "node", args: ["-e", "setTimeout(() => {}, 1000)"] }],
+        },
+        _meta: META,
+      },
+    });
+
+    const controller = new AbortController();
+    const aborted = fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 50).unref();
+    await assert.rejects(
+      aborted,
+      (error: unknown) => error instanceof Error && error.name === "AbortError",
+    );
+
+    const fresh = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { ...headers, "mcp-method": "tools/list" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/list",
+        params: { _meta: META },
+      }),
+    });
+    assert.equal(fresh.status, 200);
+    const freshBody = (await fresh.json()) as { result?: { tools?: unknown[] } };
+    assert.ok(Array.isArray(freshBody.result?.tools));
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test("MCP protocol requests are included in telemetry", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-telemetry-"));
   try {

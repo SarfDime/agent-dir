@@ -9,6 +9,7 @@ const HEALTH_TIMEOUT_MS = 5_000;
 const HEALTH_FAILURE_THRESHOLD = 2;
 const RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_ATTEMPTS = 5;
+const HEALTH_PATH = "/__health";
 const ANSI_ESCAPE = new RegExp(String.fromCharCode(0x1b) + String.raw`\[[0-?]*[ -/]*[@-~]`, "g");
 
 function cleanOutput(value: Buffer | string): string {
@@ -59,6 +60,7 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
     let healthTimer: ReturnType<typeof setInterval> | undefined;
     let stopped = false;
     let healthFailures = 0;
+    let healthState: "healthy" | "degraded" = "healthy";
 
     const record = (event: TunnelEvent): void => {
       if (!telemetry) return;
@@ -79,6 +81,8 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
         });
       else if (event.type === "reconnected")
         telemetry.record({ event: "tunnel", state: "reconnected", attempt: event.attempt });
+      else if (event.type === "health")
+        telemetry.record({ event: "tunnel", state: "health", healthState: event.state });
       else
         telemetry.record({
           event: "tunnel",
@@ -107,9 +111,13 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
         writeLine(`    Public URL   : ${event.url}`);
         writeLine(`    MCP endpoint : ${event.url}/mcp`);
         writeLine();
+      } else if (event.type === "health") {
+        if (event.state === "degraded") writeLine("  ⚠ TUNNEL HEALTH DEGRADED");
+        else if (event.state === "recovered") writeLine("  ✓ TUNNEL HEALTH RECOVERED");
       } else {
-        writeLine(`  ✖ TUNNEL OFFLINE  ${event.reason}`);
-        writeLine(`    Reconnect attempts exhausted: ${event.attempts}`);
+        writeLine(`  ⚠ TUNNEL RECOVERY CYCLE EXHAUSTED  ${event.reason}`);
+        writeLine(`    Attempts completed : ${event.attempts}`);
+        writeLine("    Starting a fresh reconnect cycle.");
       }
     };
 
@@ -133,15 +141,23 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
       healthTimer = setInterval(async () => {
         if (!url || stopped || reconnecting) return;
         try {
-          const response = await fetch(url, {
+          const response = await fetch(new URL(HEALTH_PATH, url), {
             method: "HEAD",
             ...(options.token ? { headers: { authorization: `Bearer ${options.token}` } } : {}),
             signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
           });
+          if (!response.ok) throw new Error(`Health check returned HTTP ${response.status}.`);
           healthFailures = 0;
-          if (!response) return;
+          if (healthState === "degraded") {
+            healthState = "healthy";
+            emit({ type: "health", state: "recovered" });
+          }
         } catch {
           healthFailures += 1;
+          if (healthFailures === 1 && healthState === "healthy") {
+            healthState = "degraded";
+            emit({ type: "health", state: "degraded" });
+          }
           if (healthFailures >= HEALTH_FAILURE_THRESHOLD) {
             healthFailures = 0;
             handleDisconnect("Public tunnel health check failed.");
@@ -153,6 +169,7 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
 
     const spawnTunnel = (attempt: number): void => {
       if (stopped) return;
+      reconnecting = false;
       const args = ["http", String(options.port)];
       if (!options.random && options.subdomain) args.push("--subdomain", options.subdomain);
       child = spawn("wormhole", args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -253,10 +270,11 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
     const handleDisconnect = (reason: string): void => {
       if (stopped || reconnecting) return;
       reconnecting = true;
+      if (child && !child.killed) child.kill("SIGTERM");
       emit({ type: "disconnected", reason });
       if (attempts >= MAX_RECONNECT_ATTEMPTS) {
         emit({ type: "failed", reason, attempts });
-        return;
+        attempts = 0;
       }
       attempts += 1;
       emit({ type: "reconnecting", attempt: attempts, reason });
