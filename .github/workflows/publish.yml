@@ -58,3 +58,4 @@ jobs:
         run: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GIT_SSH_COMMAND: ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes
