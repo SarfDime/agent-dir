@@ -70,6 +70,7 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
     return {
       event: "tunnel",
       state: event.state,
+      ...(event.healthState === undefined ? {} : { healthState: event.healthState }),
       ...(event.attempt === undefined ? {} : { attempt: boundedInteger(event.attempt) }),
       ...(event.attempts === undefined ? {} : { attempts: boundedInteger(event.attempts) }),
       ...(event.durationMs === undefined ? {} : { durationMs: boundedNumber(event.durationMs) }),

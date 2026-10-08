@@ -342,6 +342,19 @@ test("tunnel telemetry records lifecycle states without raw failure details", ()
   });
 });
 
+test("health telemetry records state transitions without request metadata", () => {
+  const envelope = createTelemetryEnvelope("diagnostic", {
+    event: "tunnel",
+    state: "health",
+    healthState: "degraded",
+  });
+  assert.deepEqual(envelope.event, {
+    event: "tunnel",
+    state: "health",
+    healthState: "degraded",
+  });
+});
+
 test("telemetry aggregation counts tunnel lifecycle events separately", () => {
   const base = {
     schemaVersion: 1 as const,
