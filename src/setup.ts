@@ -132,6 +132,8 @@ export async function runFirstTimeSetup(
     }
     const npm = await optionalList(rl, "Allowed npm scripts (comma-separated, blank for none)");
     const commands = await optionalList(rl, "Allowed commands (comma-separated, blank for none)");
+    const git = await confirm(rl, "Enable dedicated Git MCP tools?", commands.includes("git"));
+    const github = await confirm(rl, "Enable dedicated GitHub MCP tools?", commands.includes("gh"));
 
     console.log("");
     console.log(`${section("◆")} ${section(bold("Telemetry"))}`);
@@ -167,6 +169,8 @@ export async function runFirstTimeSetup(
     if (subdomain) profile.subdomain = subdomain;
     if (npm.length) profile.npm = { allowedScripts: npm };
     if (commands.length) profile.commands = commands;
+    profile.git = git;
+    profile.github = github;
     config.profiles[name] = profile;
     config.telemetry = { level: telemetry };
     await saveConfig(config);

@@ -15,6 +15,7 @@ export interface Profile {
   commands?: string[];
   blacklistedCommands?: string[];
   git?: boolean;
+  github?: boolean;
 }
 
 export interface AgentConfig {
@@ -28,6 +29,7 @@ export interface CommandConfig {
   commands?: string[];
   blacklistedCommands?: string[];
   git?: boolean;
+  github?: boolean;
 }
 
 export interface ServerOptions {

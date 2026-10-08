@@ -36,6 +36,22 @@ import {
   gitStatus,
   gitUnstage,
 } from "./tools/git.js";
+import {
+  ghIssueCreate,
+  ghIssueList,
+  ghIssueView,
+  ghPrChecks,
+  ghPrComment,
+  ghPrCreate,
+  ghPrDiff,
+  ghPrList,
+  ghPrReview,
+  ghPrView,
+  ghRepoView,
+  ghRunList,
+  ghRunView,
+  ghWorkflowList,
+} from "./tools/github.js";
 import { fileInfo, packageInfo, projectOverview } from "./tools/metadata.js";
 import { runNpm } from "./tools/npm.js";
 import {
@@ -502,6 +518,149 @@ const baseTools: ToolDefinition[] = [
     commandResultSchema,
   ),
   tool(
+    "gh_repo_view",
+    "Show repository metadata through GitHub CLI. Read-only.",
+    {
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+  ),
+  tool(
+    "gh_pr_list",
+    "List pull requests through GitHub CLI. Read-only.",
+    {
+      state: { type: "string", enum: ["open", "closed", "merged", "all"], default: "open" },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+  ),
+  tool(
+    "gh_pr_view",
+    "Inspect a pull request, including checks, reviews, files, and commits. Read-only.",
+    {
+      number: { type: "integer", minimum: 1 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number"],
+  ),
+  tool(
+    "gh_pr_diff",
+    "Show a pull request diff. Read-only.",
+    {
+      number: { type: "integer", minimum: 1 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number"],
+  ),
+  tool(
+    "gh_pr_checks",
+    "Show pull request checks and their current status. Read-only.",
+    {
+      number: { type: "integer", minimum: 1 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number"],
+  ),
+  tool(
+    "gh_pr_create",
+    "Create a pull request. This creates GitHub metadata but does not merge or modify repository files.",
+    {
+      title: stringSchema,
+      body: stringSchema,
+      base: stringSchema,
+      head: stringSchema,
+      draft: { type: "boolean", default: false },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["title"],
+  ),
+  tool(
+    "gh_pr_comment",
+    "Add a comment to a pull request without changing repository files.",
+    {
+      number: { type: "integer", minimum: 1 },
+      body: stringSchema,
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number", "body"],
+  ),
+  tool(
+    "gh_pr_review",
+    "Submit an approve, comment, or request-changes review on a pull request.",
+    {
+      number: { type: "integer", minimum: 1 },
+      event: { type: "string", enum: ["APPROVE", "COMMENT", "REQUEST_CHANGES"] },
+      body: stringSchema,
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number", "event"],
+  ),
+  tool(
+    "gh_issue_list",
+    "List repository issues through GitHub CLI. Read-only.",
+    {
+      state: { type: "string", enum: ["open", "closed", "all"], default: "open" },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+  ),
+  tool(
+    "gh_issue_view",
+    "Inspect a repository issue. Read-only.",
+    {
+      number: { type: "integer", minimum: 1 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["number"],
+  ),
+  tool(
+    "gh_issue_create",
+    "Create a repository issue without modifying repository files.",
+    {
+      title: stringSchema,
+      body: stringSchema,
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["title"],
+  ),
+  tool(
+    "gh_run_list",
+    "List GitHub Actions workflow runs. Read-only.",
+    {
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+  ),
+  tool(
+    "gh_run_view",
+    "Inspect a GitHub Actions workflow run and its jobs. Read-only.",
+    {
+      runId: { type: "integer", minimum: 1 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+    ["runId"],
+  ),
+  tool(
+    "gh_workflow_list",
+    "List repository GitHub Actions workflows. Read-only.",
+    {
+      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+    },
+    commandResultSchema,
+  ),
+  tool(
     "locate",
     "Locate project code or files in one call. Use kind auto, code, text, or file.",
     {
@@ -728,6 +887,7 @@ export function createMcpHandler(
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
   const gitEnabled = commandConfig.git ?? allowedCommands.includes("git");
+  const githubEnabled = commandConfig.github ?? allowedCommands.includes("gh");
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -868,6 +1028,7 @@ export function createMcpHandler(
             allowedCommands,
             blacklistedCommands,
             gitEnabled,
+            githubEnabled,
             await codeGraph.capability(),
           ),
         },
@@ -937,6 +1098,7 @@ export function createMcpHandler(
                 allowedCommands,
                 blacklistedCommands,
                 gitEnabled,
+                githubEnabled,
                 await codeGraph.capability(),
               ),
               codeGraph: await codeGraph.capability(),
@@ -945,7 +1107,10 @@ export function createMcpHandler(
             },
           });
         case "tools/list": {
-          const page = paginate(await availableTools(codeGraph, gitEnabled), params.cursor);
+          const page = paginate(
+            await availableTools(codeGraph, gitEnabled, githubEnabled),
+            params.cursor,
+          );
           mcpSuccess = true;
           return json({
             jsonrpc: "2.0",
@@ -971,7 +1136,7 @@ export function createMcpHandler(
             );
           }
           const toolName = params.name;
-          const toolDefinition = (await availableTools(codeGraph, gitEnabled)).find(
+          const toolDefinition = (await availableTools(codeGraph, gitEnabled, githubEnabled)).find(
             (item) => item.name === toolName,
           );
           if (!toolDefinition) throw new Error(`Unknown tool: ${toolName}`);
@@ -1005,6 +1170,7 @@ export function createMcpHandler(
               allowedCommands,
               blacklistedCommands,
               gitEnabled,
+              githubEnabled,
               notify,
               request.signal,
               codeGraph,
@@ -1143,6 +1309,7 @@ export function createMcpHandler(
                       allowedCommands,
                       blacklistedCommands,
                       gitEnabled,
+                      githubEnabled,
                       await codeGraph.capability(),
                     ),
                   },
@@ -1170,6 +1337,7 @@ export function createMcpHandler(
                         allowedCommands,
                         blacklistedCommands,
                         gitEnabled,
+                        githubEnabled,
                       ),
                       null,
                       2,
@@ -1358,6 +1526,7 @@ export function createMcpHandler(
 async function availableTools(
   codeGraph: CodeGraphIntegration,
   gitEnabled: boolean,
+  githubEnabled: boolean,
 ): Promise<ToolDefinition[]> {
   const capability = await codeGraph.capability();
   const tools =
@@ -1366,7 +1535,8 @@ async function availableTools(
     capability.status === "runtime_failed"
       ? [...baseTools, codeGraphTool]
       : baseTools;
-  return gitEnabled ? tools : tools.filter((item) => !item.name.startsWith("git_"));
+  const withGit = gitEnabled ? tools : tools.filter((item) => !item.name.startsWith("git_"));
+  return githubEnabled ? withGit : withGit.filter((item) => !item.name.startsWith("gh_"));
 }
 
 function buildAgentInstructions(
@@ -1374,6 +1544,7 @@ function buildAgentInstructions(
   allowedCommands: string[],
   blacklistedCommands: string[],
   gitEnabled: boolean,
+  githubEnabled: boolean,
   codeGraph: CodeGraphCapability,
 ): string {
   const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
@@ -1392,7 +1563,7 @@ function buildAgentInstructions(
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. Use project_overview when package metadata is unnecessary.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges. Use read_relevant when one call can locate and return the needed source context.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git capability\nDedicated Git MCP tools are ${gitEnabled ? "enabled" : "disabled"} for this profile.\n\n## Tool selection\n- Discovery: project_context > locate > project_overview > find_files/list_dirs > list_files.\n- Code location: inspect_symbol > find_definition/find_symbol > locate > search_code > broad file reads.\n- File reading: read_relevant > read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_changes > git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. Use project_overview when package metadata is unnecessary.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges. Use read_relevant when one call can locate and return the needed source context.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git capability\nDedicated Git MCP tools are ${gitEnabled ? "enabled" : "disabled"} for this profile.\n\n## GitHub capability\nDedicated GitHub tools are ${githubEnabled ? "enabled" : "disabled"} for this profile.\n- GitHub tools use fixed \`gh\` subcommands only. Arbitrary \`gh api\` and destructive repository administration are not exposed as dedicated tools.\n- Prefer \`gh_pr_list\`, \`gh_pr_view\`, \`gh_pr_checks\`, and \`gh_run_view\` for inspection.\n- \`gh_pr_create\`, \`gh_pr_comment\`, \`gh_pr_review\`, and \`gh_issue_create\` change GitHub metadata but do not modify repository files.\n\n## Tool selection\n- Discovery: project_context > locate > project_overview > find_files/list_dirs > list_files.\n- Code location: inspect_symbol > find_definition/find_symbol > locate > search_code > broad file reads.\n- File reading: read_relevant > read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_changes > git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function buildAgentCapabilities(
@@ -1400,11 +1571,16 @@ function buildAgentCapabilities(
   allowedCommands: string[],
   blacklistedCommands: string[],
   gitEnabled: boolean,
+  githubEnabled: boolean,
 ): Record<string, unknown> {
   return {
     version: packageVersion,
     tools: baseTools
-      .filter((item) => gitEnabled || !item.name.startsWith("git_"))
+      .filter(
+        (item) =>
+          (gitEnabled || !item.name.startsWith("git_")) &&
+          (githubEnabled || !item.name.startsWith("gh_")),
+      )
       .map((item) => item.name),
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
     execution: {
@@ -1412,6 +1588,7 @@ function buildAgentCapabilities(
       commands: [...allowedCommands],
       blacklistedCommands: [...blacklistedCommands],
       git: gitEnabled,
+      github: githubEnabled,
     },
     efficiency: {
       preferred: {
@@ -1424,6 +1601,15 @@ function buildAgentCapabilities(
         editing: ["apply_changes", "patch_files", "write_files"],
         validation: ["validate", "diagnostics", "targeted npm script"],
         gitInspection: ["git_changes", "git_status", "git_diff", "git_log"],
+        github: [
+          "gh_repo_view",
+          "gh_pr_list",
+          "gh_pr_view",
+          "gh_pr_checks",
+          "gh_pr_diff",
+          "gh_run_list",
+          "gh_run_view",
+        ],
       },
       avoid: [
         "recursive discovery when targeted search is enough",
@@ -1452,6 +1638,7 @@ async function callTool(
   allowedCommands: string[],
   blacklistedCommands: string[],
   gitEnabled: boolean,
+  githubEnabled: boolean,
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1473,6 +1660,9 @@ async function callTool(
   }
   if (name.startsWith("git_") && !gitEnabled) {
     throw new Error("Dedicated Git tools are disabled for this profile.");
+  }
+  if (name.startsWith("gh_") && !githubEnabled) {
+    throw new Error("Dedicated GitHub tools are disabled for this profile.");
   }
 
   switch (name) {
@@ -1732,6 +1922,94 @@ async function callTool(
         ),
         outputBytesArg(args.maxBytes),
       );
+      break;
+    case "gh_repo_view":
+      structuredContent = await ghRepoView(root, outputBytesArg(args.maxBytes));
+      break;
+    case "gh_pr_list":
+      structuredContent = await ghPrList(
+        root,
+        String(args.state ?? "open"),
+        numberArg(args.limit, 20, 100),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_pr_view":
+      structuredContent = await ghPrView(root, Number(args.number), outputBytesArg(args.maxBytes));
+      break;
+    case "gh_pr_diff":
+      structuredContent = await ghPrDiff(root, Number(args.number), outputBytesArg(args.maxBytes));
+      break;
+    case "gh_pr_checks":
+      structuredContent = await ghPrChecks(
+        root,
+        Number(args.number),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_pr_create":
+      structuredContent = await ghPrCreate(
+        root,
+        String(args.title),
+        args.body === undefined ? undefined : String(args.body),
+        args.base === undefined ? undefined : String(args.base),
+        args.head === undefined ? undefined : String(args.head),
+        args.draft === true,
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_pr_comment":
+      structuredContent = await ghPrComment(
+        root,
+        Number(args.number),
+        String(args.body),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_pr_review":
+      structuredContent = await ghPrReview(
+        root,
+        Number(args.number),
+        String(args.event) as "APPROVE" | "COMMENT" | "REQUEST_CHANGES",
+        args.body === undefined ? undefined : String(args.body),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_issue_list":
+      structuredContent = await ghIssueList(
+        root,
+        String(args.state ?? "open"),
+        numberArg(args.limit, 20, 100),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_issue_view":
+      structuredContent = await ghIssueView(
+        root,
+        Number(args.number),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_issue_create":
+      structuredContent = await ghIssueCreate(
+        root,
+        String(args.title),
+        args.body === undefined ? undefined : String(args.body),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_run_list":
+      structuredContent = await ghRunList(
+        root,
+        numberArg(args.limit, 20, 100),
+        outputBytesArg(args.maxBytes),
+      );
+      break;
+    case "gh_run_view":
+      structuredContent = await ghRunView(root, Number(args.runId), outputBytesArg(args.maxBytes));
+      break;
+    case "gh_workflow_list":
+      structuredContent = await ghWorkflowList(root, outputBytesArg(args.maxBytes));
       break;
     case "locate": {
       const query = String(args.query);
@@ -2292,6 +2570,8 @@ function commandTelemetryDescriptor(
   if (toolName === "validate") return { family: "npm", operation: "validate" };
   if (toolName.startsWith("git_"))
     return { family: "git", operation: toolName.slice("git_".length) };
+  if (toolName.startsWith("gh_"))
+    return { family: "github", operation: toolName.slice("gh_".length) };
   return undefined;
 }
 

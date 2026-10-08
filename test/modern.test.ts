@@ -214,6 +214,49 @@ function requestFor(id: number, method: string, params: Record<string, unknown> 
   });
 }
 
+test("GitHub MCP tools are capability-gated", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-github-gating-"));
+  try {
+    const disabled = createMcpHandler(root);
+    const disabledList = await disabled(requestFor(1, "tools/list"));
+    const disabledBody = (await disabledList.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    assert.equal(
+      disabledBody.result.tools.some((tool) => tool.name === "gh_pr_create"),
+      false,
+    );
+
+    const enabled = createMcpHandler(root, { github: true });
+    const enabledList = await enabled(requestFor(2, "tools/list"));
+    const enabledBody = (await enabledList.json()) as {
+      result: { tools: Array<{ name: string }> };
+    };
+    assert.equal(
+      enabledBody.result.tools.some((tool) => tool.name === "gh_pr_create"),
+      true,
+    );
+    assert.equal(
+      enabledBody.result.tools.some((tool) => tool.name === "gh_pr_view"),
+      true,
+    );
+
+    const direct = await disabled(
+      requestFor(3, "tools/call", {
+        name: "gh_pr_view",
+        arguments: { number: 1 },
+      }),
+    );
+    const directBody = (await direct.json()) as {
+      result: { isError?: boolean; structuredContent?: { error?: string } };
+    };
+    assert.equal(directBody.result.isError, true);
+    assert.match(directBody.result.structuredContent?.error ?? "", /Unknown tool: gh_pr_view/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Git MCP tools are capability-gated", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-git-gating-"));
   try {
@@ -1344,6 +1387,7 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
         commands: string[];
         blacklistedCommands: string[];
         git: boolean;
+        github: boolean;
       };
       efficiency: { preferred: { orientation: string } };
     };
@@ -1352,6 +1396,7 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
       commands: ["git", "rg"],
       blacklistedCommands: [],
       git: true,
+      github: false,
     });
     assert.equal(capabilityDocument.efficiency.preferred.orientation, "project_context");
   } finally {

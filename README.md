@@ -49,7 +49,7 @@ The Wormhole URL is only the transport endpoint. `agent-dir` authentication is e
 
 ## First-run setup
 
-On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating your first saved profile. It asks for the profile name, directory, port, tunnel, optional Wormhole subdomain, optional npm scripts, optional allowed commands, and telemetry preference. The generated authentication token is saved with the profile.
+On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating your first saved profile. It asks for the profile name, directory, port, tunnel, optional Wormhole subdomain, optional npm scripts, optional allowed commands, dedicated Git/GitHub tool capabilities, and telemetry preference. The generated authentication token is saved with the profile.
 
 Telemetry is optional and stays local. During setup, `agent-dir` explains the available levels: **none**, **anonymous**, **basic**, and **detailed**. Telemetry is disabled by default if you choose the default option. The same choices can later be changed with `agent-dir telemetry enable|disable`.
 
@@ -73,7 +73,7 @@ Non-interactive invocations and invocations with explicit launch options do not 
 
 ## Profiles
 
-Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, allowed non-npm commands, blocked command prefixes, and whether dedicated Git MCP tools are enabled. Dedicated Git tools are enabled automatically when `git` is in the allowed command list, or explicitly with `--git`; use `--no-git` to disable them for a run.
+Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, allowed non-npm commands, blocked command prefixes, and whether dedicated Git and GitHub MCP tools are enabled. Dedicated Git and GitHub tools are independent capabilities from the generic `git` and `gh` command allowlist. They default to enabled when the corresponding executable is allowed, but can also be explicitly enabled without allowing the generic command.
 
 ```bash
 agent-dir config add my-project \
@@ -81,7 +81,7 @@ agent-dir config add my-project \
   --tunnel wormhole \
   --subdomain my-project-x7k4m2 \
   --npm typecheck,lint,format,test,build \
-  --command grep,find,rg,git \
+  --command grep,find,rg,git,gh \
   --blacklist "git commit,git push --force"
 ```
 
@@ -225,6 +225,15 @@ The server log distinguishes protocol/header validation from MCP handler errors.
 | `git_commit` | Commit staged changes |
 | `git_restore` | Restore paths, discarding unstaged changes |
 | `git_push` | Push the current branch to a remote |
+| `gh_repo_view` | GitHub repository metadata |
+| `gh_pr_list` / `gh_pr_view` | List and inspect pull requests |
+| `gh_pr_diff` / `gh_pr_checks` | Inspect PR changes and CI checks |
+| `gh_pr_create` | Create a pull request |
+| `gh_pr_comment` / `gh_pr_review` | Comment on or review a pull request |
+| `gh_issue_list` / `gh_issue_view` | List and inspect issues |
+| `gh_issue_create` | Create an issue |
+| `gh_run_list` / `gh_run_view` | Inspect GitHub Actions runs |
+| `gh_workflow_list` | List GitHub Actions workflows |
 | `project_overview` | Project structure, languages, package managers, and Git state |
 | `package_info` / `file_info` | Project and filesystem metadata |
 | `diagnostics` | Project-independent diagnostics; does not run tests, lint, or typecheck |
@@ -271,8 +280,20 @@ npm scripts must be explicitly enabled:
 Normal executables use a separate allowlist:
 
 ```text
---command grep,find,rg,git
+--command grep,find,rg,git,gh
 ```
+
+Dedicated Git and GitHub tools can be enabled independently of the generic command allowlist:
+
+```json
+{
+  "commands": ["grep", "rg", "find"],
+  "git": true,
+  "github": true
+}
+```
+
+This exposes the dedicated Git/GitHub MCP tools without giving the agent generic `git` or `gh` command execution through `run_command_batch`. Conversely, `git` or `gh` in `commands` enables the corresponding dedicated tools by default. Use `--git` / `--no-git` and `--github` / `--no-github` to override those capabilities for a run.
 
 Commands are launched with `shell: false`; the MCP client supplies the executable and arguments separately. Dedicated Git MCP tools are separately capability-gated; they are exposed only when Git is enabled for the active profile. If Git is disabled, direct calls to Git tools are rejected even if a client attempts to invoke them by name. An executable that is not in the allowlist is rejected. A configured `blacklistedCommands` entry overrides the allowlist and blocks matching command prefixes, so `git` can be allowed while `git commit` is blocked and `git status` remains available. Entries are whitespace-separated command/argument prefixes, for example `git commit` or `git push --force`.
 
@@ -289,7 +310,7 @@ agent-dir://instructions
 agent-dir://capabilities
 ```
 
-The instructions emphasize efficient tool selection: targeted search before reading, bounded ranges before whole-file reads, dedicated tools before generic commands, batched related operations, narrow validation before full checks, and scoped Git inspection before full diffs. The execution policy is generated from the active profile, so changing `allowedScripts`, `commands`, or `blacklistedCommands` automatically changes what the agent is told it can execute.
+The instructions emphasize efficient tool selection: targeted search before reading, bounded ranges before whole-file reads, dedicated tools before generic commands, batched related operations, narrow validation before full checks, and scoped Git inspection before full diffs. The execution policy is generated from the active profile, so changing `allowedScripts`, `commands`, `blacklistedCommands`, `git`, or `github` automatically changes what the agent is told it can execute.
 
 The capabilities resource is machine-readable and includes the running Agent Dir version, registered tool names, execution policy, and preferred/avoid tool-selection patterns. This keeps the MCP server itself as the source of truth; client-specific instruction files do not need to be maintained when Agent Dir changes.
 
@@ -419,7 +440,7 @@ The TypeScript configuration uses strict checking, exact optional properties, un
 
 File access is rooted at the shared directory and resolves existing paths through their real filesystem targets, preventing symlinks from escaping the exposed root. HTTP request bodies are limited to 10 MiB. npm scripts and external executables use explicit allowlists, and external commands are not passed through a shell.
 
-Because file writes, deletion, command execution, and Git write operations can modify a project or remote repository, expose only directories and capabilities you intend an AI agent to control. Git write tools are intentionally explicit: staging, unstaging, committing, restoring, and pushing are separate operations. `git_restore` discards unstaged changes, and `git_push` can modify a remote repository. If you do not want Git mutation, do not use the Git write tools and do not allow `git` through the generic command allowlist.
+Because file writes, deletion, command execution, Git write operations, and GitHub metadata operations can modify a project or remote repository, expose only directories and capabilities you intend an AI agent to control. Dedicated GitHub tools are enabled when the profile explicitly enables `github` or allows the `gh` executable. They expose fixed PR, issue, run, and workflow operations; arbitrary `gh api`, repository administration, merge, deletion, release deletion, secrets, and permission management are not exposed as dedicated tools. Git write tools are intentionally explicit: staging, unstaging, committing, restoring, and pushing are separate operations. `git_restore` discards unstaged changes, and `git_push` can modify a remote repository. If you do not want Git mutation, do not use the Git write tools and do not allow `git` through the generic command allowlist.
 
 The diagnostics tool is deliberately project-independent. It checks conditions such as invalid JSON, broken symlinks, and unresolved merge-conflict markers instead of assuming a particular test runner, linter, compiler, or package ecosystem. Never share directories containing credentials, SSH keys, private certificates, production secrets, or unrelated personal data.
 

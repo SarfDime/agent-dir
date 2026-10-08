@@ -57,6 +57,20 @@ const TOOL_ICONS: Record<string, string> = {
   read_relevant: "🎯",
   git_changes: "📋",
   apply_changes: "✏️",
+  gh_repo_view: "🐙",
+  gh_pr_list: "🔀",
+  gh_pr_view: "🔀",
+  gh_pr_diff: "📝",
+  gh_pr_checks: "✓",
+  gh_pr_create: "➕",
+  gh_pr_comment: "💬",
+  gh_pr_review: "👀",
+  gh_issue_list: "📋",
+  gh_issue_view: "📋",
+  gh_issue_create: "➕",
+  gh_run_list: "⚙",
+  gh_run_view: "⚙",
+  gh_workflow_list: "⚙",
   validate: "✓",
 };
 
@@ -135,6 +149,7 @@ export function printHelp(): void {
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
   writeLine("      --git                  Enable dedicated Git MCP tools");
+  writeLine("      --github              Enable dedicated GitHub MCP tools");
   writeLine("      --no-git               Disable dedicated Git MCP tools");
   writeLine("      --token <token>        Explicit Bearer token");
   writeLine("      --no-tunnel            Disable tunneling");
@@ -172,6 +187,7 @@ export function printBanner(options: {
   commands?: string[];
   blacklistedCommands?: string[];
   gitEnabled?: boolean;
+  githubEnabled?: boolean;
 }): void {
   writeLine("");
   const banner = [
@@ -224,6 +240,22 @@ export function printBanner(options: {
     writeLine(`    ${color(toolLabel("git_push"), BRIGHT_BLUE)}`);
     writeLine(`    ${color(toolLabel("git_diff"), CYAN)}`);
     writeLine(`    ${color(toolLabel("git_log"), CYAN)}`);
+  }
+  if (options.githubEnabled) {
+    writeLine(`    ${color(toolLabel("gh_repo_view"), BRIGHT_CYAN)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_list"), BRIGHT_BLUE)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_view"), BRIGHT_BLUE)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_diff"), CYAN)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_checks"), GREEN)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_create"), BRIGHT_GREEN)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_comment"), BRIGHT_CYAN)}`);
+    writeLine(`    ${color(toolLabel("gh_pr_review"), BRIGHT_MAGENTA)}`);
+    writeLine(`    ${color(toolLabel("gh_issue_list"), CYAN)}`);
+    writeLine(`    ${color(toolLabel("gh_issue_view"), CYAN)}`);
+    writeLine(`    ${color(toolLabel("gh_issue_create"), BRIGHT_GREEN)}`);
+    writeLine(`    ${color(toolLabel("gh_run_list"), YELLOW)}`);
+    writeLine(`    ${color(toolLabel("gh_run_view"), YELLOW)}`);
+    writeLine(`    ${color(toolLabel("gh_workflow_list"), YELLOW)}`);
   }
   writeLine(`    ${color(toolLabel("project_overview"), BRIGHT_CYAN)}`);
   writeLine(`    ${color(toolLabel("package_info"), YELLOW)}`);
