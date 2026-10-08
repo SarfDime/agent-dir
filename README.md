@@ -51,7 +51,7 @@ The Wormhole URL is only the transport endpoint. `agent-dir` authentication is e
 
 On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating your first saved profile. It asks for the profile name, directory, port, tunnel, optional Wormhole subdomain, optional npm scripts, optional allowed commands, and telemetry preference. The generated authentication token is saved with the profile.
 
-Telemetry is optional and stays local. During setup, `agent-dir` explains the available levels: **none**, **anonymous**, **basic**, and **detailed**. Telemetry is disabled by default if you choose the default option. The same choices can later be changed with `agent-dir telemetry enable|disable`.
+Telemetry is optional and stays local. During setup, `agent-dir` explains the available levels: **none**, **anonymous**, **basic**, **detailed**, and **diagnostic**. Telemetry is disabled by default if you choose the default option. The same choices can later be changed with `agent-dir telemetry enable|disable`.
 
 You can also run the setup wizard explicitly at any time:
 
@@ -130,6 +130,7 @@ Enable a privacy level with:
 agent-dir telemetry enable anonymous
 agent-dir telemetry enable basic
 agent-dir telemetry enable detailed
+agent-dir telemetry enable diagnostic
 ```
 
 Levels add bounded operational context:
@@ -138,7 +139,7 @@ Levels add bounded operational context:
 - **basic** — anonymous data plus bounded Agent Dir/Node/platform and MCP client version information.
 - **detailed** — basic data plus coarse project classification such as language, package manager, Git/CodeGraph availability, and project size.
 
-Telemetry never records file contents, command arguments, authentication tokens, environment variables, or project paths. Session telemetry separates wall-clock session lifetime from active MCP request time and the gaps between requests; those gaps may include agent reasoning, network delay, or other idle time and are not presented as agent thinking time. Persistence failures do not affect MCP requests.
+Standard telemetry levels never record file contents, command arguments, authentication tokens, environment variables, or project paths. The opt-in diagnostic level additionally records local troubleshooting metadata such as project paths, hostname, username, process identifiers, Node version, memory usage, and process uptime; it remains local and is never uploaded by Agent Dir. Session telemetry separates wall-clock session lifetime from active MCP request time and the gaps between requests; those gaps may include agent reasoning, network delay, or other idle time and are not presented as agent thinking time. Persistence failures do not affect MCP requests.
 
 Manage telemetry with:
 

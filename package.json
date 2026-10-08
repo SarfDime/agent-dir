@@ -20,7 +20,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"fs.rmSync(\u0027dist\u0027, { recursive: true, force: true })\" && tsc",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "start": "node ./dist/bin/agent-dir.js .",
     "typecheck": "tsc --noEmit",

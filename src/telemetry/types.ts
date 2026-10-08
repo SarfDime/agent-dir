@@ -1,4 +1,4 @@
-export const TELEMETRY_LEVELS = ["none", "anonymous", "basic", "detailed"] as const;
+export const TELEMETRY_LEVELS = ["none", "anonymous", "basic", "detailed", "diagnostic"] as const;
 
 export type TelemetryLevel = (typeof TELEMETRY_LEVELS)[number];
 
@@ -7,6 +7,16 @@ export interface TelemetryConfig {
   configId?: string;
   persist?: boolean;
   sessionId?: string;
+}
+
+export interface TelemetryHttpRequestEvent {
+  event: "http_request";
+  method: string;
+  route: "mcp" | "tree" | "root" | "file" | "other";
+  status: number;
+  success: boolean;
+  durationMs: number;
+  authenticated: boolean;
 }
 
 export interface TelemetryMcpRequestEvent {
@@ -41,6 +51,15 @@ export interface TelemetryCommandEvent {
   errorCategory?: string;
 }
 
+export interface TelemetryTunnelEvent {
+  event: "tunnel";
+  state: "online" | "disconnected" | "reconnecting" | "reconnected" | "failed";
+  attempt?: number;
+  attempts?: number;
+  durationMs?: number;
+  reasonCategory?: string;
+}
+
 export interface TelemetrySessionEvent {
   event: "session";
   wallClockDurationMs: number;
@@ -52,9 +71,11 @@ export interface TelemetrySessionEvent {
 }
 
 export type AnonymousTelemetryEvent =
+  | TelemetryHttpRequestEvent
   | TelemetryMcpRequestEvent
   | TelemetryToolEvent
   | TelemetryCommandEvent
+  | TelemetryTunnelEvent
   | TelemetrySessionEvent;
 
 export interface TelemetryRuntimeContext {
@@ -64,9 +85,18 @@ export interface TelemetryRuntimeContext {
   arch: string;
   mcpClientName?: string;
   mcpClientVersion?: string;
+  nodeVersion?: string;
+  hostname?: string;
+  username?: string;
+  processId?: number;
+  parentProcessId?: number;
+  processUptimeMs?: number;
+  memoryRssBytes?: number;
 }
 
 export interface TelemetryProjectContext {
+  projectRoot?: string;
+  workingDirectory?: string;
   language?: "typescript" | "javascript" | "python" | "go" | "rust" | "java" | "other";
   framework?: "nextjs" | "react" | "hono" | "node" | "other";
   packageManager?: "npm" | "pnpm" | "yarn" | "bun" | "other";

@@ -140,8 +140,11 @@ export async function runFirstTimeSetup(
       bold("Privacy first"),
       dim("Telemetry is optional and stays local on this machine."),
       dim("It helps us understand usage, failures, and reliability improvements."),
-      dim("Never records file contents, command arguments, tokens,"),
+      dim("Standard levels never record file contents, command arguments, tokens,"),
       dim("environment variables, or project paths."),
+      dim(
+        "Diagnostic mode is a separate opt-in local troubleshooting mode and records identifying metadata.",
+      ),
     ]);
 
     console.log("");
@@ -155,11 +158,14 @@ export async function runFirstTimeSetup(
     console.log(
       `  ${cyan("●")} ${white("detailed")}   ${dim("basic + coarse language, package manager, Git, CodeGraph, project size")}`,
     );
+    console.log(
+      `  ${cyan("●")} ${white("diagnostic")} ${dim("detailed + local paths, host/user, PID, Node version, memory/uptime")}`,
+    );
     console.log("");
     const telemetry = await choose(
       rl,
       "Telemetry level",
-      ["none", "anonymous", "basic", "detailed"] as const,
+      ["none", "anonymous", "basic", "detailed", "diagnostic"] as const,
       "none",
     );
 

@@ -129,6 +129,55 @@ test("detailed telemetry adds only bounded project classification", () => {
   });
 });
 
+test("diagnostic telemetry explicitly includes bounded local troubleshooting metadata", () => {
+  const envelope = createTelemetryEnvelope(
+    "diagnostic",
+    {
+      event: "session",
+      wallClockDurationMs: 100,
+      activeRequestDurationMs: 50,
+      idleGapDurationMs: 50,
+      requestCount: 1,
+      toolCallCount: 0,
+      commandCallCount: 0,
+    },
+    {
+      agentDirVersion: "0.3.1",
+      nodeMajor: 24,
+      os: "linux",
+      arch: "x64",
+      mcpClientName: "Claude Desktop",
+      mcpClientVersion: "1.0.0",
+      nodeVersion: "24.8.0",
+      hostname: "workstation-01",
+      username: "dime",
+      processId: 1234,
+      parentProcessId: 1000,
+      processUptimeMs: 5000,
+      memoryRssBytes: 50_000_000,
+    },
+    {
+      projectRoot: "/home/dime/Documents/project",
+      workingDirectory: "/home/dime/Documents/project",
+      language: "typescript",
+      framework: "nextjs",
+      packageManager: "npm",
+      hasGit: true,
+      projectSize: "medium",
+    },
+  );
+
+  assert.equal(envelope.level, "diagnostic");
+  assert.equal(envelope.runtime?.hostname, "workstation-01");
+  assert.equal(envelope.runtime?.username, "dime");
+  assert.equal(envelope.runtime?.nodeVersion, "24.8.0");
+  assert.equal(envelope.runtime?.processId, 1234);
+  assert.equal(envelope.project?.projectRoot, "/home/dime/Documents/project");
+  assert.equal(envelope.project?.workingDirectory, "/home/dime/Documents/project");
+  assert.equal("token" in envelope, false);
+  assert.equal("environment" in envelope, false);
+});
+
 test("privacy sanitizer rejects raw command arguments and identifying values", () => {
   const event = sanitizeAnonymousEvent({
     event: "command_call",
@@ -276,6 +325,52 @@ test("telemetry aggregation separates configs and summarizes tool performance", 
   assert.equal(scriptr.sessions["session-a"]?.commandCallCount, 1);
   assert.equal(scriptr.sessions["session-a"]?.toolSuccessRate, 50);
   assert.equal(scriptr.sessions["session-a"]?.mcpSuccessRate, null);
+});
+
+test("tunnel telemetry records lifecycle states without raw failure details", () => {
+  const event = sanitizeAnonymousEvent({
+    event: "tunnel",
+    state: "disconnected",
+    attempt: 2,
+    reasonCategory: "public endpoint failed",
+  });
+  assert.deepEqual(event, {
+    event: "tunnel",
+    state: "disconnected",
+    attempt: 2,
+    reasonCategory: "unknown",
+  });
+});
+
+test("telemetry aggregation counts tunnel lifecycle events separately", () => {
+  const base = {
+    schemaVersion: 1 as const,
+    timestamp: new Date().toISOString(),
+    level: "anonymous" as const,
+    configId: "scriptr",
+    sessionId: "tunnel-test",
+  };
+  const summary = summarizeTelemetry([
+    { ...base, event: { event: "tunnel", state: "online", attempt: 0 } },
+    { ...base, event: { event: "tunnel", state: "disconnected", reasonCategory: "timeout" } },
+    {
+      ...base,
+      event: { event: "tunnel", state: "reconnecting", attempt: 1, reasonCategory: "timeout" },
+    },
+    { ...base, event: { event: "tunnel", state: "reconnected", attempt: 1 } },
+    {
+      ...base,
+      event: { event: "tunnel", state: "failed", attempts: 5, reasonCategory: "execution" },
+    },
+  ]);
+  const config = summary.configs.scriptr;
+  assert.ok(config);
+  assert.equal(config.tunnelEvents, 5);
+  assert.equal(config.tunnelDisconnects, 1);
+  assert.equal(config.tunnelReconnects, 1);
+  assert.equal(config.tunnelFailures, 1);
+  assert.equal(config.mcpRequests, 0);
+  assert.equal(config.toolCalls, 0);
 });
 
 test("recorder is bounded and returns isolated snapshots", () => {

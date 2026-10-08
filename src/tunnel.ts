@@ -1,138 +1,271 @@
+import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
-import type { TunnelOptions, TunnelResult } from "./types.js";
+import { TelemetryRecorder } from "./telemetry/recorder.js";
+import type { TunnelEvent, TunnelOptions, TunnelResult } from "./types.js";
 
 const STARTUP_TIMEOUT_MS = 15_000;
+const HEALTH_INTERVAL_MS = 15_000;
+const HEALTH_TIMEOUT_MS = 5_000;
+const HEALTH_FAILURE_THRESHOLD = 2;
+const RECONNECT_DELAY_MS = 1_000;
+const MAX_RECONNECT_ATTEMPTS = 5;
 const ANSI_ESCAPE = new RegExp(String.fromCharCode(0x1b) + String.raw`\[[0-?]*[ -/]*[@-~]`, "g");
 
 function cleanOutput(value: Buffer | string): string {
   return value.toString().replace(ANSI_ESCAPE, "");
 }
-
 function writeLine(line = ""): void {
   process.stdout.write(`${line}\r\n`);
 }
-
 function publicUrl(subdomain: string): string {
   return `https://${subdomain}.wormhole.bar`;
 }
-
-function failureFromLine(line: string): string | undefined {
-  if (/subdomain limit reached/i.test(line)) {
-    return "Wormhole rejected the tunnel: subdomain limit reached. Release an existing subdomain first.";
-  }
-
-  const registration = line.match(/registration failed:\s*(.+?)(?:\n|$)/i);
-  const reason = registration?.[1];
-  if (reason) {
-    return `Wormhole registration failed: ${reason.trim()}`;
-  }
-
-  return undefined;
+function reasonCategory(reason: string): string {
+  if (/timeout/i.test(reason)) return "timeout";
+  if (/auth/i.test(reason)) return "authentication";
+  if (/registration|subdomain/i.test(reason)) return "startup";
+  if (/exit|process|error/i.test(reason)) return "execution";
+  return "unknown";
 }
 
-export function startTunnel({
-  provider,
-  port,
-  subdomain,
-  random,
-}: TunnelOptions): Promise<TunnelResult> {
-  if (provider !== "wormhole")
-    throw new Error(
-      `Unsupported tunnel provider: ${provider}. Use --tunnel wormhole or --no-tunnel.`,
-    );
+function failureFromLine(line: string): string | undefined {
+  if (/subdomain limit reached/i.test(line))
+    return "Wormhole rejected the tunnel: subdomain limit reached.";
+  const registration = line.match(/registration failed:\s*(.+?)(?:\n|$)/i);
+  return registration?.[1] ? `Wormhole registration failed: ${registration[1].trim()}` : undefined;
+}
+
+export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
+  if (options.provider !== "wormhole")
+    return Promise.reject(new Error(`Unsupported tunnel provider: ${options.provider}`));
+
   return new Promise((resolve, reject) => {
-    const args = ["http", String(port)];
-    if (!random && subdomain) args.push("--subdomain", subdomain);
-
-    const child = spawn("wormhole", args, {
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let settled = false;
-    let buffer = "";
+    const telemetry =
+      options.telemetry && options.telemetry.level !== "none"
+        ? new TelemetryRecorder({
+            ...options.telemetry,
+            persist: options.telemetry.persist ?? true,
+            sessionId: options.telemetry.sessionId ?? `tunnel-${Date.now().toString(36)}`,
+          })
+        : undefined;
+    let child: ChildProcess | undefined;
+    let url: string | undefined;
+    let startup = true;
+    let resolved = false;
+    let reconnecting = false;
+    let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let healthTimer: ReturnType<typeof setInterval> | undefined;
+    let stopped = false;
+    let healthFailures = 0;
 
-    const cleanup = (): void => {
+    const record = (event: TunnelEvent): void => {
+      if (!telemetry) return;
+      if (event.type === "online")
+        telemetry.record({ event: "tunnel", state: "online", attempt: event.attempt });
+      else if (event.type === "disconnected")
+        telemetry.record({
+          event: "tunnel",
+          state: "disconnected",
+          reasonCategory: reasonCategory(event.reason),
+        });
+      else if (event.type === "reconnecting")
+        telemetry.record({
+          event: "tunnel",
+          state: "reconnecting",
+          attempt: event.attempt,
+          reasonCategory: reasonCategory(event.reason),
+        });
+      else if (event.type === "reconnected")
+        telemetry.record({ event: "tunnel", state: "reconnected", attempt: event.attempt });
+      else
+        telemetry.record({
+          event: "tunnel",
+          state: "failed",
+          attempts: event.attempts,
+          reasonCategory: reasonCategory(event.reason),
+        });
+    };
+
+    const emit = (event: TunnelEvent): void => {
+      record(event);
+      if (event.type === "online") {
+        writeLine();
+        writeLine("  ✓ TUNNEL ONLINE");
+        writeLine(`    Public URL   : ${event.url}`);
+        writeLine(`    MCP endpoint : ${event.url}/mcp`);
+        writeLine(`    Forwarding   : ${event.url} → http://127.0.0.1:${options.port}`);
+        writeLine();
+      } else if (event.type === "disconnected") {
+        writeLine();
+        writeLine(`  ⚠ TUNNEL DISCONNECTED  ${event.reason}`);
+      } else if (event.type === "reconnecting") {
+        writeLine(`    Reconnecting : attempt ${event.attempt}/${MAX_RECONNECT_ATTEMPTS}`);
+      } else if (event.type === "reconnected") {
+        writeLine(`  ✓ TUNNEL RECONNECTED  attempt ${event.attempt}`);
+        writeLine(`    Public URL   : ${event.url}`);
+        writeLine(`    MCP endpoint : ${event.url}/mcp`);
+        writeLine();
+      } else {
+        writeLine(`  ✖ TUNNEL OFFLINE  ${event.reason}`);
+        writeLine(`    Reconnect attempts exhausted: ${event.attempts}`);
+      }
+    };
+
+    const cleanupTimers = (): void => {
       if (timer) clearTimeout(timer);
-      child.stdout?.removeListener("data", onData);
-      child.stderr?.removeListener("data", onData);
-      child.removeListener("error", onError);
-      child.removeListener("exit", onExit);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (healthTimer) clearInterval(healthTimer);
+      timer = undefined;
+      reconnectTimer = undefined;
+      healthTimer = undefined;
     };
 
-    const fail = (message: string): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (!child.killed) child.kill("SIGTERM");
-      reject(new Error(message));
+    const stop = (): void => {
+      stopped = true;
+      cleanupTimers();
+      if (child && !child.killed) child.kill("SIGTERM");
     };
 
-    const succeed = (url: string): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-
-      writeLine();
-      writeLine("  ✓ TUNNEL ONLINE");
-      writeLine(`    Public URL   : ${url}`);
-      writeLine(`    MCP endpoint : ${url}/mcp`);
-      writeLine(`    Forwarding   : ${url} → http://127.0.0.1:${port}`);
-      writeLine();
-
-      resolve({ child, url });
+    const startHealthChecks = (): void => {
+      if (!url || stopped || healthTimer) return;
+      healthTimer = setInterval(async () => {
+        if (!url || stopped || reconnecting) return;
+        try {
+          const response = await fetch(url, {
+            method: "HEAD",
+            ...(options.token ? { headers: { authorization: `Bearer ${options.token}` } } : {}),
+            signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+          });
+          healthFailures = 0;
+          if (!response) return;
+        } catch {
+          healthFailures += 1;
+          if (healthFailures >= HEALTH_FAILURE_THRESHOLD) {
+            healthFailures = 0;
+            handleDisconnect("Public tunnel health check failed.");
+          }
+        }
+      }, HEALTH_INTERVAL_MS);
+      healthTimer.unref();
     };
 
-    const processLine = (rawLine: string): void => {
-      const line = cleanOutput(rawLine).trim();
-      if (!line) return;
+    const spawnTunnel = (attempt: number): void => {
+      if (stopped) return;
+      const args = ["http", String(options.port)];
+      if (!options.random && options.subdomain) args.push("--subdomain", options.subdomain);
+      child = spawn("wormhole", args, { stdio: ["ignore", "pipe", "pipe"] });
+      let buffer = "";
+      let connected = false;
 
-      const failure = failureFromLine(line);
-      if (failure) {
-        fail(failure);
+      const cleanupAttempt = (): void => {
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+        child?.stdout?.removeListener("data", onData);
+        child?.stderr?.removeListener("data", onData);
+        child?.removeListener("error", onError);
+        child?.removeListener("exit", onExit);
+      };
+
+      const disconnect = (reason: string): void => {
+        cleanupAttempt();
+        if (child && !child.killed) child.kill("SIGTERM");
+        if (stopped) return;
+        if (startup) {
+          stop();
+          reject(new Error(reason));
+          return;
+        }
+        handleDisconnect(reason);
+      };
+
+      const connectedAt = (nextUrl: string): void => {
+        if (connected || stopped) return;
+        connected = true;
+        url = nextUrl;
+        if (timer) clearTimeout(timer);
+        timer = undefined;
+        if (startup) {
+          startup = false;
+          emit({ type: "online", url, attempt });
+          startHealthChecks();
+          if (!resolved) {
+            if (!child) {
+              stop();
+              reject(new Error("Wormhole connected without a child process."));
+              return;
+            }
+            resolved = true;
+            resolve({ child, url, onEvent: emit, stop });
+          }
+        } else {
+          reconnecting = false;
+          attempts = 0;
+          healthFailures = 0;
+          emit({ type: "reconnected", url, attempt });
+          startHealthChecks();
+        }
+      };
+
+      const processLine = (raw: string): void => {
+        const line = cleanOutput(raw).trim();
+        if (!line) return;
+        const failure = failureFromLine(line);
+        if (failure) {
+          disconnect(failure);
+          return;
+        }
+        const explicit = line.match(/https:\/\/[^\s"'<>]+/)?.[0]?.replace(/[),.;]+$/, "");
+        if (explicit) connectedAt(explicit);
+        else if (/Status\s+.*connected/i.test(line) && options.subdomain)
+          connectedAt(publicUrl(options.subdomain));
+      };
+
+      const onData = (chunk: Buffer): void => {
+        buffer += cleanOutput(chunk);
+        const lines = buffer.split(/\r\n|\n|\r/);
+        buffer = lines.pop() ?? "";
+        for (const line of lines) processLine(line);
+      };
+      const onError = (error: Error): void => disconnect(`Wormhole error: ${error.message}`);
+      const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+        const detail = signal ? `signal ${signal}` : `code ${code}`;
+        disconnect(
+          startup
+            ? `Wormhole exited before the tunnel was established (${detail}).`
+            : `Wormhole process exited (${detail}).`,
+        );
+      };
+
+      child.stdout?.on("data", onData);
+      child.stderr?.on("data", onData);
+      child.once("error", onError);
+      child.once("exit", onExit);
+      timer = setTimeout(() => {
+        if (!connected)
+          disconnect(
+            `Timed out waiting for Wormhole to establish the tunnel after ${STARTUP_TIMEOUT_MS / 1000}s.`,
+          );
+      }, STARTUP_TIMEOUT_MS);
+    };
+
+    const handleDisconnect = (reason: string): void => {
+      if (stopped || reconnecting) return;
+      reconnecting = true;
+      emit({ type: "disconnected", reason });
+      if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+        emit({ type: "failed", reason, attempts });
         return;
       }
-
-      const explicitUrl = line.match(/https:\/\/[^\s"'<>]+/)?.[0]?.replace(/[),.;]+$/, "");
-      if (explicitUrl) {
-        succeed(explicitUrl);
-        return;
-      }
-
-      if (/Status\s+.*connected/i.test(line)) {
-        if (subdomain) succeed(publicUrl(subdomain));
-      }
+      attempts += 1;
+      emit({ type: "reconnecting", attempt: attempts, reason });
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        spawnTunnel(attempts);
+      }, RECONNECT_DELAY_MS * attempts);
     };
 
-    const onData = (chunk: Buffer): void => {
-      buffer += cleanOutput(chunk);
-      const lines = buffer.split(/\r\n|\n|\r/);
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        processLine(line);
-        if (settled) break;
-      }
-    };
-
-    const onError = (error: Error): void => {
-      fail(`Unable to start Wormhole: ${error.message}`);
-    };
-
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) return;
-      const detail = signal ? `signal ${signal}` : `code ${code}`;
-      fail(`Wormhole exited before the tunnel was established (${detail}).`);
-    };
-
-    child.stdout?.on("data", onData);
-    child.stderr?.on("data", onData);
-    child.once("error", onError);
-    child.once("exit", onExit);
-
-    timer = setTimeout(() => {
-      fail(
-        `Timed out waiting for Wormhole to establish the tunnel after ${STARTUP_TIMEOUT_MS / 1000}s.`,
-      );
-    }, STARTUP_TIMEOUT_MS);
+    spawnTunnel(0);
   });
 }
