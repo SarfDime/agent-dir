@@ -24,6 +24,18 @@ const SAFE_COMMAND_FAMILY = /^[a-z][a-z0-9_-]*$/;
 const SAFE_OPERATION = /^[a-z][a-z0-9_.-]*$/;
 
 export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): AnonymousTelemetryEvent {
+  if (event.event === "http_request") {
+    return {
+      event: "http_request",
+      method: sanitizeMcpMethod(event.method),
+      route: event.route,
+      status: boundedInteger(event.status),
+      success: event.success === true,
+      durationMs: boundedNumber(event.durationMs),
+      authenticated: event.authenticated === true,
+    };
+  }
+
   if (event.event === "mcp_request") {
     return {
       event: "mcp_request",
@@ -51,6 +63,19 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...(event.errorCategory === undefined
         ? {}
         : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
+    };
+  }
+
+  if (event.event === "tunnel") {
+    return {
+      event: "tunnel",
+      state: event.state,
+      ...(event.attempt === undefined ? {} : { attempt: boundedInteger(event.attempt) }),
+      ...(event.attempts === undefined ? {} : { attempts: boundedInteger(event.attempts) }),
+      ...(event.durationMs === undefined ? {} : { durationMs: boundedNumber(event.durationMs) }),
+      ...(event.reasonCategory === undefined
+        ? {}
+        : { reasonCategory: sanitizeErrorCategory(event.reasonCategory) }),
     };
   }
 
@@ -98,15 +123,50 @@ export function createTelemetryEnvelope(
     event: sanitizeAnonymousEvent(event),
   };
 
-  if (level === "basic" || level === "detailed") {
+  if (level === "basic" || level === "detailed" || level === "diagnostic") {
     if (runtime) envelope.runtime = sanitizeRuntimeContext(runtime);
   }
 
-  if (level === "detailed" && project) {
+  if ((level === "detailed" || level === "diagnostic") && project) {
     envelope.project = sanitizeProjectContext(project);
   }
 
+  if (level === "diagnostic" && runtime) {
+    envelope.runtime = sanitizeDiagnosticRuntimeContext(runtime);
+  }
+
+  if (level === "diagnostic" && project) {
+    envelope.project = sanitizeDiagnosticProjectContext(project);
+  }
+
   return envelope;
+}
+
+function sanitizeDiagnosticRuntimeContext(
+  context: TelemetryRuntimeContext,
+): TelemetryRuntimeContext {
+  return {
+    ...sanitizeRuntimeContext(context),
+    ...(context.nodeVersion === undefined
+      ? {}
+      : { nodeVersion: sanitizeVersion(context.nodeVersion) }),
+    ...(context.hostname === undefined
+      ? {}
+      : { hostname: sanitizeSensitiveIdentifier(context.hostname) }),
+    ...(context.username === undefined
+      ? {}
+      : { username: sanitizeSensitiveIdentifier(context.username) }),
+    ...(context.processId === undefined ? {} : { processId: boundedInteger(context.processId) }),
+    ...(context.parentProcessId === undefined
+      ? {}
+      : { parentProcessId: boundedInteger(context.parentProcessId) }),
+    ...(context.processUptimeMs === undefined
+      ? {}
+      : { processUptimeMs: boundedNumber(context.processUptimeMs) }),
+    ...(context.memoryRssBytes === undefined
+      ? {}
+      : { memoryRssBytes: boundedNumber(context.memoryRssBytes) }),
+  };
 }
 
 function sanitizeRuntimeContext(context: TelemetryRuntimeContext): TelemetryRuntimeContext {
@@ -121,6 +181,20 @@ function sanitizeRuntimeContext(context: TelemetryRuntimeContext): TelemetryRunt
     ...(context.mcpClientVersion === undefined
       ? {}
       : { mcpClientVersion: sanitizeVersion(context.mcpClientVersion) }),
+  };
+}
+
+function sanitizeDiagnosticProjectContext(
+  context: TelemetryProjectContext,
+): TelemetryProjectContext {
+  return {
+    ...sanitizeProjectContext(context),
+    ...(context.projectRoot === undefined
+      ? {}
+      : { projectRoot: sanitizeLocalPath(context.projectRoot) }),
+    ...(context.workingDirectory === undefined
+      ? {}
+      : { workingDirectory: sanitizeLocalPath(context.workingDirectory) }),
   };
 }
 
@@ -143,6 +217,18 @@ function sanitizeMcpMethod(value: string): string {
 function sanitizeIdentifier(value: string, pattern: RegExp): string {
   const normalized = value.trim().toLowerCase();
   return pattern.test(normalized) ? normalized : "unknown";
+}
+
+function sanitizeSensitiveIdentifier(value: string): string {
+  const normalized = value.trim().slice(0, 128);
+  return /^[a-z0-9][a-z0-9 ._@-]*$/i.test(normalized) ? normalized : "unknown";
+}
+
+function sanitizeLocalPath(value: string): string {
+  const normalized = value.trim().slice(0, 2048);
+  return normalized.startsWith("/") || /^[A-Za-z]:[\\\\/]/.test(normalized)
+    ? normalized
+    : "unknown";
 }
 
 function sanitizeFreeIdentifier(value: string): string {

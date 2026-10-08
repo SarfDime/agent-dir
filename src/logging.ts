@@ -144,7 +144,7 @@ export function printHelp(): void {
   writeLine("");
   writeLine("Telemetry:");
   writeLine("  agent-dir telemetry status");
-  writeLine("  agent-dir telemetry enable <anonymous|basic|detailed>");
+  writeLine("  agent-dir telemetry enable <anonymous|basic|detailed|diagnostic>");
   writeLine("  agent-dir telemetry disable");
   writeLine("  agent-dir telemetry schema");
   writeLine("  agent-dir telemetry show [--follow]");

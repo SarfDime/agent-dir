@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
+import { hostname, userInfo } from "node:os";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
@@ -721,7 +722,7 @@ export function createMcpHandler(
   let sessionCommandCallCount = 0;
   let sessionRecorded = false;
   const telemetryProjectPromise =
-    telemetry.level === "detailed"
+    telemetry.level === "detailed" || telemetry.level === "diagnostic"
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
       : undefined;
   const npmAllowed = commandConfig.npm?.allowedScripts ?? [];
@@ -2252,6 +2253,13 @@ function telemetryRuntime(
     arch: process.arch,
     ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
     ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
+    nodeVersion: process.versions.node,
+    hostname: hostname(),
+    username: userInfo().username,
+    processId: process.pid,
+    parentProcessId: process.ppid,
+    processUptimeMs: Math.round(process.uptime() * 1000),
+    memoryRssBytes: process.memoryUsage().rss,
   };
 }
 
@@ -2319,6 +2327,8 @@ async function buildTelemetryProjectContext(
   const projectSize = overview.files < 100 ? "small" : overview.files < 1000 ? "medium" : "large";
   const capability = await codeGraph.capability();
   return {
+    projectRoot: root,
+    workingDirectory: process.cwd(),
     ...(language ? { language } : {}),
     ...(packageManager && ["npm", "pnpm", "yarn", "bun"].includes(packageManager)
       ? { packageManager: packageManager as "npm" | "pnpm" | "yarn" | "bun" }

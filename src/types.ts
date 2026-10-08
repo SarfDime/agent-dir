@@ -51,9 +51,20 @@ export interface TunnelOptions {
   port: number;
   subdomain?: string;
   random?: boolean;
+  token?: string;
+  telemetry?: TelemetryConfig;
 }
 
 export interface TunnelResult {
   child: ChildProcess;
   url: string;
+  onEvent?: (event: TunnelEvent) => void;
+  stop?: () => void;
 }
+
+export type TunnelEvent =
+  | { type: "online"; url: string; attempt: number }
+  | { type: "disconnected"; reason: string }
+  | { type: "reconnecting"; attempt: number; reason: string }
+  | { type: "reconnected"; url: string; attempt: number }
+  | { type: "failed"; reason: string; attempts: number };
