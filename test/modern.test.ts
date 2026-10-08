@@ -11,7 +11,12 @@ test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
     encoding: "utf8",
   });
-  assert.equal(output.trim(), "0.3.0");
+  assert.equal(
+    output.trim(),
+    execFileSync(process.execPath, ["-p", 'require("./package.json").version'], {
+      encoding: "utf8",
+    }).trim(),
+  );
 });
 
 test("CLI exposes blacklist configuration", async () => {
@@ -898,14 +903,22 @@ test("legacy initialize handshake is accepted without modern metadata", async ()
       }),
     );
     assert.equal(response.status, 200);
-    const body = (await response.json()) as { result: Record<string, unknown> };
+    const body = (await response.json()) as {
+      result: Record<string, unknown> & { serverInfo: { name: string; version: string } };
+    };
     assert.equal(body.result.protocolVersion, "2025-11-25");
     assert.deepEqual(body.result.capabilities, {
       tools: { listChanged: true },
       resources: { listChanged: true, subscribe: true },
       extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
     });
-    assert.deepEqual(body.result.serverInfo, { name: "agent-dir", version: "0.3.0" });
+    assert.equal((body.result.serverInfo as { name: string }).name, "agent-dir");
+    assert.equal(
+      (body.result.serverInfo as { version: string }).version,
+      execFileSync(process.execPath, ["-p", 'require("./package.json").version'], {
+        encoding: "utf8",
+      }).trim(),
+    );
     assert.match(String(body.result.instructions), /minimum necessary tool calls/);
     assert.match(String(body.result.instructions), /Allowed npm scripts/);
   } finally {
