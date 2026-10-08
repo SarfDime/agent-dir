@@ -4,13 +4,6 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:
-    inputs:
-      publish_existing_version:
-        description: "Publish the current package version directly to npm (recovery only)"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -61,12 +54,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 
-      - name: Publish existing version
-        if: ${{ inputs.publish_existing_version }}
-        run: npm publish --access public
-
       - name: Release
-        if: ${{ !inputs.publish_existing_version }}
         run: npm run release
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
