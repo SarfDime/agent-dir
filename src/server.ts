@@ -7,6 +7,11 @@ import { deleteFile, listFiles, readFile, writeFile } from "./tools/files.js";
 import type { ServerOptions } from "./types.js";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
+const REQUEST_BODY_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 120_000;
+const HEADERS_TIMEOUT_MS = 30_000;
+const KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const HEALTH_PATH = "/__health";
 
 export interface ServerHandle {
   close: () => Promise<void>;
@@ -28,13 +33,19 @@ export function startServer({
   });
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const startedAt = performance.now();
+    const requestController = new AbortController();
+    req.once("aborted", () => requestController.abort());
+    res.once("close", () => {
+      if (!res.writableFinished) requestController.abort();
+    });
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     let authenticated = false;
     try {
-      const body = await readBody(req);
+      const body = await readBody(req, requestController.signal);
       const requestInit: RequestInit = {
         method: req.method ?? "GET",
         headers: toFetchHeaders(req.headers),
+        signal: requestController.signal,
       };
       if (body.length) requestInit.body = body;
       const request = new Request(url, requestInit);
@@ -56,6 +67,10 @@ export function startServer({
           authenticated,
           startedAt,
         );
+        return;
+      }
+      if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
+        sendText(res, 200, "ok\n");
         return;
       }
       if (url.pathname === "/mcp") {
@@ -165,7 +180,12 @@ export function startServer({
       if (req.method === "DELETE") {
         await deleteFile(root, relative);
         sendText(res, 200, "File deleted successfully\n");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST DELETE" });
+        logRequest({
+          method: req.method,
+          path: url.pathname,
+          status: 200,
+          detail: "REST DELETE",
+        });
         recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
@@ -185,8 +205,16 @@ export function startServer({
         startedAt,
       );
     } catch (error) {
+      if (requestController.signal.aborted || res.destroyed) return;
       const code = (error as NodeJS.ErrnoException).code;
-      const status = code === "ENOENT" ? 404 : code === "PAYLOAD_TOO_LARGE" ? 413 : 500;
+      const status =
+        code === "ENOENT"
+          ? 404
+          : code === "PAYLOAD_TOO_LARGE"
+            ? 413
+            : code === "REQUEST_TIMEOUT"
+              ? 408
+              : 500;
       sendText(res, status, `${error instanceof Error ? error.message : String(error)}\n`);
       logRequest({
         method: req.method ?? "UNKNOWN",
@@ -204,6 +232,10 @@ export function startServer({
       );
     }
   });
+
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
+  server.keepAliveTimeout = KEEP_ALIVE_TIMEOUT_MS;
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -666,12 +698,43 @@ function toFetchHeaders(headers: IncomingMessage["headers"]): Headers {
   return result;
 }
 
-function readBody(req: IncomingMessage): Promise<Buffer> {
+function readBody(req: IncomingMessage, signal: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let tooLarge = false;
-    req.on("data", (chunk: Buffer | string) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      const error = new Error(
+        `Request body timed out after ${REQUEST_BODY_TIMEOUT_MS / 1000}s.`,
+      ) as Error & {
+        code?: string;
+      };
+      error.code = "REQUEST_TIMEOUT";
+      finish(error);
+    }, REQUEST_BODY_TIMEOUT_MS);
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      req.removeListener("aborted", onAborted);
+      req.removeListener("error", onError);
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      signal.removeEventListener("abort", onSignalAbort);
+    };
+
+    const finish = (error?: Error, value?: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(value ?? Buffer.alloc(0));
+    };
+
+    const onAborted = (): void => finish(new Error("Request aborted by the client."));
+    const onError = (error: Error): void => finish(error);
+    const onSignalAbort = (): void => finish(new Error("Request aborted by the client."));
+    const onData = (chunk: Buffer | string): void => {
       if (tooLarge) return;
       const buffer = Buffer.from(chunk);
       size += buffer.length;
@@ -680,8 +743,8 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
         return;
       }
       chunks.push(buffer);
-    });
-    req.on("end", () => {
+    };
+    const onEnd = (): void => {
       if (tooLarge) {
         const error = new Error(
           `Request body exceeds the ${MAX_BODY_BYTES / 1024 / 1024} MiB limit.`,
@@ -689,12 +752,21 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
           code?: string;
         };
         error.code = "PAYLOAD_TOO_LARGE";
-        reject(error);
+        finish(error);
         return;
       }
-      resolve(Buffer.concat(chunks));
-    });
-    req.on("error", reject);
+      finish(undefined, Buffer.concat(chunks));
+    };
+
+    if (signal.aborted) {
+      onSignalAbort();
+      return;
+    }
+    req.once("aborted", onAborted);
+    req.once("error", onError);
+    signal.addEventListener("abort", onSignalAbort, { once: true });
+    req.on("data", onData);
+    req.on("end", onEnd);
   });
 }
 
