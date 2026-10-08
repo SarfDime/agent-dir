@@ -1,6 +1,6 @@
 {
   "name": "agent-dir",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Expose a local project to an AI agent through authenticated MCP, filesystem tools, and allowlisted development commands",
   "repository": {
     "type": "git",
@@ -20,7 +20,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "node -e \"fs.rmSync(\u0027dist\u0027, { recursive: true, force: true })\" && tsc",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "start": "node ./dist/bin/agent-dir.js .",
     "typecheck": "tsc --noEmit",
