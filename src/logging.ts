@@ -128,8 +128,14 @@ export function printHelp(): void {
   writeLine("");
   writeLine("Options:");
   writeLine("  -p, --port <port>          Local server port");
-  writeLine("  -t, --tunnel <provider>    Tunnel provider (none, wormhole)");
+  writeLine("  -t, --tunnel <provider>    Explicit tunnel provider (none, wormhole, cloudflared)");
+  writeLine("  -w, --wormhole             Use Wormhole for this run");
+  writeLine("  -c, --cloudflared          Use Cloudflare Tunnel for this run");
   writeLine("  -s, --subdomain <name>     Wormhole subdomain");
+  writeLine("      --hostname <host>      Hostname routed to a Cloudflare Tunnel");
+  writeLine(
+    "      --cloudflared-token <token> Cloudflare Tunnel connector token (stored in config)",
+  );
   writeLine("      --directory <path>     Directory to expose");
   writeLine("      --npm <scripts>        Comma-separated allowed npm scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
@@ -167,6 +173,7 @@ export function printBanner(options: {
   tunnel: string;
   profileName?: string;
   subdomain?: string;
+  hostname?: string;
   token?: string;
   npmScripts?: string[];
   commands?: string[];
@@ -193,6 +200,7 @@ export function printBanner(options: {
     writeLine(`  Blocked      ${options.blacklistedCommands.join(", ")}`);
   }
   if (options.subdomain) writeLine(`  Domain       https://${options.subdomain}.wormhole.bar`);
+  if (options.hostname) writeLine(`  Domain       https://${options.hostname}`);
   writeLine("");
   writeLine("  MCP");
   writeLine(`    ${color("⚡ /mcp", CYAN)}`);

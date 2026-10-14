@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, watch, writeFileSync } from "node:fs";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { watch } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -13,6 +13,13 @@ import { hasConfigFile, runFirstTimeSetup, shouldOfferSetup } from "../src/setup
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import { isTelemetryLevel } from "../src/telemetry/config.js";
 import { formatTelemetrySummary } from "../src/telemetry/format.js";
+import {
+  ensureTelemetryDirectory,
+  migrateLegacyTelemetry,
+  readAllTelemetryEvents,
+  resetTelemetry,
+  TELEMETRY_DIRECTORY,
+} from "../src/telemetry/storage.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
 
@@ -47,7 +54,11 @@ const { values, positionals } = parseArgs({
     directory: { type: "string", short: "d" },
     port: { type: "string", short: "p" },
     tunnel: { type: "string", short: "t" },
+    wormhole: { type: "boolean", short: "w" },
+    cloudflared: { type: "boolean", short: "c" },
     subdomain: { type: "string", short: "s" },
+    hostname: { type: "string" },
+    "cloudflared-token": { type: "string" },
     npm: { type: "string" },
     command: { type: "string" },
     blacklist: { type: "string" },
@@ -87,7 +98,9 @@ if (
   shouldOfferSetup(await hasConfigFile(), {
     random: values.random,
     noTunnel: values["no-tunnel"],
-    tunnel: values.tunnel,
+    tunnel:
+      values.tunnel ??
+      (values.wormhole ? "wormhole" : values.cloudflared ? "cloudflared" : undefined),
   }) &&
   command !== "config" &&
   command !== "telemetry"
@@ -103,7 +116,8 @@ if (
 if (command === "telemetry") {
   const action = positionals[1];
   const currentLevel = config.telemetry?.level ?? "none";
-  const telemetryFile = resolve(`${process.env.HOME ?? "."}/.config/agent-dir/telemetry.jsonl`);
+  const telemetryProfile = positionals[2];
+  const telemetrySession = positionals[3];
   if (action === "status") {
     console.log(`Telemetry: ${currentLevel === "none" ? "disabled" : "enabled"}`);
     console.log(`Level: ${currentLevel}`);
@@ -158,13 +172,24 @@ if (command === "telemetry") {
   }
   if (action === "summary") {
     console.log(
-      formatTelemetrySummary(summarizeTelemetry(readTelemetryEvents(telemetryFile)), currentLevel),
+      formatTelemetrySummary(
+        summarizeTelemetry(
+          readAllTelemetryEvents().filter(
+            (event) => !telemetryProfile || event.configId === telemetryProfile,
+          ),
+        ),
+        currentLevel,
+      ),
     );
     process.exit(0);
   }
   if (action === "show") {
     const printEvents = (): void => {
-      const events = readTelemetryEvents(telemetryFile);
+      const events = readAllTelemetryEvents().filter(
+        (event) =>
+          (!telemetryProfile || event.configId === telemetryProfile) &&
+          (!telemetrySession || event.sessionId === telemetrySession),
+      );
       const grouped = new Map<string, Map<string, unknown[]>>();
       for (const event of events) {
         const configId =
@@ -203,16 +228,8 @@ if (command === "telemetry") {
     };
     printEvents();
     if (values.follow) {
-      mkdirSync(resolve(`${process.env.HOME ?? "."}/.config/agent-dir`), {
-        recursive: true,
-        mode: 0o700,
-      });
-      try {
-        readFileSync(telemetryFile);
-      } catch {
-        writeFileSync(telemetryFile, "", { encoding: "utf8", mode: 0o600 });
-      }
-      const watcher = watch(telemetryFile, () => {
+      ensureTelemetryDirectory();
+      const watcher = watch(TELEMETRY_DIRECTORY, { recursive: true }, () => {
         process.stdout.write("\x1b[2J\x1b[H");
         printEvents();
       });
@@ -227,14 +244,19 @@ if (command === "telemetry") {
     process.exit(0);
   }
   if (action === "reset") {
-    delete config.telemetry;
-    await saveConfig(config);
-    try {
-      unlinkSync(telemetryFile);
-    } catch (error) {
-      if (isRecord(error) && error.code !== "ENOENT") throw error;
+    if (values.all && telemetryProfile) fail("Use either a profile name or --all, not both.");
+    if (!values.all && !telemetryProfile)
+      fail("Usage: agent-dir telemetry reset <profile> | --all");
+    if (values.all) {
+      delete config.telemetry;
+      await saveConfig(config);
+      resetTelemetry(undefined, true);
+      console.log("✓ Telemetry settings reset and all recorded data was cleared.");
+    } else {
+      migrateLegacyTelemetry();
+      resetTelemetry(telemetryProfile);
+      console.log(`✓ Telemetry data cleared for profile: ${telemetryProfile}`);
     }
-    console.log("✓ Telemetry reset to defaults and all recorded data was cleared.");
     process.exit(0);
   }
   fail("Usage: agent-dir telemetry {status|enable|disable|schema|show|summary|reset}");
@@ -254,6 +276,7 @@ if (command === "config") {
     if (!name || !config.profiles[name]) fail(`Profile not found: ${name}`);
     const profile = structuredClone(config.profiles[name]);
     if (profile.token) profile.token = "<configured>";
+    if (profile.tunnels?.cloudflared?.token) profile.tunnels.cloudflared.token = "<configured>";
     console.log(JSON.stringify(profile, null, 2));
     process.exit(0);
   }
@@ -318,8 +341,21 @@ if (command === "config") {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))
       fail("Profile names may contain letters, numbers, dots, underscores, and hyphens.");
 
-    const tunnel = values.tunnel ?? "none";
-    if (tunnel !== "none" && tunnel !== "wormhole") fail(`Unsupported tunnel provider: ${tunnel}`);
+    if (values.wormhole && values.cloudflared) fail("Choose only one of -w or -c.");
+    if ((values.wormhole || values.cloudflared) && values.tunnel)
+      fail("Use either -w/-c or --tunnel, not both.");
+    const tunnel = values.wormhole
+      ? "wormhole"
+      : values.cloudflared
+        ? "cloudflared"
+        : (values.tunnel ??
+          (values.hostname
+            ? "cloudflared"
+            : values.subdomain || values.random
+              ? "wormhole"
+              : "none"));
+    if (tunnel !== "none" && tunnel !== "wormhole" && tunnel !== "cloudflared")
+      fail(`Unsupported tunnel provider: ${tunnel}`);
 
     const profile: Profile = {
       directory: resolve(values.directory ?? "."),
@@ -329,6 +365,27 @@ if (command === "config") {
     };
 
     if (values.subdomain) profile.subdomain = values.subdomain;
+    if (values.hostname) profile.hostname = values.hostname;
+    if (values.subdomain || values.hostname || values.random) {
+      profile.tunnels = {
+        ...(values.subdomain || values.random
+          ? {
+              wormhole: {
+                ...(values.subdomain ? { subdomain: values.subdomain } : { random: true }),
+              },
+            }
+          : {}),
+        ...(values.hostname
+          ? {
+              cloudflared: {
+                hostname: values.hostname,
+                ...(values["cloudflared-token"] ? { token: values["cloudflared-token"] } : {}),
+              },
+            }
+          : {}),
+      };
+      profile.defaultTunnel = tunnel;
+    }
     const npm = parseList(values.npm);
     if (npm !== undefined) profile.npm = { allowedScripts: npm };
     const commands = parseList(values.command);
@@ -339,6 +396,11 @@ if (command === "config") {
 
     if (profile.tunnel === "wormhole" && !profile.subdomain && !values.random) {
       fail("Wormhole profiles require --subdomain <name>, or use --random.");
+    }
+    if (profile.tunnel === "cloudflared" && !profile.hostname) {
+      fail(
+        "Cloudflared profiles require --hostname <host> (a hostname already routed to your named Cloudflare Tunnel).",
+      );
     }
 
     config.profiles[name] = profile;
@@ -359,18 +421,41 @@ if (command && command !== "config" && !profile && command.startsWith("-")) {
 const positionalDirectory = profile ? positionals[1] : positionals[0];
 const directory = resolve(values.directory ?? profile?.directory ?? positionalDirectory ?? ".");
 const port = parsePort(values.port, profile?.port ?? 3002);
-const tunnelValue = values["no-tunnel"] ? "none" : (values.tunnel ?? profile?.tunnel ?? "none");
-if (tunnelValue !== "none" && tunnelValue !== "wormhole") {
+if (values.wormhole && values.cloudflared) fail("Choose only one of -w or -c.");
+if ((values.wormhole || values.cloudflared) && values.tunnel)
+  fail("Use either -w/-c or --tunnel, not both.");
+const configuredDefault =
+  profile?.defaultTunnel ??
+  (profile?.tunnels?.cloudflared ? "cloudflared" : (profile?.tunnel ?? "none"));
+const tunnelValue = values["no-tunnel"]
+  ? "none"
+  : values.wormhole
+    ? "wormhole"
+    : values.cloudflared
+      ? "cloudflared"
+      : (values.tunnel ?? configuredDefault);
+if (tunnelValue !== "none" && tunnelValue !== "wormhole" && tunnelValue !== "cloudflared") {
   fail(`Unsupported tunnel provider: ${tunnelValue}`);
 }
 
 const tunnel: Profile["tunnel"] = tunnelValue;
-const randomTunnel = values.random === true;
-const subdomain = randomTunnel ? undefined : (values.subdomain ?? profile?.subdomain);
+const randomTunnel =
+  values.random === true ||
+  (values.subdomain === undefined && profile?.tunnels?.wormhole?.random === true);
+const subdomain = randomTunnel
+  ? undefined
+  : (values.subdomain ?? profile?.tunnels?.wormhole?.subdomain ?? profile?.subdomain);
+const hostname = values.hostname ?? profile?.tunnels?.cloudflared?.hostname ?? profile?.hostname;
+const cloudflaredToken = values["cloudflared-token"] ?? profile?.tunnels?.cloudflared?.token;
 if (tunnel === "wormhole" && !subdomain && !randomTunnel) {
   fail("Wormhole requires --subdomain <name>, or use --random.");
 }
-if (randomTunnel && tunnel === "none") {
+if (tunnel === "cloudflared" && !hostname) {
+  fail(
+    "Cloudflared requires --hostname <host> (a hostname already routed to your named Cloudflare Tunnel).",
+  );
+}
+if (randomTunnel && tunnel !== "wormhole") {
   fail("--random requires --tunnel wormhole.");
 }
 
@@ -393,6 +478,7 @@ const telemetryConfigId = profile
           port,
           tunnel,
           subdomain,
+          hostname,
           randomTunnel,
           npm: commandConfig.npm?.allowedScripts ?? [],
           commands: commandConfig.commands ?? [],
@@ -414,6 +500,7 @@ const allowedCommands = commandConfig.commands;
 
 if (profile && command) bannerOptions.profileName = command;
 if (subdomain) bannerOptions.subdomain = subdomain;
+if (hostname) bannerOptions.hostname = hostname;
 if (npmScripts) bannerOptions.npmScripts = npmScripts;
 if (allowedCommands) bannerOptions.commands = allowedCommands;
 if (commandConfig.blacklistedCommands?.length) {
@@ -423,6 +510,7 @@ bannerOptions.gitEnabled = commandConfig.git ?? commandConfig.commands?.includes
 
 printBanner(bannerOptions);
 
+const telemetrySessionId = randomUUID();
 const server = await startServer({
   root: directory,
   port,
@@ -431,6 +519,7 @@ const server = await startServer({
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
     ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
+    sessionId: telemetrySessionId,
     persist: true,
   },
 });
@@ -443,12 +532,15 @@ console.log("    Token        : <configured>");
 if (tunnel !== "none") {
   try {
     tunnelResult = await startTunnel({
-      provider: "wormhole",
+      provider: tunnel as "wormhole" | "cloudflared",
       port,
+      ...(hostname ? { hostname } : {}),
+      ...(cloudflaredToken ? { cloudflaredToken } : {}),
       token,
       telemetry: {
         ...(config.telemetry ?? { level: "none" }),
         ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
+        sessionId: telemetrySessionId,
         persist: true,
       },
       random: randomTunnel,
@@ -492,17 +584,4 @@ async function confirmConfigDelete(message: string, skipPrompt: boolean): Promis
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readTelemetryEvents(
-  path: string,
-): import("../src/telemetry/types.js").TelemetryEnvelope[] {
-  try {
-    return readFileSync(path, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  } catch {
-    return [];
-  }
 }

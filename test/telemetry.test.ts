@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync, rmSync } from "node:fs";
 import test from "node:test";
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import { createTelemetryEnvelope, sanitizeAnonymousEvent } from "../src/telemetry/privacy.js";
 import { TelemetryRecorder } from "../src/telemetry/recorder.js";
+import { telemetrySessionPath } from "../src/telemetry/storage.js";
 
 test("telemetry defaults to no recorded events", () => {
   const recorder = new TelemetryRecorder({ level: "none" });
@@ -149,6 +151,10 @@ test("diagnostic telemetry explicitly includes bounded local troubleshooting met
       mcpClientName: "Claude Desktop",
       mcpClientVersion: "1.0.0",
       nodeVersion: "24.8.0",
+      distroId: "ubuntu",
+      distroName: "Ubuntu 24.04.1 LTS",
+      distroVersion: "24.04",
+      kernelVersion: "6.8.0-51-generic",
       hostname: "workstation-01",
       username: "dime",
       processId: 1234,
@@ -171,11 +177,63 @@ test("diagnostic telemetry explicitly includes bounded local troubleshooting met
   assert.equal(envelope.runtime?.hostname, "workstation-01");
   assert.equal(envelope.runtime?.username, "dime");
   assert.equal(envelope.runtime?.nodeVersion, "24.8.0");
+  assert.equal(envelope.runtime?.distroId, "ubuntu");
+  assert.equal(envelope.runtime?.distroName, "Ubuntu 24.04.1 LTS");
+  assert.equal(envelope.runtime?.distroVersion, "24.04");
+  assert.equal(envelope.runtime?.kernelVersion, "6.8.0-51-generic");
   assert.equal(envelope.runtime?.processId, 1234);
   assert.equal(envelope.project?.projectRoot, "/home/dime/Documents/project");
   assert.equal(envelope.project?.workingDirectory, "/home/dime/Documents/project");
   assert.equal("token" in envelope, false);
   assert.equal("environment" in envelope, false);
+});
+
+test("raw tool details are retained only in diagnostic telemetry", () => {
+  const event = {
+    event: "tool_call" as const,
+    tool: "read_files",
+    success: true,
+    durationMs: 1,
+    diagnosticDetails: {
+      input: { path: "/tmp/private.ts" },
+      output: { content: "private source" },
+    },
+  };
+  const detailed = createTelemetryEnvelope("detailed", event);
+  const diagnostic = createTelemetryEnvelope("diagnostic", event);
+  assert.equal("diagnosticDetails" in detailed.event, false);
+  assert.deepEqual((diagnostic.event as typeof event).diagnosticDetails, event.diagnosticDetails);
+});
+
+test("tool telemetry sanitization retains estimates and hashes but never file contents or paths", () => {
+  const event = sanitizeAnonymousEvent({
+    event: "tool_call",
+    tool: "read_files",
+    requestIdHash: "a".repeat(64),
+    inputFingerprint: "b".repeat(64),
+    outputFingerprint: "c".repeat(64),
+    estimatedInputTokens: 12,
+    estimatedOutputTokens: 300,
+    cumulativeOutputBytes: 2400,
+    cumulativeEstimatedOutputTokens: 600,
+    duplicateOutputBytes: 100,
+    textOutputBytes: 1200,
+    uniqueFileCount: 1,
+    files: [{ pathHash: "d".repeat(64), contentHash: "e".repeat(64), bytes: 900 }],
+    success: true,
+    durationMs: 4,
+  });
+  assert.equal(event.event, "tool_call");
+  assert.equal(event.estimatedInputTokens, 12);
+  assert.equal(event.estimatedOutputTokens, 300);
+  assert.equal(event.cumulativeOutputBytes, 2400);
+  assert.equal(event.cumulativeEstimatedOutputTokens, 600);
+  assert.deepEqual(event.files, [
+    { pathHash: "d".repeat(64), contentHash: "e".repeat(64), bytes: 900 },
+  ]);
+  assert.equal(JSON.stringify(event).includes("secret/file.ts"), false);
+  assert.equal(JSON.stringify(event).includes("source text"), false);
+  assert.equal("diagnosticDetails" in event, false);
 });
 
 test("privacy sanitizer rejects raw command arguments and identifying values", () => {
@@ -205,15 +263,25 @@ test("recorder does not persist unless explicitly enabled", () => {
 
 test("recorder persists events and reloads them", () => {
   const path = `/tmp/agent-dir-telemetry-${process.pid}.jsonl`;
-  const first = new TelemetryRecorder({ level: "anonymous", persist: true, persistPath: path });
+  const first = new TelemetryRecorder({
+    level: "anonymous",
+    persist: true,
+    persistPath: path,
+    sessionId: "test-session",
+  });
   first.clear();
   first.record({ event: "tool_call", tool: "read_files", success: true, durationMs: 5 });
   const firstEvent = first.snapshot()[0];
   assert.ok(firstEvent);
   assert.ok(!Number.isNaN(Date.parse(firstEvent.timestamp)));
   assert.equal(firstEvent.configId, "default");
-  assert.equal(firstEvent.sessionId, "default");
-  const second = new TelemetryRecorder({ level: "anonymous", persist: true, persistPath: path });
+  assert.equal(firstEvent.sessionId, "test-session");
+  const second = new TelemetryRecorder({
+    level: "anonymous",
+    persist: true,
+    persistPath: path,
+    sessionId: "test-session",
+  });
   assert.equal(second.size, 1);
   second.clear();
 });
@@ -223,12 +291,14 @@ test("recorder isolates persisted events by configuration identifier", () => {
   const first = new TelemetryRecorder({
     level: "anonymous",
     configId: "config-a",
+    sessionId: "shared-session",
     persist: true,
     persistPath: path,
   });
   const second = new TelemetryRecorder({
     level: "anonymous",
     configId: "config-b",
+    sessionId: "shared-session",
     persist: true,
     persistPath: path,
   });
@@ -240,12 +310,14 @@ test("recorder isolates persisted events by configuration identifier", () => {
   const reloadedFirst = new TelemetryRecorder({
     level: "anonymous",
     configId: "config-a",
+    sessionId: "shared-session",
     persist: true,
     persistPath: path,
   });
   const reloadedSecond = new TelemetryRecorder({
     level: "anonymous",
     configId: "config-b",
+    sessionId: "shared-session",
     persist: true,
     persistPath: path,
   });
@@ -384,6 +456,50 @@ test("telemetry aggregation counts tunnel lifecycle events separately", () => {
   assert.equal(config.tunnelFailures, 1);
   assert.equal(config.mcpRequests, 0);
   assert.equal(config.toolCalls, 0);
+});
+
+test("persistent history is not truncated when the in-memory buffer rolls over", () => {
+  const path = `/tmp/agent-dir-telemetry-retention-${process.pid}.jsonl`;
+  const recorder = new TelemetryRecorder({
+    level: "anonymous",
+    maxEvents: 2,
+    persist: true,
+    persistPath: path,
+    sessionId: "retention-session",
+  });
+  recorder.clear();
+
+  for (let index = 0; index < 7; index += 1) {
+    recorder.record({
+      event: "tool_call",
+      tool: "read_files",
+      success: true,
+      durationMs: index,
+    });
+  }
+
+  assert.equal(recorder.size, 2);
+  assert.equal(readFileSync(path, "utf8").trim().split(String.fromCharCode(10)).length, 7);
+  const reloaded = new TelemetryRecorder({
+    level: "anonymous",
+    maxEvents: 2,
+    persist: true,
+    persistPath: path,
+    sessionId: "retention-session",
+  });
+  assert.equal(reloaded.size, 2);
+  assert.equal(reloaded.snapshot()[0]?.event.event, "tool_call");
+  rmSync(path, { force: true });
+});
+
+test("telemetry paths are isolated by profile and session", () => {
+  const scriptrSessionA = telemetrySessionPath("scriptr", "session-a");
+  const scriptrSessionB = telemetrySessionPath("scriptr", "session-b");
+  const otherSessionA = telemetrySessionPath("agent-tunnel", "session-a");
+
+  assert.notEqual(scriptrSessionA, scriptrSessionB);
+  assert.notEqual(scriptrSessionA, otherSessionA);
+  assert.ok(scriptrSessionA.endsWith("/telemetry/scriptr/session-session-a.jsonl"));
 });
 
 test("recorder is bounded and returns isolated snapshots", () => {

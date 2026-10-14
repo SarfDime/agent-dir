@@ -52,6 +52,33 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
     return {
       event: "tool_call",
       tool: sanitizeIdentifier(event.tool, SAFE_TOOL_NAME),
+      ...(event.requestIdHash === undefined
+        ? {}
+        : { requestIdHash: sanitizeHash(event.requestIdHash) }),
+      ...(event.inputFingerprint === undefined
+        ? {}
+        : { inputFingerprint: sanitizeHash(event.inputFingerprint) }),
+      ...(event.outputFingerprint === undefined
+        ? {}
+        : { outputFingerprint: sanitizeHash(event.outputFingerprint) }),
+      ...optionalNumber("estimatedInputTokens", event.estimatedInputTokens),
+      ...optionalNumber("estimatedOutputTokens", event.estimatedOutputTokens),
+      ...optionalNumber("cumulativeOutputBytes", event.cumulativeOutputBytes),
+      ...optionalNumber("cumulativeEstimatedOutputTokens", event.cumulativeEstimatedOutputTokens),
+      ...optionalNumber("duplicateOutputBytes", event.duplicateOutputBytes),
+      ...optionalNumber("textOutputBytes", event.textOutputBytes),
+      ...optionalNumber("uniqueFileCount", event.uniqueFileCount),
+      ...(event.files === undefined
+        ? {}
+        : {
+            files: event.files.slice(0, 100).map((file) => ({
+              pathHash: sanitizeHash(file.pathHash),
+              ...(file.contentHash === undefined
+                ? {}
+                : { contentHash: sanitizeHash(file.contentHash) }),
+              bytes: boundedNumber(file.bytes),
+            })),
+          }),
       success: event.success === true,
       durationMs: boundedNumber(event.durationMs),
       ...optionalNumber("inputBytes", event.inputBytes),
@@ -124,6 +151,15 @@ export function createTelemetryEnvelope(
     event: sanitizeAnonymousEvent(event),
   };
 
+  if (
+    level === "diagnostic" &&
+    event.event === "tool_call" &&
+    event.diagnosticDetails &&
+    envelope.event.event === "tool_call"
+  ) {
+    envelope.event.diagnosticDetails = event.diagnosticDetails;
+  }
+
   if (level === "basic" || level === "detailed" || level === "diagnostic") {
     if (runtime) envelope.runtime = sanitizeRuntimeContext(runtime);
   }
@@ -151,6 +187,16 @@ function sanitizeDiagnosticRuntimeContext(
     ...(context.nodeVersion === undefined
       ? {}
       : { nodeVersion: sanitizeVersion(context.nodeVersion) }),
+    ...(context.distroId === undefined
+      ? {}
+      : { distroId: sanitizeSensitiveIdentifier(context.distroId) }),
+    ...(context.distroName === undefined ? {} : { distroName: context.distroName.slice(0, 128) }),
+    ...(context.distroVersion === undefined
+      ? {}
+      : { distroVersion: context.distroVersion.slice(0, 64) }),
+    ...(context.kernelVersion === undefined
+      ? {}
+      : { kernelVersion: context.kernelVersion.slice(0, 128) }),
     ...(context.hostname === undefined
       ? {}
       : { hostname: sanitizeSensitiveIdentifier(context.hostname) }),
@@ -242,6 +288,10 @@ function sanitizeVersion(value: string): string {
   return /^v?[0-9]+(?:\.[0-9]+){0,3}(?:[-+][a-z0-9.-]+)?$/i.test(normalized)
     ? normalized
     : "unknown";
+}
+
+function sanitizeHash(value: string): string {
+  return /^[a-f0-9]{64}$/.test(value) ? value : "unknown";
 }
 
 function sanitizeErrorCategory(value: string): string {

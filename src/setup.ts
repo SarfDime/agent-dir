@@ -122,14 +122,30 @@ export async function runFirstTimeSetup(
     const name = await requiredText(rl, "Profile name", "default");
     const directory = resolve(await requiredText(rl, "Directory to expose", defaultDirectory));
     const port = await requiredPort(rl, 3002);
-    const tunnel = await choose(rl, "Tunnel", ["wormhole", "none"] as const, "wormhole");
+    let hostname: string | undefined;
+    let cloudflaredToken: string | undefined;
     let subdomain: string | undefined;
+
+    console.log("");
+    console.log(`${section("◆")} ${section(bold("Cloudflare Tunnel"))}`);
+    console.log(rule());
+    const useCloudflared = await confirm(rl, "Set up Cloudflare Tunnel?", true);
+    if (useCloudflared) {
+      hostname = await requiredHostname(rl, "Public hostname (must be routed to this tunnel)");
+      cloudflaredToken = await requiredSecret(rl, "Cloudflare tunnel token");
+    }
+
+    console.log("");
+    console.log(`${section("◆")} ${section(bold("Wormhole"))}`);
+    console.log(rule());
+    const useWormhole = await confirm(rl, "Set up Wormhole too?", false);
     if (
-      tunnel === "wormhole" &&
+      useWormhole &&
       (await confirm(rl, "Use a custom Wormhole subdomain? (No uses a random URL.)", false))
     ) {
       subdomain = await requiredText(rl, "Wormhole subdomain");
     }
+    const tunnel = useCloudflared ? "cloudflared" : useWormhole ? "wormhole" : "none";
     const npm = await optionalList(rl, "Allowed npm scripts (comma-separated, blank for none)");
     const commands = await optionalList(rl, "Allowed commands (comma-separated, blank for none)");
 
@@ -140,11 +156,9 @@ export async function runFirstTimeSetup(
       bold("Privacy first"),
       dim("Telemetry is optional and stays local on this machine."),
       dim("It helps us understand usage, failures, and reliability improvements."),
-      dim("Standard levels never record file contents, command arguments, tokens,"),
-      dim("environment variables, or project paths."),
-      dim(
-        "Diagnostic mode is a separate opt-in local troubleshooting mode and records identifying metadata.",
-      ),
+      dim("Standard levels avoid file contents, command arguments, tokens, and project paths."),
+      dim("Diagnostic mode records bounded raw tool inputs/outputs and identifying metadata."),
+      dim("It may contain source code or other sensitive project data; it stays local."),
     ]);
 
     console.log("");
@@ -169,8 +183,23 @@ export async function runFirstTimeSetup(
       "none",
     );
 
-    const profile: Profile = { directory, port, tunnel, token: randomBytes(24).toString("hex") };
+    const profile: Profile = {
+      directory,
+      port,
+      tunnel,
+      defaultTunnel: tunnel,
+      token: randomBytes(24).toString("hex"),
+    };
     if (subdomain) profile.subdomain = subdomain;
+    if (hostname) profile.hostname = hostname;
+    if (useCloudflared || useWormhole) {
+      profile.tunnels = {
+        ...(useWormhole ? { wormhole: { ...(subdomain ? { subdomain } : { random: true }) } } : {}),
+        ...(useCloudflared && hostname
+          ? { cloudflared: { hostname, ...(cloudflaredToken ? { token: cloudflaredToken } : {}) } }
+          : {}),
+      };
+    }
     if (npm.length) profile.npm = { allowedScripts: npm };
     if (commands.length) profile.commands = commands;
     config.profiles[name] = profile;
@@ -204,6 +233,48 @@ async function requiredText(
     const value = (await rl.question(`  ${bold(label)}${suffix}: `)).trim() || defaultValue;
     if (value) return value;
     console.log(`  ${error("✕")} ${dim("A value is required.")}`);
+  }
+}
+
+async function requiredSecret(
+  rl: ReturnType<typeof createInterface>,
+  label: string,
+): Promise<string> {
+  while (true) {
+    output.write(`  ${bold(label)}: `);
+    const writableRl = rl as unknown as { _writeToOutput: (value: string) => void };
+    const writeToOutput = writableRl._writeToOutput;
+    writableRl._writeToOutput = () => {};
+    let value: string;
+    try {
+      value = (await rl.question("")).trim();
+    } finally {
+      writableRl._writeToOutput = writeToOutput;
+      output.write("\n");
+    }
+    if (value) return value;
+    console.log(`  ${error("✕")} ${dim("A value is required.")}`);
+  }
+}
+
+async function requiredHostname(
+  rl: ReturnType<typeof createInterface>,
+  label: string,
+): Promise<string> {
+  while (true) {
+    const value = (await rl.question(`  ${bold(label)}: `)).trim().toLowerCase();
+    const labels = value.split(".");
+    const valid =
+      value.length <= 253 &&
+      labels.length >= 2 &&
+      labels.every(
+        (part) =>
+          part.length >= 1 && part.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(part),
+      );
+    if (valid) return value;
+    console.log(
+      `  ${error("✕")} ${dim("Enter a hostname only, such as agent-dir-mcp.scriptr.uk (no spaces, https://, or path).")}`,
+    );
   }
 }
 

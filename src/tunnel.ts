@@ -18,8 +18,10 @@ function cleanOutput(value: Buffer | string): string {
 function writeLine(line = ""): void {
   process.stdout.write(`${line}\r\n`);
 }
-function publicUrl(subdomain: string): string {
-  return `https://${subdomain}.wormhole.bar`;
+function publicUrl(options: TunnelOptions): string {
+  if (options.provider === "cloudflared" && options.hostname) return `https://${options.hostname}`;
+  if (options.subdomain) return `https://${options.subdomain}.wormhole.bar`;
+  throw new Error("Tunnel URL cannot be determined from the configured options.");
 }
 function reasonCategory(reason: string): string {
   if (/timeout/i.test(reason)) return "timeout";
@@ -37,8 +39,10 @@ function failureFromLine(line: string): string | undefined {
 }
 
 export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
-  if (options.provider !== "wormhole")
-    return Promise.reject(new Error(`Unsupported tunnel provider: ${options.provider}`));
+  if (options.provider === "cloudflared" && !options.hostname)
+    return Promise.reject(
+      new Error("Cloudflared requires a hostname routed to a named Cloudflare Tunnel."),
+    );
 
   return new Promise((resolve, reject) => {
     const telemetry =
@@ -141,12 +145,14 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
       healthTimer = setInterval(async () => {
         if (!url || stopped || reconnecting) return;
         try {
+          // A 401 is expected: it proves the public tunnel reaches the authenticated server.
+          // Never send the Agent Dir bearer token to the public hostname.
           const response = await fetch(new URL(HEALTH_PATH, url), {
             method: "HEAD",
-            ...(options.token ? { headers: { authorization: `Bearer ${options.token}` } } : {}),
             signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
           });
-          if (!response.ok) throw new Error(`Health check returned HTTP ${response.status}.`);
+          if (!response.ok && response.status !== 401)
+            throw new Error(`Health check returned HTTP ${response.status}.`);
           healthFailures = 0;
           if (healthState === "degraded") {
             healthState = "healthy";
@@ -160,7 +166,7 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
           }
           if (healthFailures >= HEALTH_FAILURE_THRESHOLD) {
             healthFailures = 0;
-            handleDisconnect("Public tunnel health check failed.");
+            handleDisconnect("Tunnel health check failed.");
           }
         }
       }, HEALTH_INTERVAL_MS);
@@ -170,9 +176,19 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
     const spawnTunnel = (attempt: number): void => {
       if (stopped) return;
       reconnecting = false;
-      const args = ["http", String(options.port)];
-      if (!options.random && options.subdomain) args.push("--subdomain", options.subdomain);
-      child = spawn("wormhole", args, { stdio: ["ignore", "pipe", "pipe"] });
+      const args =
+        options.provider === "wormhole" ? ["http", String(options.port)] : ["tunnel", "run"];
+
+      if (options.provider === "wormhole" && !options.random && options.subdomain)
+        args.push("--subdomain", options.subdomain);
+      const executable = options.provider === "wormhole" ? "wormhole" : "cloudflared";
+      child = spawn(executable, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env:
+          options.provider === "cloudflared" && options.cloudflaredToken
+            ? { ...process.env, TUNNEL_TOKEN: options.cloudflaredToken }
+            : process.env,
+      });
       let buffer = "";
       let connected = false;
 
@@ -210,7 +226,7 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
           if (!resolved) {
             if (!child) {
               stop();
-              reject(new Error("Wormhole connected without a child process."));
+              reject(new Error(`${options.provider} connected without a child process.`));
               return;
             }
             resolved = true;
@@ -234,9 +250,19 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
           return;
         }
         const explicit = line.match(/https:\/\/[^\s"'<>]+/)?.[0]?.replace(/[),.;]+$/, "");
-        if (explicit) connectedAt(explicit);
-        else if (/Status\s+.*connected/i.test(line) && options.subdomain)
-          connectedAt(publicUrl(options.subdomain));
+        if (options.provider === "wormhole" && explicit) connectedAt(explicit);
+        else if (
+          options.provider === "wormhole" &&
+          /Status\s+.*connected/i.test(line) &&
+          options.subdomain
+        )
+          connectedAt(publicUrl(options));
+        else if (
+          options.provider === "cloudflared" &&
+          /registered tunnel connection|connection .* registered/i.test(line) &&
+          options.hostname
+        )
+          connectedAt(publicUrl(options));
       };
 
       const onData = (chunk: Buffer): void => {
@@ -245,13 +271,13 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
         buffer = lines.pop() ?? "";
         for (const line of lines) processLine(line);
       };
-      const onError = (error: Error): void => disconnect(`Wormhole error: ${error.message}`);
+      const onError = (error: Error): void => disconnect(`${executable} error: ${error.message}`);
       const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
         const detail = signal ? `signal ${signal}` : `code ${code}`;
         disconnect(
           startup
-            ? `Wormhole exited before the tunnel was established (${detail}).`
-            : `Wormhole process exited (${detail}).`,
+            ? `${executable} exited before the tunnel was established (${detail}).`
+            : `${executable} process exited (${detail}).`,
         );
       };
 
@@ -262,7 +288,7 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
       timer = setTimeout(() => {
         if (!connected)
           disconnect(
-            `Timed out waiting for Wormhole to establish the tunnel after ${STARTUP_TIMEOUT_MS / 1000}s.`,
+            `Timed out waiting for ${executable} to establish the tunnel after ${STARTUP_TIMEOUT_MS / 1000}s.`,
           );
       }, STARTUP_TIMEOUT_MS);
     };
