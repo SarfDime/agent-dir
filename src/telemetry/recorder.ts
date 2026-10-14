@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { createTelemetryEnvelope } from "./privacy.js";
+import { telemetrySessionPath } from "./storage.js";
 import type {
   AnonymousTelemetryEvent,
   TelemetryEnvelope,
@@ -11,8 +12,6 @@ import type {
 } from "./types.js";
 
 const DEFAULT_MAX_EVENTS = 500;
-const DEFAULT_PERSISTED_EVENTS = 500;
-const TELEMETRY_FILE = join(homedir(), ".config", "agent-dir", "telemetry.jsonl");
 
 export interface TelemetryRecorderOptions {
   level: TelemetryLevel;
@@ -42,9 +41,9 @@ export class TelemetryRecorder {
     this.runtime = options.runtime;
     this.project = options.project;
     this.persist = options.persist ?? false;
-    this.persistPath = options.persistPath ?? TELEMETRY_FILE;
     this.configId = options.configId ?? "default";
-    this.sessionId = options.sessionId ?? "default";
+    this.sessionId = options.sessionId ?? randomUUID();
+    this.persistPath = options.persistPath ?? telemetrySessionPath(this.configId, this.sessionId);
     if (this.persist && this.level !== "none") this.loadPersisted();
   }
 
@@ -99,9 +98,10 @@ export class TelemetryRecorder {
             event &&
             event.schemaVersion === 1 &&
             event.level === this.level &&
-            event.configId === this.configId,
+            event.configId === this.configId &&
+            event.sessionId === this.sessionId,
         )
-        .slice(-Math.min(this.maxEvents, DEFAULT_PERSISTED_EVENTS));
+        .slice(-this.maxEvents);
       this.events.push(...persisted);
     } catch {
       // A missing or corrupt telemetry file starts a fresh in-memory buffer.
@@ -116,15 +116,6 @@ export class TelemetryRecorder {
         mode: 0o600,
       });
       chmodSync(this.persistPath, 0o600);
-      if (this.events.length === this.maxEvents) {
-        const lines = readFileSync(this.persistPath, "utf8").split("\n").filter(Boolean);
-        if (lines.length > this.maxEvents) {
-          writeFileSync(this.persistPath, `${lines.slice(-this.maxEvents).join("\n")}\n`, {
-            encoding: "utf8",
-            mode: 0o600,
-          });
-        }
-      }
     } catch {
       // Telemetry persistence must never affect the MCP request path.
     }

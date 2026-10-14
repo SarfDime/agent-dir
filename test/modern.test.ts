@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
 import { getMcpLog, startServer, validateMcpHeaders } from "../src/server.js";
+import { startTunnel } from "../src/tunnel.js";
 
 test("CLI reports its package version", () => {
   const output = execFileSync(process.execPath, ["dist/bin/agent-dir.js", "--version"], {
@@ -55,6 +56,167 @@ test("CLI exposes blacklist configuration", async () => {
     assert.deepEqual(profile.commands, ["git", "rg"]);
     assert.deepEqual(profile.blacklistedCommands, ["git commit", "git push --force"]);
     assert.equal(profile.git, true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI stores both tunnel providers and redacts the Cloudflare token", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-tunnels-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    execFileSync(
+      process.execPath,
+      [
+        "dist/bin/agent-dir.js",
+        "config",
+        "add",
+        "demo",
+        "--directory",
+        home,
+        "--subdomain",
+        "demo-wormhole",
+        "--hostname",
+        "mcp.example.com",
+        "--cloudflared-token",
+        "cloudflare-secret",
+      ],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<
+        string,
+        {
+          tunnel: string;
+          defaultTunnel?: string;
+          tunnels?: {
+            wormhole?: { subdomain?: string };
+            cloudflared?: { hostname?: string; token?: string };
+          };
+        }
+      >;
+    };
+    assert.equal(saved.profiles.demo?.tunnel, "cloudflared");
+    assert.equal(saved.profiles.demo?.defaultTunnel, "cloudflared");
+    assert.equal(saved.profiles.demo?.tunnels?.wormhole?.subdomain, "demo-wormhole");
+    assert.equal(saved.profiles.demo?.tunnels?.cloudflared?.hostname, "mcp.example.com");
+    assert.equal(saved.profiles.demo?.tunnels?.cloudflared?.token, "cloudflare-secret");
+
+    const shown = execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "show", "demo"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, HOME: home },
+      },
+    );
+    assert.match(shown, /<configured>/);
+    assert.doesNotMatch(shown, /cloudflare-secret/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Wormhole tunnel reconnects after its process exits", async (t) => {
+  if (process.platform === "win32")
+    return t.skip("Executable shim test requires a POSIX environment.");
+  const directory = await mkdtemp(path.join(tmpdir(), "agent-dir-tunnel-test-"));
+  const previousPath = process.env.PATH;
+  try {
+    const executable = path.join(directory, "wormhole");
+    const marker = path.join(directory, "starts");
+    const script = [
+      "#!/usr/bin/env node",
+      'const fs = require("node:fs");',
+      `fs.appendFileSync(${JSON.stringify(marker)}, "start" + String.fromCharCode(10));`,
+      'process.stdout.write("https://test.wormhole.bar" + String.fromCharCode(10));',
+      "setInterval(() => {}, 1000);",
+    ].join(String.fromCharCode(10));
+    await writeFile(executable, script);
+    await chmod(executable, 0o755);
+    process.env.PATH = `${directory}${path.delimiter}${previousPath ?? ""}`;
+    const tunnel = await startTunnel({ provider: "wormhole", port: 3002, subdomain: "test" });
+    try {
+      tunnel.child.kill("SIGTERM");
+      let starts = 0;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        try {
+          starts = (await readFile(marker, "utf8")).trim().split("\n").length;
+        } catch {
+          // The fake tunnel has not started yet.
+        }
+        if (starts >= 2) break;
+      }
+      assert.ok(starts >= 2, "Tunnel process should restart after the initial process exits.");
+    } finally {
+      tunnel.stop?.();
+    }
+  } finally {
+    process.env.PATH = previousPath;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("telemetry migration archives legacy data and reset clears selected scopes", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-telemetry-migration-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const legacyFile = path.join(configDir, "telemetry.jsonl");
+    const event = (sessionId: string) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        configId: "demo",
+        sessionId,
+        level: "anonymous",
+        event: { event: "tool_call", tool: "read_files", success: true, durationMs: 1 },
+      });
+    await writeFile(legacyFile, `${event("one")}\n${event("two")}\n`);
+    const script = [
+      'import assert from "node:assert/strict";',
+      'import { existsSync, readdirSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'const storage = await import("./dist/src/telemetry/storage.js");',
+      "const events = storage.readAllTelemetryEvents();",
+      "assert.equal(events.length, 2);",
+      'const base = join(process.env.HOME, ".config", "agent-dir");',
+      'assert.equal(existsSync(join(base, "telemetry.jsonl")), false);',
+      'assert.ok(readdirSync(base).some((name) => name.startsWith("telemetry.legacy-archive.jsonl")));',
+      'storage.resetTelemetry("demo");',
+      'assert.equal(existsSync(join(base, "telemetry", "demo")), false);',
+      "storage.resetTelemetry(undefined, true);",
+      'assert.equal(existsSync(join(base, "telemetry")), false);',
+    ].join("\n");
+    execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("CLI saves random Wormhole choice in a reusable profile", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-random-wormhole-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const configFile = path.join(configDir, "config.json");
+    execFileSync(
+      process.execPath,
+      ["dist/bin/agent-dir.js", "config", "add", "demo", "--directory", home, "--random"],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    const saved = JSON.parse(await readFile(configFile, "utf8")) as {
+      profiles: Record<string, { tunnel: string; tunnels?: { wormhole?: { random?: boolean } } }>;
+    };
+    assert.equal(saved.profiles.demo?.tunnel, "wormhole");
+    assert.equal(saved.profiles.demo?.tunnels?.wormhole?.random, true);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -255,6 +417,31 @@ test("Git MCP tools are capability-gated", async () => {
     assert.equal(directBody.result.isError, true);
     assert.match(directBody.result.structuredContent?.error ?? "", /Unknown tool: git_status/);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("health check is publicly reachable without exposing protected endpoints", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-server-health-"));
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", () => resolve()));
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolve, reject) =>
+    probe.close((error) => (error ? reject(error) : resolve())),
+  );
+
+  const server = await startServer({ root, port, token: "test-token" });
+  try {
+    const health = await fetch(`http://127.0.0.1:${port}/__health`, { method: "HEAD" });
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get("cache-control"), "no-store");
+
+    const protectedRoute = await fetch(`http://127.0.0.1:${port}/__tree`);
+    assert.equal(protectedRoute.status, 401);
+  } finally {
+    await server.close();
     await rm(root, { recursive: true, force: true });
   }
 });

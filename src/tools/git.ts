@@ -1,4 +1,10 @@
 import { spawn } from "node:child_process";
+import {
+  appendBoundedOutput,
+  commandEnvironment,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from "./commands.js";
 
 export interface GitResult {
   command: string;
@@ -19,21 +25,26 @@ function validatePaths(paths: string[]): void {
 
 function runGit(root: string, args: string[], timeoutMs = 30000): Promise<GitResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn("git", args, { cwd: root, shell: false, env: process.env });
+    const child = spawn("git", args, {
+      cwd: root,
+      shell: false,
+      env: commandEnvironment(),
+      ...processTreeSpawnOptions(),
+    });
     let stdout = "";
     let stderr = "";
     let finished = false;
     const timer = setTimeout(() => {
       if (finished) return;
       finished = true;
-      child.kill("SIGTERM");
+      terminateProcessTree(child);
       reject(new Error(`git ${args.join(" ")} timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += chunk.toString();
+      stdout = appendBoundedOutput(stdout, chunk);
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += chunk.toString();
+      stderr = appendBoundedOutput(stderr, chunk);
     });
     child.on("error", (error: Error) => {
       if (finished) return;

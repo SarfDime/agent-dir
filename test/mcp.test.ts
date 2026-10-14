@@ -131,6 +131,16 @@ test("MCP telemetry records command, session, and detailed project context", asy
     }
     assert.ok(tool);
     assert.ok(session);
+    if (tool?.event.event === "tool_call") {
+      assert.equal(tool.event.requestIdHash?.length, 64);
+      assert.ok((tool.event.estimatedInputTokens ?? 0) > 0);
+      if (tool.event.success) {
+        assert.ok((tool.event.estimatedOutputTokens ?? 0) > 0);
+        assert.ok((tool.event.cumulativeOutputBytes ?? 0) > 0);
+        assert.ok((tool.event.cumulativeEstimatedOutputTokens ?? 0) > 0);
+      }
+      assert.equal("commands" in tool.event, false);
+    }
     if (session?.event.event === "session") {
       assert.equal(session.event.requestCount, 1);
       assert.equal(session.event.toolCallCount, 1);

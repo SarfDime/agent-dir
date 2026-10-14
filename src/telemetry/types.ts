@@ -27,9 +27,28 @@ export interface TelemetryMcpRequestEvent {
   errorCategory?: string;
 }
 
+export interface TelemetryFileMetric {
+  pathHash: string;
+  contentHash?: string;
+  bytes: number;
+}
+
 export interface TelemetryToolEvent {
   event: "tool_call";
   tool: string;
+  requestIdHash?: string;
+  inputFingerprint?: string;
+  outputFingerprint?: string;
+  /** Full local-only troubleshooting payload, emitted only at diagnostic level. */
+  diagnosticDetails?: Record<string, unknown>;
+  estimatedInputTokens?: number;
+  estimatedOutputTokens?: number;
+  cumulativeOutputBytes?: number;
+  cumulativeEstimatedOutputTokens?: number;
+  duplicateOutputBytes?: number;
+  textOutputBytes?: number;
+  uniqueFileCount?: number;
+  files?: TelemetryFileMetric[];
   success: boolean;
   durationMs: number;
   inputBytes?: number;
@@ -87,6 +106,10 @@ export interface TelemetryRuntimeContext {
   mcpClientName?: string;
   mcpClientVersion?: string;
   nodeVersion?: string;
+  distroId?: string;
+  distroName?: string;
+  distroVersion?: string;
+  kernelVersion?: string;
   hostname?: string;
   username?: string;
   processId?: number;

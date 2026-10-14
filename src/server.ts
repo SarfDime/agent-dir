@@ -29,7 +29,7 @@ export function startServer({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
     ...(telemetry.configId ? { configId: telemetry.configId } : {}),
-    sessionId: `http-${Date.now()}`,
+    sessionId: telemetry.sessionId ?? `http-${Date.now()}`,
   });
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const startedAt = performance.now();
@@ -41,6 +41,11 @@ export function startServer({
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     let authenticated = false;
     try {
+      if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
+        res.setHeader("cache-control", "no-store");
+        sendText(res, 200, "ok\n");
+        return;
+      }
       const body = await readBody(req, requestController.signal);
       const requestInit: RequestInit = {
         method: req.method ?? "GET",
@@ -67,10 +72,6 @@ export function startServer({
           authenticated,
           startedAt,
         );
-        return;
-      }
-      if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
-        sendText(res, 200, "ok\n");
         return;
       }
       if (url.pathname === "/mcp") {
