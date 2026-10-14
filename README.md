@@ -6,7 +6,7 @@
 
 > **`agent-dir` turns a trusted local project directory into a controlled, authenticated MCP endpoint for AI agents.**
 
-`agent-dir` is a cross-platform TypeScript CLI that exposes a local project to an AI agent through an authenticated MCP server. It provides controlled file access, targeted file patches, and explicitly allowlisted development commands, with optional tunneling through [Wormhole](https://wormhole.bar/).
+`agent-dir` is a cross-platform TypeScript CLI that exposes a local project to an AI agent through an authenticated MCP server. It provides controlled file access, targeted file patches, and explicitly allowlisted development commands, with optional tunneling through [Wormhole](https://wormhole.bar/) or [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
 
 > **Security:** this is a remote-control development tool. Only expose directories you trust, keep the authentication token private, and allow only commands you actually need.
 
@@ -14,7 +14,7 @@
 
 - Node.js 24 LTS or newer
 - npm
-- Wormhole CLI if remote access is needed
+- Wormhole CLI or `cloudflared` CLI if remote access is needed
 
 Node.js 24 is the supported LTS baseline. The project currently tracks TypeScript 7 and Biome 2.5.
 
@@ -37,6 +37,22 @@ For remote MCP access with Wormhole:
 agent-dir . --tunnel wormhole --subdomain my-project-x7k4m2
 ```
 
+For a stable hostname on your own Cloudflare-managed domain, configure a Cloudflare Tunnel route to the Agent Dir port. Cloudflare Tunnel is the default for profiles that have a `tunnels.cloudflared` entry. Use `-c` to select it explicitly or `-w` to override it with Wormhole:
+
+```bash
+agent-dir scriptr       # profile default (Cloudflare when configured)
+agent-dir scriptr -c    # explicitly use Cloudflare Tunnel
+agent-dir scriptr -w    # explicitly use Wormhole
+```
+
+For a one-off run, the equivalent long option remains available:
+
+```bash
+agent-dir . --tunnel cloudflared --hostname mcp.example.com
+```
+
+Agent Dir starts `cloudflared tunnel run`, monitors its connection, and restarts the process if it disconnects. The `--hostname` value is the public URL displayed by Agent Dir; Cloudflare DNS routing and the named tunnel's ingress configuration must already exist. See [Cloudflare Tunnel setup](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started/).
+
 ### Wormhole domains
 
 When using a custom Wormhole subdomain, choose a distinctive name such as `my-project-x7k4m2`. Avoid generic names such as `project`, `test`, `dev`, or `scriptr` to reduce collisions and make the public endpoint less predictable.
@@ -49,7 +65,7 @@ The Wormhole URL is only the transport endpoint. `agent-dir` authentication is e
 
 ## First-run setup
 
-On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating your first saved profile. It asks for the profile name, directory, port, tunnel, optional Wormhole subdomain, optional npm scripts, optional allowed commands, and telemetry preference. The generated authentication token is saved with the profile.
+On the first interactive run, when no `agent-dir` config exists, the CLI walks you through creating a saved profile. After the profile name, directory, and port, it asks whether to configure Cloudflare Tunnel first; if enabled, it collects the public hostname and Cloudflare connector token. The Cloudflare connector token is entered without being echoed to the terminal. It then asks whether to configure Wormhole as well and optionally collects a custom subdomain. You can enable either provider, both, or neither. Cloudflare is the default when both are configured. The generated Agent Dir MCP bearer token is saved separately from the Cloudflare connector token.
 
 Telemetry is optional and stays local. During setup, `agent-dir` explains the available levels: **none**, **anonymous**, **basic**, **detailed**, and **diagnostic**. Telemetry is disabled by default if you choose the default option. The same choices can later be changed with `agent-dir telemetry enable|disable`.
 
@@ -73,7 +89,7 @@ Non-interactive invocations and invocations with explicit launch options do not 
 
 ## Profiles
 
-Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain, port, npm scripts, allowed non-npm commands, blocked command prefixes, and whether dedicated Git MCP tools are enabled. Dedicated Git tools are enabled automatically when `git` is in the allowed command list, or explicitly with `--git`; use `--no-git` to disable them for a run.
+Profiles save settings you use repeatedly: project directory, tunnel, Wormhole subdomain or Cloudflare hostname, port, npm scripts, allowed non-npm commands, blocked command prefixes, and whether dedicated Git MCP tools are enabled. Dedicated Git tools are enabled automatically when `git` is in the allowed command list, or explicitly with `--git`; use `--no-git` to disable them for a run.
 
 ```bash
 agent-dir config add my-project \
@@ -85,10 +101,40 @@ agent-dir config add my-project \
   --blacklist "git commit,git push --force"
 ```
 
-Then:
+Profiles can store both tunnel configurations at once. The Cloudflare connector token is separate from the Agent Dir MCP bearer token (`--token`); store it under `tunnels.cloudflared.token` or pass `--cloudflared-token` when creating the profile. Config files are stored at `~/.config/agent-dir/config.json` with owner-only permissions.
+
+```json
+{
+  "directory": "~/src/my-project",
+  "port": 3002,
+  "tunnel": "cloudflared",
+  "defaultTunnel": "cloudflared",
+  "tunnels": {
+    "wormhole": { "subdomain": "my-project-x7k4m2" },
+    "cloudflared": {
+      "hostname": "mcp.example.com",
+      "token": "CLOUDFLARE_TUNNEL_TOKEN"
+    }
+  }
+}
+```
+
+When creating a profile from the CLI, pass `--hostname` and optionally `--cloudflared-token`. **Avoid passing secrets as command-line arguments where possible**: they may be exposed in shell history or process listings. Prefer the interactive setup prompt for the connector token. To configure both providers, include both `--subdomain` and `--hostname`, and set the default using `--tunnel cloudflared` (or `-c`). `agent-dir config show` redacts configured tunnel tokens.
+
+For Cloudflare, save the hostname instead of a Wormhole subdomain:
 
 ```bash
-agent-dir my-project
+agent-dir config add scriptr-mcp \
+  --directory ~/src/my-project \
+  --tunnel cloudflared \
+  --hostname mcp.example.com \
+  --npm typecheck,lint,test
+```
+
+Then start the saved profile:
+
+```bash
+agent-dir scriptr-mcp
 ```
 
 Manage profiles with:
@@ -122,7 +168,7 @@ Profiles are stored per-user at `~/.config/agent-dir/config.json`, not in the pr
 
 ## Telemetry
 
-Telemetry is **disabled by default** and is local-only. When enabled, events are stored in `~/.config/agent-dir/telemetry.jsonl` with user-only permissions; no telemetry is sent to a remote service.
+Telemetry is **disabled by default** and is local-only. When enabled, events are stored under `~/.config/agent-dir/telemetry/<profile>/session-<id>.jsonl` with user-only permissions. Each profile and process session gets a separate append-only JSONL file; restarting Agent Dir starts a new session file, and historical events are not truncated. Tool events also include rough byte-based token-size estimates, hashed request/input/output fingerprints, repeated-output signals, cumulative output size, and hashed per-file size metadata. These estimates do not reveal Claude's actual token billing or hidden context. File contents, source code, and raw paths are not stored in the added file metrics. No telemetry is sent to a remote service. The previous shared `telemetry.jsonl` file is migrated into the new layout on the next telemetry read/reset and preserved as a legacy archive.
 
 Enable a privacy level with:
 
@@ -146,13 +192,14 @@ Manage telemetry with:
 ```bash
 agent-dir telemetry status
 agent-dir telemetry schema
-agent-dir telemetry show [--follow]
-agent-dir telemetry summary
+agent-dir telemetry show [profile] [session-id] [--follow]
+agent-dir telemetry summary [profile]
 agent-dir telemetry disable
-agent-dir telemetry reset
+agent-dir telemetry reset <profile>
+agent-dir telemetry reset --all
 ```
 
-For the event model, metric definitions, privacy levels, and guidance for interpreting raw and aggregated telemetry, see [Telemetry interpretation](docs/telemetry.md).
+Use `agent-dir telemetry show scriptr` or `agent-dir telemetry summary scriptr` to focus on one profile. `agent-dir telemetry show scriptr <session-id>` filters to a single session. `agent-dir telemetry reset scriptr` removes only that profile’s telemetry; `agent-dir telemetry reset --all` clears all telemetry and resets the configured level. For the event model, metric definitions, privacy levels, and guidance for interpreting raw and aggregated telemetry, see [Telemetry interpretation](docs/telemetry.md).
 
 ## MCP transport and compatibility
 
@@ -426,7 +473,7 @@ The diagnostics tool is deliberately project-independent. It checks conditions s
 
 ## Credits
 
-Remote tunneling support is provided through [Wormhole](https://wormhole.bar/), a project of the Wormhole team. `agent-dir` invokes the Wormhole CLI and does not provide the tunneling service itself.
+Remote tunneling is provided by [Wormhole](https://wormhole.bar/) or [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). `agent-dir` invokes the installed CLI and does not provide either tunneling service itself. Cloudflare support expects an already-configured named tunnel.
 
 ## License
 

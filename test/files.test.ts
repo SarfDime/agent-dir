@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
-import { searchCode, searchFiles } from "../src/tools/code.js";
+import { findExports, findImports, searchCode, searchFiles } from "../src/tools/code.js";
 import {
   deleteFile,
   listDir,
@@ -29,6 +29,40 @@ test("authentication accepts Bearer and query tokens on all endpoints", () => {
   assert.equal(authenticate(wrong, "secret"), false);
   assert.equal(authenticate(wrongLength, "secret"), false);
   assert.equal(authenticate(rest, "secret"), true);
+});
+
+test("find imports and exports detects ES modules and CommonJS", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-code-discovery-"));
+  try {
+    await fsWriteFile(
+      path.join(root, "sample.ts"),
+      [
+        'import thing from "thing";',
+        'import "side-effect";',
+        'const common = require("common-package");',
+        "export const answer = 42;",
+        "export async function runTask() {}",
+        "export class Example {}",
+        "export type ExampleType = string;",
+      ].join("\n"),
+    );
+    const imports = await findImports(root);
+    assert.deepEqual(
+      imports.map(({ module, kind }) => [module, kind]),
+      [
+        ["thing", "import"],
+        ["side-effect", "import"],
+        ["common-package", "require"],
+      ],
+    );
+    const exports = await findExports(root);
+    assert.deepEqual(
+      exports.map(({ symbol }) => symbol),
+      ["answer", "runTask", "Example", "ExampleType"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("filesystem tools stay inside project root", async () => {

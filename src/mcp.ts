@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { hostname, userInfo } from "node:os";
+import { hostname, release, userInfo } from "node:os";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
@@ -721,6 +722,9 @@ export function createMcpHandler(
   let sessionToolCallCount = 0;
   let sessionCommandCallCount = 0;
   let sessionRecorded = false;
+  let sessionOutputBytes = 0;
+  let sessionEstimatedOutputTokens = 0;
+  const seenOutputFingerprints = new Set<string>();
   const telemetryProjectPromise =
     telemetry.level === "detailed" || telemetry.level === "diagnostic"
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
@@ -1012,17 +1016,31 @@ export function createMcpHandler(
             );
             const durationMs = performance.now() - startedAt;
             const count = resultCount(result);
+            const serializedResult = JSON.stringify(result);
+            const outputBytes = Buffer.byteLength(serializedResult, "utf8");
+            const estimatedOutputTokens = estimateTokens(serializedResult);
+            sessionOutputBytes += outputBytes;
+            sessionEstimatedOutputTokens += estimatedOutputTokens;
             const runtime = telemetryRuntime(params);
             telemetryRecorder.record(
               {
                 event: "tool_call",
                 tool: toolName,
+                requestIdHash: telemetryHash(String(message.id)),
                 success: true,
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
-                outputBytes: Buffer.byteLength(JSON.stringify(result), "utf8"),
+                outputBytes,
+                estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
+                estimatedOutputTokens,
+                cumulativeOutputBytes: sessionOutputBytes,
+                cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
+                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                ...(telemetry.level === "diagnostic"
+                  ? { diagnosticDetails: diagnosticToolDetails(argumentsValue, result) }
+                  : {}),
                 ...(count === undefined ? {} : { resultCount: count }),
-                ...toolTelemetryMetrics(toolName, result),
+                ...toolTelemetryMetrics(toolName, result, seenOutputFingerprints),
               },
               runtime,
               telemetryProject,
@@ -1037,7 +1055,7 @@ export function createMcpHandler(
                   operation: command.operation,
                   success: true,
                   durationMs,
-                  outputBytes: Buffer.byteLength(JSON.stringify(result), "utf8"),
+                  outputBytes,
                 },
                 runtime,
                 telemetryProject,
@@ -1057,9 +1075,22 @@ export function createMcpHandler(
               {
                 event: "tool_call",
                 tool: toolName,
+                requestIdHash: telemetryHash(String(message.id)),
                 success: false,
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
+                estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
+                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                ...(telemetry.level === "diagnostic"
+                  ? {
+                      diagnosticDetails: diagnosticToolDetails(argumentsValue, {
+                        error:
+                          error instanceof Error
+                            ? { name: error.name, message: error.message, stack: error.stack }
+                            : String(error),
+                      }),
+                    }
+                  : {}),
                 errorCategory,
               },
               runtime,
@@ -2254,6 +2285,8 @@ function telemetryRuntime(
     ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
     ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
     nodeVersion: process.versions.node,
+    ...linuxDistribution(),
+    kernelVersion: release(),
     hostname: hostname(),
     username: userInfo().username,
     processId: process.pid,
@@ -2263,32 +2296,114 @@ function telemetryRuntime(
   };
 }
 
+function linuxDistribution(): { distroId?: string; distroName?: string; distroVersion?: string } {
+  if (process.platform !== "linux") return {};
+  try {
+    const values = Object.fromEntries(
+      readFileSync("/etc/os-release", "utf8")
+        .split("\n")
+        .map((line) => line.match(/^([A-Z_]+)=(.*)$/))
+        .filter((match): match is RegExpMatchArray => match !== null)
+        .map((match) => [match[1], match[2]?.replace(/^"|"$/g, "")]),
+    );
+    return {
+      ...(values.ID ? { distroId: values.ID } : {}),
+      ...(values.PRETTY_NAME ? { distroName: values.PRETTY_NAME } : {}),
+      ...(values.VERSION_ID ? { distroVersion: values.VERSION_ID } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function diagnosticToolDetails(input: unknown, output: unknown): Record<string, unknown> {
+  const serialize = (value: unknown): unknown => {
+    try {
+      const json = JSON.stringify(value);
+      if (json === undefined) return null;
+      if (Buffer.byteLength(json, "utf8") <= 64_000) return value;
+      return {
+        truncated: true,
+        byteLength: Buffer.byteLength(json, "utf8"),
+        preview: json.slice(0, 64_000),
+      };
+    } catch {
+      return { serializationFailed: true };
+    }
+  };
+  return { input: serialize(input), output: serialize(output) };
+}
+
+function telemetryHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+// A rough byte-based proxy, not a model-tokenizer count or Claude billing measurement.
+function estimateTokens(value: string): number {
+  return Math.ceil(Buffer.byteLength(value, "utf8") / 4);
+}
+
 function toolTelemetryMetrics(
   toolName: string,
   result: Record<string, unknown>,
-): { affectedFiles?: number; truncated?: boolean; paginated?: boolean } {
+  seenOutputFingerprints: Set<string>,
+): {
+  affectedFiles?: number;
+  truncated?: boolean;
+  paginated?: boolean;
+  outputFingerprint?: string;
+  duplicateOutputBytes?: number;
+  textOutputBytes?: number;
+  uniqueFileCount?: number;
+  files?: Array<{ pathHash: string; contentHash?: string; bytes: number }>;
+} {
   const structured = result.structuredContent;
   if (!Array.isArray(structured) && !isRecord(structured)) return {};
   const paths = new Set<string>();
+  const files = new Map<string, { pathHash: string; contentHash?: string; bytes: number }>();
   let truncated = false;
   let paginated = false;
+  let textOutputBytes = 0;
   const visit = (value: unknown): void => {
+    if (typeof value === "string") {
+      textOutputBytes += Buffer.byteLength(value, "utf8");
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const child of value) visit(child);
+      return;
+    }
     if (!isRecord(value)) return;
-    if (typeof value.path === "string") paths.add(value.path);
+    if (typeof value.path === "string") {
+      paths.add(value.path);
+      const content = typeof value.content === "string" ? value.content : undefined;
+      files.set(value.path, {
+        pathHash: telemetryHash(value.path),
+        ...(content === undefined ? {} : { contentHash: telemetryHash(content) }),
+        bytes: content === undefined ? 0 : Buffer.byteLength(content, "utf8"),
+      });
+    }
     if (value.truncated === true) truncated = true;
     if (value.nextCursor !== undefined) paginated = true;
-    for (const child of Object.values(value)) {
-      if (Array.isArray(child)) for (const item of child) visit(item);
-      else if (isRecord(child)) visit(child);
-    }
+    for (const child of Object.values(value)) visit(child);
   };
   visit(structured);
+  const outputJson = JSON.stringify(result);
+  const outputFingerprint = telemetryHash(outputJson);
+  const outputBytes = Buffer.byteLength(outputJson, "utf8");
+  const duplicateOutputBytes = seenOutputFingerprints.has(outputFingerprint) ? outputBytes : 0;
+  seenOutputFingerprints.add(outputFingerprint);
   return {
     ...(paths.size > 0 && /^(write|patch|delete|read|file|git_changes|inspect)/.test(toolName)
       ? { affectedFiles: paths.size }
       : {}),
     ...(truncated ? { truncated: true } : {}),
     ...(paginated ? { paginated: true } : {}),
+    outputFingerprint,
+    duplicateOutputBytes,
+    textOutputBytes,
+    uniqueFileCount: files.size,
+    ...(files.size ? { files: [...files.values()].slice(0, 100) } : {}),
   };
 }
 

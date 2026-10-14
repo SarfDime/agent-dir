@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { CommandResult } from "./commands.js";
+import {
+  appendBoundedOutput,
+  commandEnvironment,
+  processTreeSpawnOptions,
+  terminateProcessTree,
+} from "./commands.js";
 
 interface PackageJson {
   scripts?: Record<string, string>;
@@ -33,7 +39,8 @@ export function runNpm(
       const child = spawn(executable, ["run", script], {
         cwd: root,
         shell: false,
-        env: process.env,
+        env: commandEnvironment(),
+        ...processTreeSpawnOptions(),
       });
       let stdout = "";
       let stderr = "";
@@ -43,13 +50,13 @@ export function runNpm(
         if (finished) return;
         finished = true;
         clearTimeout(timer);
-        child.kill("SIGTERM");
+        terminateProcessTree(child);
         reject(new Error(`npm run ${script} was aborted.`));
       };
       timer = setTimeout(() => {
         if (finished) return;
         finished = true;
-        child.kill("SIGTERM");
+        terminateProcessTree(child);
         signal?.removeEventListener("abort", abort);
         reject(new Error(`npm run ${script} timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
@@ -59,10 +66,10 @@ export function runNpm(
       }
       signal?.addEventListener("abort", abort, { once: true });
       child.stdout.on("data", (chunk: Buffer | string) => {
-        stdout += chunk.toString();
+        stdout = appendBoundedOutput(stdout, chunk);
       });
       child.stderr.on("data", (chunk: Buffer | string) => {
-        stderr += chunk.toString();
+        stderr = appendBoundedOutput(stderr, chunk);
       });
       child.on("error", (error: Error) => {
         if (!finished) {

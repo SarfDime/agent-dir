@@ -8,8 +8,14 @@ export interface NpmConfig {
 export interface Profile {
   directory: string;
   port: number;
-  tunnel: "none" | "wormhole";
+  tunnel: "none" | "wormhole" | "cloudflared";
+  defaultTunnel?: "none" | "wormhole" | "cloudflared";
+  tunnels?: {
+    wormhole?: { subdomain?: string; random?: boolean };
+    cloudflared?: { hostname: string; token?: string };
+  };
   subdomain?: string;
+  hostname?: string;
   token?: string;
   npm?: NpmConfig;
   commands?: string[];
@@ -47,9 +53,11 @@ export interface RequestLog {
 }
 
 export interface TunnelOptions {
-  provider: "wormhole";
+  provider: "wormhole" | "cloudflared";
   port: number;
+  cloudflaredToken?: string;
   subdomain?: string;
+  hostname?: string;
   random?: boolean;
   token?: string;
   telemetry?: TelemetryConfig;

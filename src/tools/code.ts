@@ -216,7 +216,7 @@ export async function findImports(
 ): Promise<ImportMatch[]> {
   const matches = await readMatches(
     root,
-    String.raw`(?:^|[;{}])\\s*import(?:[^"'\\n]*?from\\s*)?["']([^"']+)["']|require\\(\\s*["']([^"']+)["']\\s*\\)`,
+    String.raw`(?:^|[;{}])\s*import\s*(?:[^"'\n]*?from\s*)?["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)`,
     { codeOnly: true, regex: true, maxResults },
   );
   return boundMatches(

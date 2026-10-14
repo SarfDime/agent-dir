@@ -66,9 +66,36 @@ function isProfile(value: unknown): value is Profile {
   if (typeof profile.directory !== "string" || typeof port !== "number" || !Number.isInteger(port))
     return false;
   if (port < 1 || port > 65_535) return false;
-  if (profile.tunnel !== "none" && profile.tunnel !== "wormhole") return false;
+  if (
+    profile.tunnel !== "none" &&
+    profile.tunnel !== "wormhole" &&
+    profile.tunnel !== "cloudflared"
+  )
+    return false;
   if (profile.subdomain !== undefined && typeof profile.subdomain !== "string") return false;
+  if (profile.hostname !== undefined && typeof profile.hostname !== "string") return false;
   if (profile.token !== undefined && typeof profile.token !== "string") return false;
+  if (
+    profile.defaultTunnel !== undefined &&
+    !["none", "wormhole", "cloudflared"].includes(String(profile.defaultTunnel))
+  )
+    return false;
+  if (profile.tunnels !== undefined) {
+    if (!profile.tunnels || typeof profile.tunnels !== "object") return false;
+    const tunnels = profile.tunnels as Record<string, unknown>;
+    if (tunnels.wormhole !== undefined) {
+      if (!tunnels.wormhole || typeof tunnels.wormhole !== "object") return false;
+      const wormhole = tunnels.wormhole as Record<string, unknown>;
+      if (wormhole.subdomain !== undefined && typeof wormhole.subdomain !== "string") return false;
+      if (wormhole.random !== undefined && typeof wormhole.random !== "boolean") return false;
+    }
+    if (tunnels.cloudflared !== undefined) {
+      if (!tunnels.cloudflared || typeof tunnels.cloudflared !== "object") return false;
+      const cloudflared = tunnels.cloudflared as Record<string, unknown>;
+      if (typeof cloudflared.hostname !== "string" || !cloudflared.hostname) return false;
+      if (cloudflared.token !== undefined && typeof cloudflared.token !== "string") return false;
+    }
+  }
   if (profile.npm !== undefined) {
     if (!profile.npm || typeof profile.npm !== "object") return false;
     const npm = profile.npm as Record<string, unknown>;

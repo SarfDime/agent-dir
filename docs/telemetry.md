@@ -1,6 +1,6 @@
 # Telemetry interpretation
 
-Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths at standard levels. The opt-in diagnostic level additionally records local troubleshooting metadata, including project paths, hostname, username, process identifiers, Node version, memory usage, and process uptime.
+Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths at standard levels. The opt-in diagnostic level additionally records local troubleshooting metadata, including project paths, hostname, username, process identifiers, full Node version, Linux distribution ID/name/version, kernel version, memory usage, process uptime, and bounded raw tool inputs/outputs or error details. Diagnostic records can contain source code, command arguments, project data, and other sensitive material; they are stored locally and should be enabled only when intended.
 
 ## Data hierarchy
 
@@ -10,7 +10,7 @@ Telemetry is organized as:
 - `anonymous`: operational events without runtime/project context.
 - `basic`: anonymous events plus coarse runtime context.
 - `detailed`: basic context plus coarse project classification.
-- `diagnostic`: detailed context plus local identifying/troubleshooting metadata. Use only when diagnosing a local problem.
+- `diagnostic`: detailed context plus identifying/troubleshooting metadata and bounded raw tool input/output or error details. This can contain source code, command arguments, and sensitive project information; it is stored locally. Use only when intended.
 
 configuration → session → event
 
@@ -26,7 +26,9 @@ One MCP/JSON-RPC request handled by Agent Dir. Its duration covers the request f
 
 ### tool_call
 
-One Agent Dir tool execution inside an MCP request. Tool metrics are the best measure of individual Agent Dir capability reliability.
+One Agent Dir tool execution inside an MCP request. Tool metrics are the best measure of individual Agent Dir capability reliability. Tool events include UTF-8 input/output byte counts, a rough token-size estimate (`ceil(bytes / 4)`), hashed request/input/output fingerprints, output repetition within the current process session, and bounded per-file metadata. File metadata contains hashes of paths and returned file text plus byte counts; it does not contain the paths or text themselves. A matching output fingerprint means the serialized tool result was identical, not that Claude necessarily re-read or billed those bytes again.
+
+Token estimates are **not tokenizer measurements** and do not represent Claude's actual input/output tokens or billing. Agent Dir cannot observe Claude's hidden prompt, cached tokens, reasoning tokens, or context carried between turns. Search results can be compared by result count, output bytes, truncation, and pagination, but Agent Dir does not currently judge semantic search relevance. Repeated input fingerprints and event ordering can help identify retry patterns, while validation-after-change counts must be inferred from the raw event sequence rather than treated as a definitive causal metric.
 
 ### command_call
 
@@ -94,7 +96,7 @@ telemetry show is the raw event stream grouped by configuration and session. Use
 
 ## Reading telemetry summary
 
-telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. Use the raw stream when investigating a specific request or reconstructing event order.
+telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. Use the raw stream when investigating a specific request or reconstructing event order. Raw tool events currently provide the token-size, fingerprint, duplicate-output, and file-metadata signals described above; aggregated summary fields for those measurements have not yet been added.
 
 ## Data quality rules
 
