@@ -17,7 +17,8 @@ export async function diagnostics(root: string, maxResults = 200): Promise<Diagn
   const entries = await listFiles(root);
   const results: Diagnostic[] = [];
   for (const entry of entries) {
-    if (results.length >= maxResults || entry.type !== "file") continue;
+    if (results.length >= maxResults) break;
+    if (entry.type !== "file") continue;
     const target = path.join(resolvedRoot, entry.path);
     let stat: Awaited<ReturnType<typeof fs.lstat>>;
     try {

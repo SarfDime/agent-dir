@@ -20,7 +20,6 @@ export interface Profile {
   npm?: NpmConfig;
   commands?: string[];
   blacklistedCommands?: string[];
-  git?: boolean;
 }
 
 export interface AgentConfig {
@@ -33,7 +32,6 @@ export interface CommandConfig {
   npm?: NpmConfig;
   commands?: string[];
   blacklistedCommands?: string[];
-  git?: boolean;
 }
 
 export interface ServerOptions {

@@ -38,31 +38,6 @@ export async function fileInfo(
   };
 }
 
-export async function packageInfo(root: string): Promise<Record<string, unknown>> {
-  const packagePath = path.join(await fs.realpath(root), "package.json");
-  try {
-    const packageJson = JSON.parse(await fs.readFile(packagePath, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    return {
-      path: "package.json",
-      name: packageJson.name ?? null,
-      version: packageJson.version ?? null,
-      description: packageJson.description ?? null,
-      packageManager: packageJson.packageManager ?? null,
-      engines: packageJson.engines ?? null,
-      scripts: packageJson.scripts ?? {},
-      dependencies: packageJson.dependencies ?? {},
-      devDependencies: packageJson.devDependencies ?? {},
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return { path: "package.json", exists: false };
-    throw new Error("package.json exists but is not valid JSON.");
-  }
-}
-
 export async function projectOverview(root: string): Promise<ProjectOverview> {
   const entries = await listFiles(root);
   const files = entries.filter((entry) => entry.type === "file");

@@ -42,6 +42,8 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       method: sanitizeMcpMethod(event.method),
       success: event.success === true,
       durationMs: boundedNumber(event.durationMs),
+      ...optionalNumber("responseBytes", event.responseBytes),
+      ...optionalNumber("estimatedResponseTokens", event.estimatedResponseTokens),
       ...(event.errorCategory === undefined
         ? {}
         : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
