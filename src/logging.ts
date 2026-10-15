@@ -6,11 +6,11 @@ const MAGENTA = "\x1b[35m";
 const YELLOW = "\x1b[33m";
 const RED = "\x1b[31m";
 const GREEN = "\x1b[32m";
-const BLUE = "\x1b[34m";
 const BRIGHT_BLUE = "\x1b[94m";
 const BRIGHT_CYAN = "\x1b[96m";
 const BRIGHT_MAGENTA = "\x1b[95m";
 const BRIGHT_YELLOW = "\x1b[93m";
+const BRIGHT_GREEN = "\x1b[92m";
 
 const writeLine = (line = ""): void => {
   process.stdout.write(`${line}\r\n`);
@@ -64,6 +64,83 @@ const TOOL_COLORS: Record<string, string> = {
 
 const NARROW_TOOL_ICONS = new Set(["✎", "✖", "⚙", "⌘", "↪", "↗"]);
 const TOOL_ICON_SLOT_WIDTH = 3;
+const DIM = "\x1b[90m";
+
+function visibleLength(value: string): number {
+  const esc = String.fromCharCode(27);
+  const plain = value
+    .replaceAll(`${esc}[90m`, "")
+    .replaceAll(`${esc}[0m`, "")
+    .replaceAll(`${esc}[92m`, "")
+    .replaceAll(`${esc}[96m`, "")
+    .replaceAll(`${esc}[95m`, "")
+    .replaceAll(`${esc}[94m`, "")
+    .replaceAll(`${esc}[93m`, "")
+    .replaceAll(`${esc}[32m`, "")
+    .replaceAll(`${esc}[36m`, "")
+    .replaceAll(`${esc}[35m`, "")
+    .replaceAll(`${esc}[34m`, "")
+    .replaceAll(`${esc}[33m`, "");
+  let width = 0;
+  for (const character of plain) {
+    const code = character.codePointAt(0) ?? 0;
+    width +=
+      code >= 0x1100 &&
+      (code <= 0x115f ||
+        code === 0x2329 ||
+        code === 0x232a ||
+        (code >= 0x2e80 && code <= 0xa4cf) ||
+        (code >= 0xac00 && code <= 0xd7a3) ||
+        (code >= 0xf900 && code <= 0xfaff) ||
+        (code >= 0xfe10 && code <= 0xfe19) ||
+        (code >= 0xfe30 && code <= 0xfe6f) ||
+        (code >= 0xff00 && code <= 0xff60) ||
+        (code >= 0xffe0 && code <= 0xffe6) ||
+        (code >= 0x1f300 && code <= 0x1faff))
+        ? 2
+        : 1;
+  }
+  return width;
+}
+
+const BOX_WIDTH = 76;
+
+function boxTop(label: string, borderColor: string, width = BOX_WIDTH): string {
+  const heading = `─ ${label} `;
+  return `  ${color(`╭${heading}${"─".repeat(Math.max(1, width - visibleLength(heading) - 2))}╮`, borderColor)}`;
+}
+
+function boxContent(content: string, borderColor: string, width = BOX_WIDTH): string {
+  const padding = Math.max(0, width - visibleLength(content) - 3);
+  return `  ${color("│", borderColor)} ${content}${" ".repeat(padding)}${color("│", borderColor)}`;
+}
+
+function boxBottom(borderColor: string, width = BOX_WIDTH): string {
+  return `  ${color(`╰${"─".repeat(width - 2)}╯`, borderColor)}`;
+}
+
+function printGrid(items: string[], columns = 2): void {
+  const width = Math.max(40, Math.min(100, (process.stdout.columns || 100) - 4));
+  const columnWidth = Math.floor(width / columns);
+  for (let index = 0; index < items.length; index += columns) {
+    const row = items.slice(index, index + columns);
+    writeLine(
+      `  ${row
+        .map(
+          (item) =>
+            item +
+            " ".repeat(
+              Math.max(
+                1,
+                columnWidth -
+                  item.replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "").length,
+              ),
+            ),
+        )
+        .join("")}`,
+    );
+  }
+}
 
 function toolIcon(name: string): string {
   return TOOL_ICONS[name] ?? MCP_METHOD_ICONS[name] ?? "•";
@@ -139,55 +216,97 @@ export function printBanner(options: {
   codeGraph?: boolean;
 }): void {
   writeLine("");
-  const banner = [
-    "╭──────────────────────────────────────────────────────────────╮",
-    "│                         AGENT-DIR                            │",
-    "╰──────────────────────────────────────────────────────────────╯",
+  writeLine(
+    color(
+      "  ╭──────────────────────────────────────────────────────────────────────────────╮",
+      BRIGHT_CYAN,
+    ),
+  );
+  writeLine(
+    `${color("  │", BRIGHT_CYAN)}  ${color("AGENT", BRIGHT_CYAN)}${color("·", BRIGHT_MAGENTA)}${color("DIR", BRIGHT_BLUE)}  ${color("LOCAL PROJECT BRIDGE", BRIGHT_MAGENTA)}`,
+  );
+  writeLine(
+    color(
+      "  ╰──────────────────────────────────────────────────────────────────────────────╯",
+      BRIGHT_CYAN,
+    ),
+  );
+  writeLine(
+    `  ${color("● SESSION", BRIGHT_GREEN)}  ${color(options.profileName ?? "CLI options", BRIGHT_CYAN)}  ${color("│", DIM)}  ${color(options.tunnel.toUpperCase(), BRIGHT_MAGENTA)}  ${color("│", DIM)}  ${color(`PORT ${options.port}`, BRIGHT_BLUE)}`,
+  );
+  writeLine(boxTop("PROJECT", BRIGHT_CYAN));
+  writeLine(boxContent(`${color("DIR", DIM)}     ${options.root}`, BRIGHT_CYAN));
+  if (options.subdomain)
+    writeLine(
+      boxContent(
+        `${color("DOMAIN", DIM)}  ${color(`https://${options.subdomain}.wormhole.bar`, BRIGHT_GREEN)}`,
+        BRIGHT_CYAN,
+      ),
+    );
+  if (options.hostname)
+    writeLine(
+      boxContent(
+        `${color("DOMAIN", DIM)}  ${color(`https://${options.hostname}`, BRIGHT_GREEN)}`,
+        BRIGHT_CYAN,
+      ),
+    );
+  if (options.blacklistedCommands?.length)
+    writeLine(
+      boxContent(
+        `${color("BLOCKED", BRIGHT_YELLOW)}  ${options.blacklistedCommands.join(", ")}`,
+        BRIGHT_CYAN,
+      ),
+    );
+  writeLine(boxBottom(BRIGHT_CYAN));
+  writeLine("");
+  writeLine(boxTop("MCP ENDPOINT", BRIGHT_MAGENTA));
+  writeLine(
+    boxContent(
+      `${color("⚡ POST", BRIGHT_YELLOW)} ${color("/mcp", BRIGHT_CYAN)}  ${color("JSON-RPC · tools · resources", DIM)}`,
+      BRIGHT_MAGENTA,
+    ),
+  );
+  writeLine(boxBottom(BRIGHT_MAGENTA));
+  writeLine("");
+  writeLine(boxTop("AVAILABLE TOOLS", BRIGHT_BLUE));
+  const toolRows = [
+    color(toolLabel("project_context"), BRIGHT_CYAN),
+    color(toolLabel("find_files"), CYAN),
+    color(toolLabel("search_code"), BRIGHT_CYAN),
+    color(toolLabel("find_symbol"), GREEN),
+    color(toolLabel("find_references"), GREEN),
+    color(toolLabel("read_range"), GREEN),
+    color(toolLabel("apply_changes"), BRIGHT_MAGENTA),
+    color(toolLabel("validate"), BRIGHT_YELLOW),
+    color(toolLabel("run_npm_batch"), BRIGHT_BLUE),
+    color(toolLabel("run_command_batch"), BRIGHT_CYAN),
+    color(toolLabel("file_info"), YELLOW),
   ];
-  const gradient = [BRIGHT_CYAN, BRIGHT_BLUE, BRIGHT_MAGENTA];
-
-  for (let i = 0; i < banner.length; i++) {
-    writeLine(color(banner[i] ?? "", gradient[i] ?? BRIGHT_CYAN));
-  }
-  writeLine("");
-  writeLine(`  Directory    ${options.root}`);
-  writeLine(`  Port         ${options.port}`);
-  writeLine(`  Config       ${options.profileName ?? "CLI options"}`);
-  writeLine(`  Tunnel       ${options.tunnel}`);
-  if (options.blacklistedCommands?.length) {
-    writeLine(`  Blocked      ${options.blacklistedCommands.join(", ")}`);
-  }
-  if (options.subdomain) writeLine(`  Domain       https://${options.subdomain}.wormhole.bar`);
-  if (options.hostname) writeLine(`  Domain       https://${options.hostname}`);
-  writeLine("");
-  writeLine("  MCP");
-  writeLine(`    ${color("⚡ /mcp", CYAN)}`);
-  writeLine("");
-  writeLine("  TOOLS");
-  writeLine(`    ${color(toolLabel("project_context"), BRIGHT_CYAN)}`);
-  writeLine(`    ${color(toolLabel("find_files"), CYAN)}`);
-  writeLine(`    ${color(toolLabel("search_code"), BRIGHT_CYAN)}`);
-  writeLine(`    ${color(toolLabel("find_symbol"), GREEN)}`);
-  writeLine(`    ${color(toolLabel("find_references"), GREEN)}`);
-  writeLine(`    ${color(toolLabel("read_range"), GREEN)}`);
-  writeLine(`    ${color(toolLabel("apply_changes"), BRIGHT_MAGENTA)}`);
-  writeLine(`    ${color(toolLabel("validate"), BRIGHT_YELLOW)}`);
-  writeLine(`    ${color(toolLabel("run_npm_batch"), BRIGHT_BLUE)}`);
-  writeLine(`    ${color(toolLabel("run_command_batch"), BRIGHT_CYAN)}`);
-
-  writeLine(`    ${color(toolLabel("file_info"), YELLOW)}`);
-  if (options.codeGraph) {
-    writeLine(`    ${color(toolLabel("codegraph_explore"), BRIGHT_MAGENTA)}`);
-  }
+  if (options.codeGraph) toolRows.push(color(toolLabel("codegraph_explore"), BRIGHT_MAGENTA));
+  printGrid(toolRows, 2);
+  writeLine(boxBottom(BRIGHT_BLUE));
   writeLine("");
   if (options.npmScripts?.length) {
-    writeLine("  NPM COMMANDS");
-    for (const script of options.npmScripts) writeLine(`    ${color("•", BLUE)} npm run ${script}`);
+    writeLine(
+      `  ${color("◆ NPM SCRIPTS", BRIGHT_YELLOW)}  ${color("· scripts are allowlisted", "\x1b[90m")}`,
+    );
+    printGrid(
+      options.npmScripts.map(
+        (script) =>
+          `${color("›", BRIGHT_YELLOW)} ${color("npm run", BRIGHT_YELLOW)} ${color(script, BRIGHT_CYAN)}`,
+      ),
+      2,
+    );
     writeLine("");
   }
   if (options.commands?.length) {
-    writeLine("  ALLOWED COMMANDS");
-    for (const command of options.commands) writeLine(`    ${color("•", CYAN)} ${command}`);
+    writeLine(
+      `  ${color("◆ COMMAND ALLOWLIST", BRIGHT_GREEN)}  ${color("· shell access is restricted", "\x1b[90m")}`,
+    );
+    printGrid(
+      options.commands.map((command) => `${color("›", BRIGHT_GREEN)} ${color(command, CYAN)}`),
+      3,
+    );
     writeLine("");
   }
 }
@@ -243,7 +362,9 @@ export function logRequest(entry: RequestLog): void {
 
 export function printRequestHeader(): void {
   writeLine("");
-  writeLine("  ──────────────────────────────────────────────────────────────");
-  writeLine("  [Request logs]");
-  writeLine("  ──────────────────────────────────────────────────────────────");
+  writeLine(boxTop("REQUEST STREAM", BRIGHT_MAGENTA));
+  writeLine(
+    boxContent(color("Live MCP traffic · method · status · tool activity", DIM), BRIGHT_MAGENTA),
+  );
+  writeLine(boxBottom(BRIGHT_MAGENTA));
 }

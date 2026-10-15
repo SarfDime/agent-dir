@@ -527,10 +527,16 @@ const server = await startServer({
   throw error;
 });
 let tunnelResult: TunnelResult | undefined;
-console.log("  ✓ SERVER ONLINE");
-console.log(`    Local target : http://127.0.0.1:${port}`);
-console.log("    Auth         : Bearer token");
-console.log("    Token        : <configured>");
+console.log(
+  `  ${"╭─ SERVER ONLINE ".padEnd(76, "─")}╮`
+    .replace("╭", "\x1b[92m╭")
+    .replace(/─/g, "─\x1b[92m")
+    .replace("╮", "╮\x1b[0m"),
+);
+console.log(`  \x1b[92m│\x1b[0m ${"Local target".padEnd(14)}: http://127.0.0.1:${port}`);
+console.log(`  \x1b[92m│\x1b[0m ${"Auth".padEnd(14)}: Bearer token`);
+console.log(`  \x1b[92m│\x1b[0m ${"Token".padEnd(14)}: <configured>`);
+console.log(`  \x1b[92m╰${"─".repeat(74)}╯\x1b[0m`);
 
 if (tunnel !== "none") {
   try {
