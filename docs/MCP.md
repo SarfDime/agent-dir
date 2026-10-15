@@ -51,7 +51,10 @@ The core public tool set is intentionally small:
 | `validate` | Run lightweight diagnostics and explicitly requested allowed npm scripts |
 | `run_npm_batch` | Run explicitly allowlisted npm scripts sequentially |
 | `run_command_batch` | Run explicitly allowlisted executables sequentially without a shell |
+| `ast_grep_search` | Optional syntax-aware AST pattern search when ast-grep is installed |
 | `codegraph_explore` | Optional structural code intelligence when CodeGraph is available |
+
+`ast_grep_search` is only advertised when the `ast-grep` or `sg` CLI is available on `PATH`. It runs read-only `ast-grep run` searches with an explicit argument array (no shell), supports pattern, language, include/exclude globs, and bounded context/results/output. Searches have a 30-second timeout and a 64 KB raw-output ceiling. Rewrites are not exposed. The result is compact JSON; use this tool for syntax-aware matching, `search_code` for exact text/regex, and CodeGraph for call/data-flow and impact analysis.
 
 `codegraph_explore` is only advertised when CodeGraph is installed and the current project has a readable `.codegraph/codegraph.db` index. Other CodeGraph tools are not forwarded.
 

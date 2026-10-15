@@ -6,6 +6,7 @@ import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import type { TelemetryConfig } from "./telemetry/types.js";
+import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { runCommand } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
@@ -106,6 +107,21 @@ const codeGraphTool: ToolDefinition = tool(
   },
   { type: "object" },
   ["query"],
+);
+
+const astGrepTool: ToolDefinition = tool(
+  "ast_grep_search",
+  "Search code structurally using ast-grep patterns rather than plain text. Use for syntax-aware matching; prefer codegraph_explore for call/data flow and impact analysis, and search_code for exact text or regex.",
+  {
+    pattern: { type: "string", minLength: 1, maxLength: 2000 },
+    lang: { type: "string", maxLength: 32 },
+    globs: { type: "array", items: stringSchema, maxItems: 20 },
+    context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
+    maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+    maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
+  },
+  { type: "object", additionalProperties: true },
+  ["pattern"],
 );
 
 const baseTools: ToolDefinition[] = [
@@ -954,8 +970,8 @@ async function availableTools(codeGraph: CodeGraphIntegration): Promise<ToolDefi
   return capability.status === "available" ||
     capability.status === "startup_failed" ||
     capability.status === "runtime_failed"
-    ? [...baseTools, codeGraphTool]
-    : baseTools;
+    ? [...baseTools, ...(isAstGrepAvailable() ? [astGrepTool] : []), codeGraphTool]
+    : [...baseTools, ...(isAstGrepAvailable() ? [astGrepTool] : [])];
 }
 
 function buildDiscoveryInstructions(
@@ -969,7 +985,10 @@ function buildDiscoveryInstructions(
     codeGraph.status === "available"
       ? " For non-trivial code understanding, call codegraph_explore first for behavior, call/data flow, symbol relationships, or change impact; avoid duplicating results with grep/read loops."
       : "";
-  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed npm scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed npm scripts: ${scripts}. Allowed commands: ${commands}.`;
+  const structuralSearch = isAstGrepAvailable()
+    ? " Use ast_grep_search for syntax-aware structural pattern matching; use search_code for exact text and codegraph_explore for call/data flow."
+    : "";
+  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed npm scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph}${structuralSearch} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed npm scripts: ${scripts}. Allowed commands: ${commands}.`;
 }
 
 function buildAgentInstructions(
@@ -1007,6 +1026,7 @@ function buildAgentCapabilities(
     version: packageVersion,
     tools: [
       ...baseTools.map((item) => item.name),
+      ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
       ...(codeGraph.status === "available" ? ["codegraph_explore"] : []),
     ],
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
@@ -1019,6 +1039,7 @@ function buildAgentCapabilities(
       preferred: {
         orientation: "project_context",
         ...(codeGraph.status === "available" ? { structuralAnalysis: "codegraph_explore" } : {}),
+        ...(isAstGrepAvailable() ? { structuralSearch: "ast_grep_search" } : {}),
         focusedReading: "read_range",
         discovery: ["find_files", "search_code"],
         symbolNavigation: ["find_symbol", "find_references"],
@@ -1084,6 +1105,22 @@ async function callTool(
     });
   }
   switch (name) {
+    case "ast_grep_search": {
+      if (typeof args.pattern !== "string") throw new Error("pattern must be a string.");
+      structuredContent = await runAstGrep(
+        root,
+        {
+          pattern: args.pattern,
+          ...(typeof args.lang === "string" ? { lang: args.lang } : {}),
+          ...(Array.isArray(args.globs) ? { globs: args.globs as string[] } : {}),
+          ...(args.context === undefined ? {} : { context: Number(args.context) }),
+          ...(args.maxResults === undefined ? {} : { maxResults: Number(args.maxResults) }),
+          ...(args.maxBytes === undefined ? {} : { maxBytes: Number(args.maxBytes) }),
+        },
+        signal,
+      );
+      break;
+    }
     case "read_range": {
       const maxBytes = outputBytesArg(args.maxBytes);
       const result = await readRange(
