@@ -6,10 +6,7 @@ This document is the authoritative maintainer/agent procedure for publishing `ag
 
     feature/*
         │
-        ├── PR → staging
-        │        └── CI
-        │
-        └── promotion PR → main
+        └── PR → main
                  └── CI
                       │
                       ▼
@@ -28,7 +25,7 @@ This document is the authoritative maintainer/agent procedure for publishing `ag
                                   ├── create GitHub Release
                                   └── publish npm package
 
-`main` and `staging` are protected. Normal human and agent changes reach them through pull requests.
+`main` is the single protected release branch. Normal human and agent changes reach it through pull requests. There is no permanent `staging` branch.
 
 ## Release source of truth
 
@@ -61,21 +58,15 @@ Do not manually edit the package version.
 
 `npm pack --dry-run` is important: inspect the file list and make sure the package does not contain credentials, local configuration, development-only files, or other unintended content.
 
-### 3. Merge through staging
+### 3. Open and merge a pull request
 
-Push the feature branch and open a PR targeting `staging`.
+Push the branch and open a PR targeting `main`.
 
 The required CI check is `Check`. It runs `npm ci`, `npm run check`, `npm test`, and `npm pack --dry-run`.
 
-Do not bypass a failing check. After checks pass, merge the PR into `staging`.
+Do not bypass a failing check. Merge only after the required `Check` status is green and the required review is approved.
 
-### 4. Promote staging to main
-
-Create a promotion PR: `staging → main`.
-
-CI runs again because `main` is also a pull-request target. Merge only after the required `Check` status is green.
-
-### 5. Let GitHub Actions publish
+### 4. Let GitHub Actions publish
 
 The merge to `main` creates a push to `main`, which starts `.github/workflows/publish.yml`.
 
@@ -179,7 +170,7 @@ If a release was partially created, reconcile the actual Git/npm/GitHub state be
 
 ## CI workflow constraints
 
-`.github/workflows/ci.yml` runs for pull requests targeting `staging` and `main`.
+`.github/workflows/ci.yml` runs on pushes to `main` and pull requests targeting `main`.
 
 Its concurrency key must remain safe for both PR events and any diagnostic/manual event that may temporarily be introduced:
 

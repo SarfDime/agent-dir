@@ -2,18 +2,16 @@
 
 ## Project workflow
 
-This repository uses a protected two-branch release flow:
+This repository uses a single protected release branch:
 
-    feature/* → PR → staging → promotion PR → main → Release workflow → npm/GitHub release
+    feature/* → PR → main → Release workflow → npm/GitHub release
 
-- Do normal development on a feature branch.
-- Open pull requests into `staging`.
-- CI runs on pull requests targeting `staging` and `main`.
-- Promote `staging` to `main` through a pull request.
-- Do not push directly to `main` or `staging`.
-- Do not merge a feature branch directly into `main`.
-- Do not bypass branch protection.
-- The repository maintainer may merge their own PRs, but protected branches remain PR-only.
+- Do normal development on a short-lived feature, fix, or documentation branch.
+- Open pull requests directly into `main`.
+- CI runs on pushes to `main` and pull requests targeting `main`.
+- Do not push directly to `main` or bypass branch protection.
+- Do not maintain or recreate a permanent `staging` branch. Use pull requests and CI for integration; use deployment previews if a pre-production environment is needed.
+- The repository maintainer may merge their own PRs, but `main` remains PR-only.
 
 ## Before opening or merging a PR
 
@@ -64,13 +62,10 @@ This repository explicitly treats `fix(ci)` as no release. CI-only fixes must no
 1. Make the code/documentation changes.
 2. Run `npm run check`, `npm test`, and `npm pack --dry-run`.
 3. Commit with the correct Conventional Commit type.
-4. Push the feature branch.
-5. Open a PR to `staging`.
-6. Wait for CI to pass and merge the PR into `staging`.
-7. Open/promote `staging` into `main`.
-8. Wait for the main-branch CI check and merge the promotion PR.
-9. Verify the `Release` workflow completed.
-10. Verify the resulting npm version, Git tag, and GitHub Release when semantic-release determined a release was required.
+4. Push the branch and open a PR targeting `main`.
+5. Wait for the required CI check and review approval, then merge the PR.
+6. Verify the `Release` workflow completed.
+7. Verify the resulting npm version, Git tag, and GitHub Release when semantic-release determined a release was required.
 
 If the change is not release-worthy, follow the same branch/PR flow but do not artificially change the commit type just to publish.
 
