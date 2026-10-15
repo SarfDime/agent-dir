@@ -319,8 +319,9 @@ export function createMcpHandler(
   root: string,
   commandConfig: CommandConfig = {},
   telemetry: TelemetryConfig = { level: "none" },
+  codeGraphIntegration?: CodeGraphIntegration,
 ): McpHandler {
-  const codeGraph = new CodeGraphIntegration(root);
+  const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
   const telemetryRecorder = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,

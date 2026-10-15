@@ -22,8 +22,9 @@ export function startServer({
   token,
   commandConfig = {},
   telemetry = { level: "none" },
+  codeGraph,
 }: ServerOptions): Promise<ServerHandle> {
-  const mcp = createMcpHandler(root, commandConfig, telemetry);
+  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph);
   const httpTelemetry = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -194,11 +195,14 @@ export function startServer({
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () =>
       resolve({
-        close: () =>
-          new Promise<void>((done) => {
-            mcp.closeSubscriptions();
-            server.close(() => done());
-          }),
+        close: async () => {
+          mcp.closeSubscriptions();
+          try {
+            await new Promise<void>((done) => server.close(() => done()));
+          } finally {
+            await codeGraph?.close();
+          }
+        },
       }),
     );
   });

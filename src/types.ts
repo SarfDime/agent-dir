@@ -40,6 +40,7 @@ export interface ServerOptions {
   token: string;
   commandConfig?: CommandConfig;
   telemetry?: TelemetryConfig;
+  codeGraph?: import("./codegraph.js").CodeGraphIntegration;
 }
 
 export interface RequestLog {

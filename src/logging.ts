@@ -136,6 +136,7 @@ export function printBanner(options: {
   npmScripts?: string[];
   commands?: string[];
   blacklistedCommands?: string[];
+  codeGraph?: boolean;
 }): void {
   writeLine("");
   const banner = [
@@ -175,6 +176,9 @@ export function printBanner(options: {
   writeLine(`    ${color(toolLabel("run_command_batch"), BRIGHT_CYAN)}`);
 
   writeLine(`    ${color(toolLabel("file_info"), YELLOW)}`);
+  if (options.codeGraph) {
+    writeLine(`    ${color(toolLabel("codegraph_explore"), BRIGHT_MAGENTA)}`);
+  }
   writeLine("");
   if (options.npmScripts?.length) {
     writeLine("  NPM COMMANDS");

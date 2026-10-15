@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -25,7 +25,7 @@ async function makeFakeCodeGraph(): Promise<{ bin: string; restore: () => void }
     'const runtimeFail = fs.existsSync(path.join(root, ".codegraph", "runtime-fail")); let calls = 0; let buffer = "";',
     'process.stdin.setEncoding("utf8");',
     'process.stdin.on("data", chunk => { buffer += chunk; while (true) { const n = buffer.indexOf("\\n"); if (n < 0) return; const line = buffer.slice(0, n).trim(); buffer = buffer.slice(n + 1); if (!line) continue; const m = JSON.parse(line);',
-    'if (m.method === "initialize") { if (fail) process.exit(7); process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{protocolVersion:"2025-11-25",capabilities:{tools:{}},serverInfo:{name:"codegraph",version:"1.6.0"}}})+"\\n"); }',
+    'if (m.method === "initialize") { fs.writeFileSync(path.join(root, ".codegraph", "started"), "1"); if (fail) process.exit(7); process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{protocolVersion:"2025-11-25",capabilities:{tools:{}},serverInfo:{name:"codegraph",version:"1.6.0"}}})+"\\n"); }',
     'else if (m.method === "tools/list") process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{tools:[{name:"codegraph_explore",inputSchema:{type:"object"}}]}})+"\\n");',
     'else if (m.method === "tools/call") { calls++; const r={calls,root,arguments:m.params.arguments}; process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{content:[{type:"text",text:JSON.stringify(r)}],structuredContent:r}})+"\\n"); if (runtimeFail) setImmediate(() => process.exit(9)); } } });',
   ].join("\n");
@@ -77,6 +77,22 @@ test("CodeGraph reports not installed when an index exists", async () => {
     await integration.close();
   } finally {
     process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CodeGraph prepare starts the indexed server before tool calls", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-codegraph-"));
+  const fake = await makeFakeCodeGraph();
+  try {
+    await writeIndex(root);
+    const integration = new CodeGraphIntegration(root);
+    assert.equal((await integration.prepare()).status, "available");
+    await access(path.join(root, ".codegraph", "started"));
+    await integration.close();
+  } finally {
+    fake.restore();
+    await rm(fake.bin, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });
   }
 });
