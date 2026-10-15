@@ -765,27 +765,16 @@ test("LLM-oriented output budgets bound high-volume results", async () => {
       Buffer.byteLength(JSON.stringify(batchBody.result.structuredContent), "utf8") <= 1024,
     );
 
-    const locateResponse = await handler(
+    const searchResponse = await handler(
       requestFor(1, "tools/call", {
         name: "search_code",
         arguments: { query: "target", maxResults: 20, maxBytes: 1024 },
       }),
     );
-    const locateBody = (await locateResponse.json()) as {
+    const searchBody = (await searchResponse.json()) as {
       result: { structuredContent: Array<unknown> };
     };
-    assert.ok(locateBody.result.structuredContent.length < 20);
-
-    const relevantResponse = await handler(
-      requestFor(2, "tools/call", {
-        name: "search_code",
-        arguments: { query: "target", maxResults: 20, maxBytes: 1024 },
-      }),
-    );
-    const relevantBody = (await relevantResponse.json()) as {
-      result: { structuredContent: Array<unknown> };
-    };
-    assert.ok(relevantBody.result.structuredContent.length < 20);
+    assert.ok(searchBody.result.structuredContent.length < 20);
 
     const contextResponse = await handler(
       requestFor(3, "tools/call", {
