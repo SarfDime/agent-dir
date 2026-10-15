@@ -100,10 +100,13 @@ export function startTunnel(options: TunnelOptions): Promise<TunnelResult> {
       record(event);
       if (event.type === "online") {
         writeLine();
-        writeLine("  ✓ TUNNEL ONLINE");
-        writeLine(`    Public URL   : ${event.url}`);
-        writeLine(`    MCP endpoint : ${event.url}/mcp`);
-        writeLine(`    Forwarding   : ${event.url} → http://127.0.0.1:${options.port}`);
+        writeLine(`  \x1b[96m╭─ TUNNEL ONLINE ${"─".repeat(58)}╮\x1b[0m`);
+        writeLine(`  \x1b[96m│\x1b[0m Public URL   : \x1b[92m${event.url}\x1b[0m`);
+        writeLine(`  \x1b[96m│\x1b[0m MCP endpoint : \x1b[96m${event.url}/mcp\x1b[0m`);
+        writeLine(
+          `  \x1b[96m│\x1b[0m Forwarding   : ${event.url} → http://127.0.0.1:${options.port}`,
+        );
+        writeLine(`  \x1b[96m╰${"─".repeat(74)}╯\x1b[0m`);
         writeLine();
       } else if (event.type === "disconnected") {
         writeLine();

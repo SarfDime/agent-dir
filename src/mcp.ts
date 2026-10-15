@@ -1076,12 +1076,12 @@ async function callTool(
     );
     const serialized = JSON.stringify(result);
     if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
-    return {
+    return completeToolResult({
       truncated: true,
       originalBytes: Buffer.byteLength(serialized, "utf8"),
       message: "CodeGraph response exceeded the output budget. Narrow the query or lower maxFiles.",
-      preview: truncateText(serialized, Math.min(2_000, maxBytes - 256)).text,
-    };
+      preview: truncateText(serialized, Math.min(2_000, Math.max(256, maxBytes - 512))).text,
+    });
   }
   switch (name) {
     case "read_range": {
