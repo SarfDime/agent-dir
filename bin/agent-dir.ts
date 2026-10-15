@@ -63,7 +63,6 @@ const { values, positionals } = parseArgs({
     command: { type: "string" },
     blacklist: { type: "string" },
     token: { type: "string" },
-    git: { type: "boolean" },
     rotate: { type: "boolean" },
     "no-tunnel": { type: "boolean" },
     random: { type: "boolean" },
@@ -392,7 +391,6 @@ if (command === "config") {
     if (commands !== undefined) profile.commands = commands;
     const blacklist = parseList(values.blacklist);
     if (blacklist !== undefined) profile.blacklistedCommands = blacklist;
-    if (values.git !== undefined) profile.git = values.git;
 
     if (profile.tunnel === "wormhole" && !profile.subdomain && !values.random) {
       fail("Wormhole profiles require --subdomain <name>, or use --random.");
@@ -467,7 +465,6 @@ const overrides: CommandConfig = {};
 if (npm !== undefined) overrides.npm = { allowedScripts: npm };
 if (commands !== undefined) overrides.commands = commands;
 if (blacklist !== undefined) overrides.blacklistedCommands = blacklist;
-if (values.git !== undefined) overrides.git = values.git;
 const commandConfig = mergeProfile(profile ?? { directory, port, tunnel }, overrides);
 const telemetryConfigId = profile
   ? command
@@ -483,7 +480,6 @@ const telemetryConfigId = profile
           npm: commandConfig.npm?.allowedScripts ?? [],
           commands: commandConfig.commands ?? [],
           blacklistedCommands: commandConfig.blacklistedCommands ?? [],
-          git: commandConfig.git ?? commandConfig.commands?.includes("git") ?? false,
         }),
       )
       .digest("hex")
@@ -506,7 +502,6 @@ if (allowedCommands) bannerOptions.commands = allowedCommands;
 if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;
 }
-bannerOptions.gitEnabled = commandConfig.git ?? commandConfig.commands?.includes("git") ?? false;
 
 printBanner(bannerOptions);
 

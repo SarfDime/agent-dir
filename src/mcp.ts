@@ -6,42 +6,15 @@ import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import type { TelemetryConfig } from "./telemetry/types.js";
-import {
-  findDefinition,
-  findExports,
-  findFiles,
-  findImports,
-  findReferences,
-  findSymbol,
-  searchCode,
-  searchFiles,
-} from "./tools/code.js";
+import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { runCommand } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
-import {
-  applyFileChanges,
-  deleteFile,
-  listDirs,
-  listFiles,
-  patchFiles,
-  readFile,
-  readRange,
-  writeFile,
-} from "./tools/files.js";
-import {
-  gitCommit,
-  gitDiff,
-  gitLog,
-  gitPush,
-  gitRestore,
-  gitStage,
-  gitStatus,
-  gitUnstage,
-} from "./tools/git.js";
-import { fileInfo, packageInfo, projectOverview } from "./tools/metadata.js";
+import { applyFileChanges, readFile, readRange } from "./tools/files.js";
+import { fileInfo, projectOverview } from "./tools/metadata.js";
 import { runNpm } from "./tools/npm.js";
 import {
   getSkill,
+  invalidateSkillDiscoveryCache,
   listSkillResources,
   listSkills,
   readSkillDirectory,
@@ -53,13 +26,13 @@ import type { CommandConfig } from "./types.js";
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
 const PROTOCOL_VERSION = "2026-07-28";
-const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
 const CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
 const PAGE_SIZE = 50;
-const DEFAULT_OUTPUT_BYTES = 32_000;
+const DISCOVERY_CACHE_TTL_MS = 300_000;
+const DEFAULT_OUTPUT_BYTES = 8_000;
 const INSTRUCTIONS_URI = "agent-dir://instructions";
 const CAPABILITIES_URI = "agent-dir://capabilities";
 const SUBSCRIPTION_ID_META = "io.modelcontextprotocol/subscriptionId";
@@ -104,10 +77,6 @@ const arrayOutput = (items: Record<string, unknown>): Record<string, unknown> =>
   type: "array",
   items,
 });
-const fileEntrySchema = objectOutput(
-  { path: stringSchema, type: { type: "string", enum: ["file", "directory"] } },
-  ["path", "type"],
-);
 const searchMatchSchema = objectOutput(
   {
     path: stringSchema,
@@ -129,10 +98,11 @@ const commandResultSchema = objectOutput(
 
 const codeGraphTool: ToolDefinition = tool(
   "codegraph_explore",
-  "Explore the current project through its optional CodeGraph MCP index. Returns CodeGraph native structured tool results for structural, flow, and symbol questions.",
+  "Use first for most non-trivial code-understanding tasks: explain behavior, trace call/data flow, map symbol relationships, or assess change impact. Prefer this over repeated grep/read loops for structural questions. Use search_code/find_symbol/read_range for exact-text lookup and targeted follow-up. Treat returned source as read; avoid re-verifying without a concrete gap. Output is capped; large responses return a preview.",
   {
     query: { type: "string", minLength: 1 },
-    maxFiles: { type: "integer", minimum: 1, maximum: 100 },
+    maxFiles: { type: "integer", minimum: 1, maximum: 100, default: 10 },
+    maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
   },
   { type: "object" },
   ["query"],
@@ -140,36 +110,13 @@ const codeGraphTool: ToolDefinition = tool(
 
 const baseTools: ToolDefinition[] = [
   tool(
-    "list_files",
-    "List all visible project files and directories recursively up to the server's discovery depth. Prefer project_overview, find_files, search_code, or list_dirs for targeted discovery; use this only when broad recursive discovery is actually needed.",
-    {
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(fileEntrySchema),
-  ),
-  tool(
-    "list_dirs",
-    "List files and directories directly inside one or more project directories.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput({ path: stringSchema, entries: arrayOutput(fileEntrySchema) }, [
-        "path",
-        "entries",
-      ]),
-    ),
-    ["paths"],
-  ),
-  tool(
     "read_range",
     "Read a bounded line range from one UTF-8 project file.",
     {
       path: pathSchema,
       startLine: { type: "integer", minimum: 1 },
       endLine: { type: "integer", minimum: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     objectOutput(
       {
@@ -177,24 +124,15 @@ const baseTools: ToolDefinition[] = [
         startLine: { type: "integer" },
         endLine: { type: "integer" },
         content: stringSchema,
+        truncated: { type: "boolean" },
       },
       ["path", "startLine", "endLine", "content"],
     ),
     ["path", "startLine", "endLine"],
   ),
   tool(
-    "read_files",
-    "Read one or more UTF-8 project files in one call. Prefer read_range when only a bounded section is needed; batch related files here to reduce round trips.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(objectOutput({ path: stringSchema, content: stringSchema }, ["path", "content"])),
-    ["paths"],
-  ),
-  tool(
     "apply_changes",
-    "Apply multiple file writes, exact patches, and deletes as one preflighted transaction. Use this for related multi-file edits when partial changes would be undesirable; supports dry-run previews.",
+    "Atomically apply related writes, exact patches, and deletes. Returns only per-file status; never returns file contents or diffs. Use dryRun=true to preview changes.",
     {
       dryRun: { type: "boolean", default: false },
       changes: {
@@ -238,133 +176,38 @@ const baseTools: ToolDefinition[] = [
     ["changes"],
   ),
   tool(
-    "write_files",
-    "Create or completely replace one or more UTF-8 project files.",
-    {
-      dryRun: { type: "boolean", default: false },
-      files: {
-        type: "array",
-        items: objectOutput({ path: pathSchema, content: stringSchema }, ["path", "content"]),
-        minItems: 1,
-      },
-    },
-    arrayOutput(
-      objectOutput({ path: stringSchema, written: { type: "boolean" } }, ["path", "written"]),
-    ),
-    ["files"],
-  ),
-  tool(
-    "patch_files",
-    "Apply exact text replacements to one or more UTF-8 files. Prefer this for targeted edits instead of rewriting whole files; batch related patches in one call.",
-    {
-      dryRun: { type: "boolean", default: false },
-      files: {
-        type: "array",
-        items: objectOutput(
-          {
-            path: pathSchema,
-            patches: {
-              type: "array",
-              items: objectOutput(
-                {
-                  search: stringSchema,
-                  replace: stringSchema,
-                  count: { type: "integer", minimum: 1 },
-                },
-                ["search", "replace"],
-              ),
-              minItems: 1,
-            },
-          },
-          ["path", "patches"],
-        ),
-        minItems: 1,
-      },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput({ path: stringSchema, applied: { type: "integer" }, content: stringSchema }, [
-        "path",
-        "applied",
-        "content",
-      ]),
-    ),
-    ["files"],
-  ),
-  tool(
-    "delete_files",
-    "Delete one or more project files.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      dryRun: { type: "boolean", default: false },
-    },
-    arrayOutput(
-      objectOutput({ path: stringSchema, deleted: { type: "boolean" } }, ["path", "deleted"]),
-    ),
-    ["paths"],
-  ),
-  tool(
-    "search_files",
-    "Search text across visible project files. Prefer this over broad file reads; use search_code for source-only searches and keep maxResults tight.",
-    {
-      query: stringSchema,
-      regex: { type: "boolean", default: false },
-      maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(searchMatchSchema),
-    ["query"],
-  ),
-  tool(
     "find_files",
-    "Find project files by a simple glob pattern using * and ?. Prefer this over list_files when you know the filename pattern.",
+    "Find project paths by a simple glob pattern using * and ?. Returns {items, truncated}; use this for targeted filename discovery.",
     {
       pattern: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(stringSchema),
+    objectOutput({ items: arrayOutput(stringSchema), truncated: { type: "boolean" } }, [
+      "items",
+      "truncated",
+    ]),
     ["pattern"],
   ),
   tool(
     "search_code",
-    "Search source-like project files for text or a regular expression. Prefer this over reading files broadly; start with a narrow query and expand only if needed.",
+    "Search source files by text or regex within an 8 KB default budget. Binary files and files over 1 MB are skipped; start narrow and expand only when needed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     arrayOutput(searchMatchSchema),
     ["query"],
   ),
   tool(
     "find_symbol",
-    "Find likely symbol definitions across source files. Prefer this over reading whole modules when locating an implementation.",
+    "Find symbol definitions and locations. Use read_range for source context and find_references to trace usage.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput(
-        {
-          ...(searchMatchSchema.properties as Record<string, unknown>),
-          symbol: stringSchema,
-          kind: stringSchema,
-        },
-        ["path", "line", "column", "text", "symbol", "kind"],
-      ),
-    ),
-    ["symbol"],
-  ),
-  tool(
-    "find_definition",
-    "Find likely definitions of a symbol. Use this before reading a large file when you need one implementation.",
-    {
-      symbol: stringSchema,
-      maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     arrayOutput(
       objectOutput(
@@ -384,241 +227,29 @@ const baseTools: ToolDefinition[] = [
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     arrayOutput(searchMatchSchema),
     ["symbol"],
   ),
   tool(
-    "find_imports",
-    "Find import and require statements in source files.",
-    {
-      maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput(
-        {
-          ...(searchMatchSchema.properties as Record<string, unknown>),
-          module: stringSchema,
-          kind: { type: "string", enum: ["import", "require"] },
-        },
-        ["path", "line", "column", "text", "module", "kind"],
-      ),
-    ),
-  ),
-  tool(
-    "find_exports",
-    "Find exported declarations in source files.",
-    {
-      maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput(
-        {
-          ...(searchMatchSchema.properties as Record<string, unknown>),
-          symbol: stringSchema,
-          kind: { type: "string", const: "export" },
-        },
-        ["path", "line", "column", "text", "symbol", "kind"],
-      ),
-    ),
-  ),
-  tool(
-    "git_status",
-    "Show Git working-tree status and branch information. Use this as the lightweight first Git check; do not run a full diff unless changes need inspection.",
-    {
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-  ),
-  tool(
-    "git_stage",
-    "Stage one or more Git paths.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-    ["paths"],
-  ),
-  tool(
-    "git_unstage",
-    "Unstage one or more Git paths without changing their working-tree contents.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-    ["paths"],
-  ),
-  tool(
-    "git_commit",
-    "Create a Git commit with the currently staged changes.",
-    {
-      message: stringSchema,
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-    ["message"],
-  ),
-  tool(
-    "git_restore",
-    "Restore one or more Git paths from the index, discarding unstaged working-tree changes.",
-    {
-      paths: { type: "array", items: pathSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-    ["paths"],
-  ),
-  tool(
-    "git_push",
-    "Push the current Git branch to a remote.",
-    {
-      remote: stringSchema,
-      branch: stringSchema,
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-  ),
-  tool(
-    "git_diff",
-    "Show a read-only Git diff, optionally staged or limited to a path. Prefer path-scoped or staged diffs over dumping the entire repository diff.",
-    {
-      staged: { type: "boolean", default: false },
-      path: pathSchema,
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-  ),
-  tool(
-    "git_log",
-    "Show recent Git commits in a compact, read-only form. Keep the limit small and scope by path when history context is local.",
-    {
-      limit: { type: "integer", minimum: 1, maximum: 200, default: 20 },
-      path: pathSchema,
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    commandResultSchema,
-  ),
-  tool(
-    "locate",
-    "Locate project code or files in one call. Use kind auto, code, text, or file.",
-    {
-      query: stringSchema,
-      kind: { type: "string", enum: ["auto", "code", "text", "file"], default: "auto" },
-      regex: { type: "boolean", default: false },
-      maxResults: { type: "integer", minimum: 1, maximum: 100, default: 20 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    { type: "object", additionalProperties: true },
-    ["query"],
-  ),
-  tool(
-    "inspect_symbol",
-    "Inspect a known symbol in one call, returning its definition, bounded source context, and optionally references.",
-    {
-      symbol: stringSchema,
-      includeReferences: { type: "boolean", default: false },
-      contextLines: { type: "integer", minimum: 0, maximum: 20, default: 3 },
-      maxResults: { type: "integer", minimum: 1, maximum: 20, default: 5 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    { type: "object", additionalProperties: true },
-    ["symbol"],
-  ),
-  tool(
-    "inspect",
-    "Inspect a project target in one call. Use kind auto, file, symbol, or code; returns bounded context and optional symbol references.",
-    {
-      target: stringSchema,
-      kind: { type: "string", enum: ["auto", "file", "symbol", "code"], default: "auto" },
-      includeReferences: { type: "boolean", default: false },
-      contextLines: { type: "integer", minimum: 0, maximum: 20, default: 3 },
-      maxResults: { type: "integer", minimum: 1, maximum: 20, default: 5 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    { type: "object", additionalProperties: true },
-    ["target"],
-  ),
-  tool(
     "project_context",
     "Return a compact LLM-oriented project snapshot combining project overview, package metadata, and active execution policy. Prefer this over separate orientation calls.",
     {
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     { type: "object", additionalProperties: true },
-  ),
-  tool(
-    "read_relevant",
-    "Locate relevant source matches for a query and return bounded source context in one call. Prefer this when you know what you need but not the exact lines.",
-    {
-      query: stringSchema,
-      regex: { type: "boolean", default: false },
-      contextLines: { type: "integer", minimum: 0, maximum: 20, default: 3 },
-      maxResults: { type: "integer", minimum: 1, maximum: 20, default: 5 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    { type: "object", additionalProperties: true },
-    ["query"],
   ),
   tool(
     "validate",
-    "Run a unified project validation pass: lightweight diagnostics first, then explicitly requested allowed npm scripts. Use diagnostics for cheap checks and scripts only when executable validation is needed.",
+    "Run a unified project validation pass: lightweight diagnostics first, then explicitly requested allowed npm scripts. Use level=diagnostics for cheap checks and request scripts only when executable validation is needed.",
     {
       level: { type: "string", enum: ["diagnostics", "scripts", "full"], default: "diagnostics" },
-      scripts: { type: "array", items: stringSchema, minItems: 1 },
+      scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     { type: "object", additionalProperties: true },
-  ),
-  tool(
-    "git_changes",
-    "Return a compact Git working-tree snapshot combining status and an optional diff. Prefer this over separate git_status and git_diff calls when reviewing changes.",
-    {
-      includeDiff: { type: "boolean", default: false },
-      path: pathSchema,
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    { type: "object", additionalProperties: true },
-  ),
-  tool(
-    "project_overview",
-    "Summarize project structure, languages, package managers, project metadata files, and Git state in one lightweight call. Prefer this before broad discovery.",
-    {},
-    objectOutput(
-      {
-        root: stringSchema,
-        files: { type: "integer" },
-        directories: { type: "integer" },
-        languages: { type: "array" },
-        packageManagers: { type: "array", items: stringSchema },
-        projectFiles: { type: "array", items: stringSchema },
-        git: { type: "object" },
-      },
-      ["root", "files", "directories", "languages", "packageManagers", "projectFiles", "git"],
-    ),
-  ),
-  tool(
-    "package_info",
-    "Read normalized metadata from package.json when present.",
-    {},
-    { type: "object", additionalProperties: true },
-  ),
-  tool(
-    "allowed_commands",
-    "Show the npm scripts and commands explicitly allowed by the active server configuration.",
-    {},
-    objectOutput(
-      {
-        npmScripts: { type: "array", items: stringSchema },
-        commands: { type: "array", items: stringSchema },
-      },
-      ["npmScripts", "commands"],
-    ),
   ),
   tool(
     "file_info",
@@ -628,31 +259,11 @@ const baseTools: ToolDefinition[] = [
     ["path"],
   ),
   tool(
-    "diagnostics",
-    "Run lightweight project-independent diagnostics without invoking tests, linters, or typecheckers. Prefer this before expensive validation when checking basic file/JSON/conflict issues.",
-    {
-      maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
-    },
-    arrayOutput(
-      objectOutput(
-        {
-          severity: { type: "string", enum: ["error", "warning", "info"] },
-          code: stringSchema,
-          path: stringSchema,
-          line: { type: "integer" },
-          message: stringSchema,
-        },
-        ["severity", "code", "message"],
-      ),
-    ),
-  ),
-  tool(
     "run_npm_batch",
     "Run one or more explicitly allowed npm scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
     {
-      scripts: { type: "array", items: stringSchema, minItems: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     arrayOutput(commandResultSchema),
     ["scripts"],
@@ -668,8 +279,9 @@ const baseTools: ToolDefinition[] = [
           ["command"],
         ),
         minItems: 1,
+        maxItems: 10,
       },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 1000000, default: DEFAULT_OUTPUT_BYTES },
+      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     arrayOutput(commandResultSchema),
     ["commands"],
@@ -725,6 +337,13 @@ export function createMcpHandler(
   let sessionOutputBytes = 0;
   let sessionEstimatedOutputTokens = 0;
   const seenOutputFingerprints = new Set<string>();
+  let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
+  const getAvailableTools = async () => {
+    if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
+    const value = await availableTools(codeGraph);
+    cachedTools = { expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS, value };
+    return value;
+  };
   const telemetryProjectPromise =
     telemetry.level === "detailed" || telemetry.level === "diagnostic"
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
@@ -732,7 +351,6 @@ export function createMcpHandler(
   const npmAllowed = commandConfig.npm?.allowedScripts ?? [];
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
-  const gitEnabled = commandConfig.git ?? allowedCommands.includes("git");
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -767,6 +385,17 @@ export function createMcpHandler(
 
   const handler = async (request: Request): Promise<Response> => {
     const requestStartedAt = performance.now();
+    let responseBytes: number | undefined;
+    let estimatedResponseTokens: number | undefined;
+    const trackedJson = (value: unknown, status = 200): Response => {
+      const serialized = JSON.stringify(value);
+      responseBytes = Buffer.byteLength(serialized, "utf8");
+      estimatedResponseTokens = estimateTokens(serialized);
+      return new Response(serialized, {
+        status,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      });
+    };
     if (sessionStartedAt === undefined) sessionStartedAt = requestStartedAt;
     sessionRequestCount += 1;
     const telemetryProject = telemetryProjectPromise ? await telemetryProjectPromise : undefined;
@@ -781,6 +410,8 @@ export function createMcpHandler(
           method,
           success: mcpSuccess,
           durationMs: performance.now() - requestStartedAt,
+          ...(responseBytes === undefined ? {} : { responseBytes }),
+          ...(estimatedResponseTokens === undefined ? {} : { estimatedResponseTokens }),
           ...(telemetryRequestErrorCategory
             ? { errorCategory: telemetryRequestErrorCategory }
             : {}),
@@ -826,78 +457,14 @@ export function createMcpHandler(
     }
     const params = message.params ?? {};
     runtime = telemetryRuntime(params);
-    const requestedProtocolVersion =
-      typeof params.protocolVersion === "string" ? params.protocolVersion : undefined;
-    const legacyInitialize = message.method === "initialize";
-    const legacyRequest =
-      !legacyInitialize &&
-      request.headers.get("mcp-protocol-version") === LEGACY_PROTOCOL_VERSION &&
-      !isRecord(params._meta);
-
-    if (legacyInitialize) {
-      const protocolHeader = request.headers.get("mcp-protocol-version");
-      if (protocolHeader !== null && protocolHeader !== LEGACY_PROTOCOL_VERSION) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(
-          message.id ?? null,
-          -32020,
-          "MCP-Protocol-Version does not match the initialize protocol version.",
-          400,
-        );
-      }
-      if (requestedProtocolVersion !== LEGACY_PROTOCOL_VERSION) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(message.id ?? null, -32602, "Unsupported protocol version.", 400, {
-          supported: [LEGACY_PROTOCOL_VERSION],
-          requested: requestedProtocolVersion,
-        });
-      }
-      if (!isRecord(params.capabilities) || !isRecord(params.clientInfo)) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
-      }
-      mcpSuccess = true;
-      recordMcpRequest();
-      return json({
-        jsonrpc: "2.0",
-        id: message.id,
-        result: {
-          protocolVersion: LEGACY_PROTOCOL_VERSION,
-          capabilities: capabilities(),
-          serverInfo: SERVER_INFO,
-          instructions: buildAgentInstructions(
-            npmAllowed,
-            allowedCommands,
-            blacklistedCommands,
-            gitEnabled,
-            await codeGraph.capability(),
-          ),
-        },
-      });
-    }
-
-    if (legacyRequest) {
-      if (request.headers.get("mcp-protocol-version") !== LEGACY_PROTOCOL_VERSION) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(
-          message.id ?? null,
-          -32020,
-          "MCP-Protocol-Version must be 2025-11-25 for legacy requests.",
-          400,
-        );
-      }
-    } else if (!isRecord(params._meta)) {
+    if (!isRecord(params._meta)) {
       telemetryRequestErrorCategory = "invalid_input";
       recordMcpRequest();
       return jsonRpcError(message.id ?? null, -32602, "Missing required request metadata.", 400);
     }
-    const meta = isRecord(params._meta) ? params._meta : {};
+    const meta = params._meta;
     const version = meta[PROTOCOL_META];
-    if (!legacyRequest && typeof version !== "string") {
+    if (typeof version !== "string") {
       telemetryRequestErrorCategory = "invalid_input";
       recordMcpRequest();
       return jsonRpcError(
@@ -907,7 +474,7 @@ export function createMcpHandler(
         400,
       );
     }
-    if (!legacyRequest && version !== PROTOCOL_VERSION) {
+    if (version !== PROTOCOL_VERSION) {
       telemetryRequestErrorCategory = "invalid_input";
       recordMcpRequest();
       return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
@@ -915,7 +482,7 @@ export function createMcpHandler(
         requested: version,
       });
     }
-    if (!legacyRequest && !isRecord(meta[CLIENT_CAPABILITIES_META])) {
+    if (!isRecord(meta[CLIENT_CAPABILITIES_META])) {
       telemetryRequestErrorCategory = "invalid_input";
       recordMcpRequest();
       return jsonRpcError(
@@ -929,7 +496,7 @@ export function createMcpHandler(
       switch (message.method) {
         case "server/discover":
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
@@ -937,29 +504,27 @@ export function createMcpHandler(
               supportedVersions: [PROTOCOL_VERSION],
               capabilities: capabilities(),
               _meta: SERVER_INFO_META,
-              instructions: buildAgentInstructions(
+              instructions: buildDiscoveryInstructions(
                 npmAllowed,
                 allowedCommands,
-                blacklistedCommands,
-                gitEnabled,
                 await codeGraph.capability(),
               ),
               codeGraph: await codeGraph.capability(),
-              ttlMs: 0,
+              ttlMs: DISCOVERY_CACHE_TTL_MS,
               cacheScope: "private",
             },
           });
         case "tools/list": {
-          const page = paginate(await availableTools(codeGraph, gitEnabled), params.cursor);
+          const page = paginate(await getAvailableTools(), params.cursor);
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
               resultType: "complete",
               tools: page.items,
               ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-              ttlMs: 0,
+              ttlMs: DISCOVERY_CACHE_TTL_MS,
               cacheScope: "private",
               _meta: SERVER_INFO_META,
             },
@@ -976,9 +541,7 @@ export function createMcpHandler(
             );
           }
           const toolName = params.name;
-          const toolDefinition = (await availableTools(codeGraph, gitEnabled)).find(
-            (item) => item.name === toolName,
-          );
+          const toolDefinition = (await getAvailableTools()).find((item) => item.name === toolName);
           if (!toolDefinition) throw new Error(`Unknown tool: ${toolName}`);
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
@@ -1009,7 +572,6 @@ export function createMcpHandler(
               npmAllowed,
               allowedCommands,
               blacklistedCommands,
-              gitEnabled,
               notify,
               request.signal,
               codeGraph,
@@ -1062,7 +624,7 @@ export function createMcpHandler(
               );
             }
             mcpSuccess = true;
-            return json({
+            return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
               result,
@@ -1138,14 +700,14 @@ export function createMcpHandler(
           ];
           const page = paginate(resources, params.cursor);
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
               resultType: "complete",
               resources: page.items,
               ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-              ttlMs: 0,
+              ttlMs: DISCOVERY_CACHE_TTL_MS,
               cacheScope: "private",
               _meta: SERVER_INFO_META,
             },
@@ -1161,7 +723,7 @@ export function createMcpHandler(
             );
           if (params.uri === INSTRUCTIONS_URI) {
             mcpSuccess = true;
-            return json({
+            return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
               result: {
@@ -1174,7 +736,6 @@ export function createMcpHandler(
                       npmAllowed,
                       allowedCommands,
                       blacklistedCommands,
-                      gitEnabled,
                       await codeGraph.capability(),
                     ),
                   },
@@ -1187,7 +748,7 @@ export function createMcpHandler(
           }
           if (params.uri === CAPABILITIES_URI) {
             mcpSuccess = true;
-            return json({
+            return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
               result: {
@@ -1201,7 +762,7 @@ export function createMcpHandler(
                         npmAllowed,
                         allowedCommands,
                         blacklistedCommands,
-                        gitEnabled,
+                        await codeGraph.capability(),
                       ),
                       null,
                       2,
@@ -1216,7 +777,7 @@ export function createMcpHandler(
           }
           const value = await readSkillResource(root, params.uri);
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
@@ -1239,7 +800,7 @@ export function createMcpHandler(
           const resources = await readSkillDirectory(root, params.uri);
           const page = paginate(resources, params.cursor);
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
@@ -1255,7 +816,7 @@ export function createMcpHandler(
         case "skills/list": {
           const page = paginate(await listSkills(root), params.cursor);
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
@@ -1282,7 +843,7 @@ export function createMcpHandler(
               400,
             );
           mcpSuccess = true;
-          return json({
+          return trackedJson({
             jsonrpc: "2.0",
             id: message.id,
             result: {
@@ -1305,7 +866,7 @@ export function createMcpHandler(
     } catch (error) {
       telemetryRequestErrorCategory = classifyTelemetryError(error);
       if (message.method === "tools/call")
-        return json(
+        return trackedJson(
           {
             jsonrpc: "2.0",
             id: message.id,
@@ -1387,25 +948,33 @@ export function createMcpHandler(
   return handler;
 }
 
-async function availableTools(
-  codeGraph: CodeGraphIntegration,
-  gitEnabled: boolean,
-): Promise<ToolDefinition[]> {
+async function availableTools(codeGraph: CodeGraphIntegration): Promise<ToolDefinition[]> {
   const capability = await codeGraph.capability();
-  const tools =
-    capability.status === "available" ||
+  return capability.status === "available" ||
     capability.status === "startup_failed" ||
     capability.status === "runtime_failed"
-      ? [...baseTools, codeGraphTool]
-      : baseTools;
-  return gitEnabled ? tools : tools.filter((item) => !item.name.startsWith("git_"));
+    ? [...baseTools, codeGraphTool]
+    : baseTools;
+}
+
+function buildDiscoveryInstructions(
+  npmAllowed: string[],
+  allowedCommands: string[],
+  codeGraph: CodeGraphCapability,
+): string {
+  const scripts = npmAllowed.length ? npmAllowed.join(", ") : "none";
+  const commands = allowedCommands.length ? allowedCommands.join(", ") : "none";
+  const graph =
+    codeGraph.status === "available"
+      ? " For non-trivial code understanding, call codegraph_explore first for behavior, call/data flow, symbol relationships, or change impact; avoid duplicating results with grep/read loops."
+      : "";
+  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed npm scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed npm scripts: ${scripts}. Allowed commands: ${commands}.`;
 }
 
 function buildAgentInstructions(
   npmAllowed: string[],
   allowedCommands: string[],
   blacklistedCommands: string[],
-  gitEnabled: boolean,
   codeGraph: CodeGraphCapability,
 ): string {
   const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
@@ -1419,50 +988,52 @@ function buildAgentInstructions(
     codeGraph.status === "available" ||
     codeGraph.status === "startup_failed" ||
     codeGraph.status === "runtime_failed"
-      ? "\n\n## CodeGraph\n- CodeGraph is an optional code-intelligence backend for this project.\n- Prefer `codegraph_explore` for structural, symbol, and code-flow questions when available.\n- Agent Dir pins CodeGraph to this project root; do not attempt to select another project.\n- Current status: " +
+      ? "\n\n## CodeGraph\n- CodeGraph is an optional code-intelligence backend for this project.\n- REQUIRED FIRST STEP for non-trivial code understanding: call `codegraph_explore` before grep/search/read loops to explain behavior, trace call/data flow, map symbol relationships, or assess change impact. - Treat returned source as already read; do not re-run searches without a concrete gap.\n- Agent Dir pins CodeGraph to this project root; do not attempt to select another project.\n- Current status: " +
         codeGraph.status +
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. Use project_overview when package metadata is unnecessary.\n- Prefer find_files for known filename patterns and list_dirs for one directory. Use list_files only when recursive discovery is genuinely required.\n- Prefer search_code/search_files before reading files. Search first, then read only the relevant ranges. Use read_relevant when one call can locate and return the needed source context.\n- Prefer find_symbol/find_definition/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section. Use read_files to batch several already-identified files.\n- Prefer patch_files for targeted edits. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults and Git log limits small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer diagnostics before expensive tests, linters, or typechecks when checking basic structural issues.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Before a broad Git diff, use git_status; then inspect only the relevant path or staged diff.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_overview.\n2. Locate: find_files/search_code/find_symbol/find_definition as appropriate.\n3. Read: read_range or batched read_files.\n4. Modify: patch_files for targeted changes; write_files for new/complete files.\n5. Validate: diagnostics first when applicable, then the narrowest relevant npm script.\n6. Review: git_status, then scoped git_diff when needed.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git capability\nDedicated Git MCP tools are ${gitEnabled ? "enabled" : "disabled"} for this profile.\n\n## Tool selection\n- Discovery: project_context > locate > project_overview > find_files/list_dirs > list_files.\n- Code location: inspect_symbol > find_definition/find_symbol > locate > search_code > broad file reads.\n- File reading: read_relevant > read_range > targeted read_files > broad recursive reads.\n- Editing: patch_files > write_files for complete files.\n- Validation: diagnostics > targeted npm script > full check/test.\n- Git inspection: git_changes > git_status > scoped git_diff > full repository diff.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- Prefer find_symbol/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested npm scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed npm scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Discovery: project_context > find_files > search_code.\n- Code location: find_symbol > find_references > search_code.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted npm script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function buildAgentCapabilities(
   npmAllowed: string[],
   allowedCommands: string[],
   blacklistedCommands: string[],
-  gitEnabled: boolean,
+  codeGraph: CodeGraphCapability,
 ): Record<string, unknown> {
   return {
     version: packageVersion,
-    tools: baseTools
-      .filter((item) => gitEnabled || !item.name.startsWith("git_"))
-      .map((item) => item.name),
+    tools: [
+      ...baseTools.map((item) => item.name),
+      ...(codeGraph.status === "available" ? ["codegraph_explore"] : []),
+    ],
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
     execution: {
       npmScripts: [...npmAllowed],
       commands: [...allowedCommands],
       blacklistedCommands: [...blacklistedCommands],
-      git: gitEnabled,
     },
     efficiency: {
       preferred: {
         orientation: "project_context",
-        focusedReading: "read_relevant",
-        changeReview: "git_changes",
-        discovery: ["find_files", "list_dirs", "search_code"],
-        symbolNavigation: ["find_definition", "find_symbol", "find_references"],
-        reading: ["read_range", "read_files"],
-        editing: ["apply_changes", "patch_files", "write_files"],
-        validation: ["validate", "diagnostics", "targeted npm script"],
-        gitInspection: ["git_changes", "git_status", "git_diff", "git_log"],
+        ...(codeGraph.status === "available" ? { structuralAnalysis: "codegraph_explore" } : {}),
+        focusedReading: "read_range",
+        discovery: ["find_files", "search_code"],
+        symbolNavigation: ["find_symbol", "find_references"],
+        reading: ["read_range"],
+        editing: ["apply_changes"],
+        validation: ["validate", "targeted npm script"],
       },
       avoid: [
         "recursive discovery when targeted search is enough",
         "whole-file reads when a line range is enough",
         "full-repository diffs when a path-scoped diff is enough",
         "expensive validation when a targeted check answers the question",
-        "generic command execution when a dedicated Agent Dir tool exists",
+        "generic command execution when a dedicated Agent Dir tool exists, except allowlisted Git operations",
+        ...(codeGraph.status === "available"
+          ? ["repeated grep/read loops for structural questions already answered by CodeGraph"]
+          : []),
       ],
     },
   };
@@ -1483,7 +1054,6 @@ async function callTool(
   npmAllowed: string[],
   allowedCommands: string[],
   blacklistedCommands: string[],
-  gitEnabled: boolean,
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1498,49 +1068,36 @@ async function callTool(
       (!Number.isInteger(args.maxFiles) || Number(args.maxFiles) < 1 || Number(args.maxFiles) > 100)
     )
       throw new Error("maxFiles must be an integer between 1 and 100.");
-    return await codeGraph.explore(
+    const maxBytes = outputBytesArg(args.maxBytes);
+    const result = await codeGraph.explore(
       args.query,
-      args.maxFiles === undefined ? undefined : Number(args.maxFiles),
+      args.maxFiles === undefined ? 10 : Number(args.maxFiles),
     );
+    const serialized = JSON.stringify(result);
+    if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
+    return {
+      truncated: true,
+      originalBytes: Buffer.byteLength(serialized, "utf8"),
+      message: "CodeGraph response exceeded the output budget. Narrow the query or lower maxFiles.",
+      preview: truncateText(serialized, Math.min(2_000, maxBytes - 256)).text,
+    };
   }
-  if (name.startsWith("git_") && !gitEnabled) {
-    throw new Error("Dedicated Git tools are disabled for this profile.");
-  }
-
   switch (name) {
-    case "list_files": {
-      const items = await listFiles(root);
-      structuredContent = boundedItems(items, outputBytesArg(args.maxBytes)).items;
-      break;
-    }
-    case "list_dirs": {
-      const items = await listDirs(root, stringArray(args.paths, "paths"));
-      structuredContent = boundedItems(items, outputBytesArg(args.maxBytes)).items;
-      break;
-    }
     case "read_range": {
+      const maxBytes = outputBytesArg(args.maxBytes);
       const result = await readRange(
         root,
         String(args.path),
         Number(args.startLine),
         Number(args.endLine),
+        Math.max(1, maxBytes - 256),
       );
-      const bounded = truncateText(result.content, outputBytesArg(args.maxBytes));
-      structuredContent = { ...result, content: bounded.text };
-      break;
-    }
-    case "read_files": {
-      const maxBytes = outputBytesArg(args.maxBytes);
-      let remaining = maxBytes;
-      const output = [];
-      for (const p of stringArray(args.paths, "paths")) {
-        const content = await readFile(root, p);
-        const bounded = truncateText(content, remaining);
-        output.push({ path: p, content: bounded.text });
-        remaining -= Buffer.byteLength(bounded.text, "utf8");
-        if (bounded.truncated || remaining <= 0) break;
-      }
-      structuredContent = output;
+      const bounded = truncateText(result.content, Math.max(1, maxBytes - 256));
+      structuredContent = {
+        ...result,
+        content: bounded.text,
+        truncated: result.truncated || bounded.truncated,
+      };
       break;
     }
     case "apply_changes": {
@@ -1578,89 +1135,28 @@ async function callTool(
       const affected = [...new Set(changes.map((change) => change.path))];
       const before = new Map<string, string[]>();
       for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
-      structuredContent = await applyFileChanges(root, changes, dryRun);
-      if (!dryRun)
-        for (const p of affected) await notifyResourceChange(notify, root, p, before.get(p) ?? []);
-      break;
-    }
-    case "write_files": {
-      const dryRun = args.dryRun === true;
-      const output: Array<{ path: string; written: boolean; dryRun?: boolean }> = [];
-      for (const file of objectArray(args.files, "files")) {
-        const p = String(file.path);
-        const before = await skillResourceUrisForPath(root, p);
-        if (!dryRun) {
-          await writeFile(root, p, String(file.content));
-          await notifyResourceChange(notify, root, p, before);
-        }
-        output.push({ path: p, written: true, ...(dryRun ? { dryRun: true } : {}) });
-      }
-      structuredContent = output;
-      break;
-    }
-    case "patch_files": {
-      const dryRun = args.dryRun === true;
-      const files = objectArray(args.files, "files").map((file) => ({
-        path: String(file.path),
-        patches: objectArray(file.patches, "patches").map((p) => ({
-          search: String(p.search),
-          replace: String(p.replace),
-          ...(p.count === undefined ? {} : { count: Number(p.count) }),
-        })),
-      }));
-      const before = new Map<string, string[]>();
-      for (const file of files)
-        before.set(file.path, await skillResourceUrisForPath(root, file.path));
-      if (dryRun) {
-        structuredContent = await patchFilesDryRun(root, files);
-      } else {
-        structuredContent = await patchFiles(root, files);
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      if (Array.isArray(structuredContent)) {
-        structuredContent = boundedItems(
-          structuredContent.map((item) => {
-            if (!isRecord(item) || typeof item.content !== "string") return item;
-            return { ...item, content: truncateText(item.content, maxBytes).text };
-          }),
-          maxBytes,
-        ).items;
-      }
+      const applied = await applyFileChanges(root, changes, dryRun);
+      structuredContent = applied.map((item) => {
+        if (!isRecord(item)) return item;
+        const { content: _content, previousContent: _previousContent, ...summary } = item;
+        return summary;
+      });
       if (!dryRun) {
-        for (const file of files)
-          await notifyResourceChange(notify, root, file.path, before.get(file.path) ?? []);
+        invalidateSkillDiscoveryCache(root);
+        for (const p of affected) await notifyResourceChange(notify, root, p, before.get(p) ?? []);
       }
       break;
     }
-    case "delete_files": {
-      const dryRun = args.dryRun === true;
-      const output: Array<{ path: string; deleted: boolean; dryRun?: boolean }> = [];
-      for (const p of stringArray(args.paths, "paths")) {
-        const before = await skillResourceUrisForPath(root, p);
-        if (!dryRun) {
-          await deleteFile(root, p);
-          await notifyResourceChange(notify, root, p, before);
-        }
-        output.push({ path: p, deleted: true, ...(dryRun ? { dryRun: true } : {}) });
-      }
-      structuredContent = output;
+    case "find_files": {
+      const maxResults = numberArg(args.maxResults, 200, 1000);
+      const results = await findFiles(root, String(args.pattern), maxResults);
+      const bounded = boundedItems(results, outputBytesArg(args.maxBytes));
+      structuredContent = {
+        items: bounded.items,
+        truncated: bounded.truncated || results.length >= maxResults,
+      };
       break;
     }
-    case "search_files":
-      structuredContent = await searchFiles(
-        root,
-        String(args.query),
-        Boolean(args.regex),
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "find_files":
-      structuredContent = boundedItems(
-        await findFiles(root, String(args.pattern), numberArg(args.maxResults, 200, 1000)),
-        outputBytesArg(args.maxBytes),
-      ).items;
-      break;
     case "search_code":
       structuredContent = await searchCode(
         root,
@@ -1678,14 +1174,6 @@ async function callTool(
         outputBytesArg(args.maxBytes),
       );
       break;
-    case "find_definition":
-      structuredContent = await findDefinition(
-        root,
-        String(args.symbol),
-        numberArg(args.maxResults, 100, 500),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
     case "find_references":
       structuredContent = await findReferences(
         root,
@@ -1694,229 +1182,6 @@ async function callTool(
         outputBytesArg(args.maxBytes),
       );
       break;
-    case "find_imports":
-      structuredContent = await findImports(
-        root,
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "find_exports":
-      structuredContent = await findExports(
-        root,
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_status":
-      structuredContent = boundCommandResult(await gitStatus(root), outputBytesArg(args.maxBytes));
-      break;
-    case "git_stage":
-      structuredContent = boundCommandResult(
-        await gitStage(root, stringArray(args.paths, "paths")),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_unstage":
-      structuredContent = boundCommandResult(
-        await gitUnstage(root, stringArray(args.paths, "paths")),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_commit":
-      structuredContent = boundCommandResult(
-        await gitCommit(root, String(args.message)),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_restore":
-      structuredContent = boundCommandResult(
-        await gitRestore(root, stringArray(args.paths, "paths")),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_push":
-      structuredContent = boundCommandResult(
-        await gitPush(
-          root,
-          args.remote === undefined ? undefined : String(args.remote),
-          args.branch === undefined ? undefined : String(args.branch),
-        ),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_diff":
-      structuredContent = boundCommandResult(
-        await gitDiff(
-          root,
-          Boolean(args.staged),
-          args.path === undefined ? undefined : String(args.path),
-        ),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "git_log":
-      structuredContent = boundCommandResult(
-        await gitLog(
-          root,
-          numberArg(args.limit, 20, 200),
-          args.path === undefined ? undefined : String(args.path),
-        ),
-        outputBytesArg(args.maxBytes),
-      );
-      break;
-    case "locate": {
-      const query = String(args.query);
-      const kind = typeof args.kind === "string" ? args.kind : "auto";
-      const regex = args.regex === true;
-      const maxResults = numberArg(args.maxResults, 20, 100);
-      const resolvedKind =
-        kind === "auto"
-          ? /[*?]/.test(query)
-            ? "file"
-            : /\.(ts|tsx|js|jsx|py|go|rs|java|json|md|yml|yaml|css|html)$/.test(query)
-              ? "file"
-              : "code"
-          : kind;
-      const items =
-        resolvedKind === "file"
-          ? await findFiles(root, query, maxResults)
-          : resolvedKind === "text"
-            ? await searchFiles(root, query, regex, maxResults)
-            : await searchCode(root, query, regex, maxResults);
-      const bounded = boundedItems(items as unknown[], outputBytesArg(args.maxBytes));
-      structuredContent = {
-        query,
-        kind: resolvedKind,
-        items: bounded.items,
-        count: bounded.items.length,
-        truncated: bounded.truncated || items.length >= maxResults,
-      };
-      break;
-    }
-    case "inspect_symbol": {
-      const symbol = String(args.symbol);
-      const contextLines = args.contextLines === undefined ? 3 : Number(args.contextLines);
-      if (!Number.isInteger(contextLines) || contextLines < 0 || contextLines > 20)
-        throw new Error("contextLines must be an integer between 0 and 20.");
-      const maxResults = numberArg(args.maxResults, 5, 20);
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const definitions = await findDefinition(root, symbol, maxResults, maxBytes);
-      const definitionContext = await Promise.all(
-        definitions.map(async (definition) => {
-          const range = await readRange(
-            root,
-            definition.path,
-            Math.max(1, definition.line - contextLines),
-            definition.line + contextLines,
-          );
-          return { ...definition, context: range.content };
-        }),
-      );
-      const references =
-        args.includeReferences === true
-          ? await findReferences(root, symbol, maxResults, maxBytes)
-          : undefined;
-      const result = {
-        symbol,
-        definitions: definitionContext,
-        ...(references ? { references } : {}),
-      };
-      const bounded = truncateText(JSON.stringify(result), maxBytes);
-      structuredContent = bounded.truncated
-        ? { symbol, result: bounded.text, truncated: true }
-        : result;
-      break;
-    }
-    case "inspect": {
-      const target = String(args.target);
-      const requestedKind = typeof args.kind === "string" ? args.kind : "auto";
-      const contextLines = args.contextLines === undefined ? 3 : Number(args.contextLines);
-      if (!Number.isInteger(contextLines) || contextLines < 0 || contextLines > 20)
-        throw new Error("contextLines must be an integer between 0 and 20.");
-      const maxResults = numberArg(args.maxResults, 5, 20);
-      const maxBytes = outputBytesArg(args.maxBytes);
-      let kind = requestedKind;
-      if (kind === "auto") {
-        try {
-          await readFile(root, target);
-          kind = "file";
-        } catch {
-          kind = /[*?]/.test(target) ? "code" : "symbol";
-        }
-      }
-
-      if (kind === "file") {
-        const content = await readFile(root, target);
-        const boundedContent = truncateText(content, Math.max(1, maxBytes - 128));
-        const result = {
-          target,
-          kind,
-          path: target,
-          content: boundedContent.text,
-          truncated: boundedContent.truncated,
-        };
-        structuredContent = result;
-        break;
-      }
-
-      if (kind === "symbol") {
-        const definitions = await findDefinition(root, target, maxResults, maxBytes);
-        const definitionsWithContext = await Promise.all(
-          definitions.map(async (definition) => {
-            const range = await readRange(
-              root,
-              definition.path,
-              Math.max(1, definition.line - contextLines),
-              definition.line + contextLines,
-            );
-            return { ...definition, context: range.content };
-          }),
-        );
-        const references =
-          args.includeReferences === true
-            ? await findReferences(root, target, maxResults, maxBytes)
-            : undefined;
-        const result = {
-          target,
-          kind,
-          definitions: definitionsWithContext,
-          ...(references ? { references } : {}),
-        };
-        const bounded = truncateText(JSON.stringify(result), maxBytes);
-        structuredContent = bounded.truncated
-          ? { target, kind, result: bounded.text, truncated: true }
-          : result;
-        break;
-      }
-
-      const matches = await searchCode(root, target, false, maxResults, maxBytes);
-      const relevant = await Promise.all(
-        matches.map(async (match) => {
-          const range = await readRange(
-            root,
-            match.path,
-            Math.max(1, match.line - contextLines),
-            match.line + contextLines,
-          );
-          return {
-            ...match,
-            context: range.content,
-            startLine: range.startLine,
-            endLine: range.endLine,
-          };
-        }),
-      );
-      const bounded = boundedItems(relevant, maxBytes);
-      structuredContent = {
-        target,
-        kind: "code",
-        matches: bounded.items,
-        count: bounded.items.length,
-        truncated: bounded.truncated || relevant.length >= maxResults,
-      };
-      break;
-    }
     case "project_context": {
       const overview = await projectOverview(root);
       let pkg: Record<string, unknown> = { path: "package.json", exists: false };
@@ -1943,51 +1208,11 @@ async function callTool(
           package: pkg,
           execution: { npmScripts: [...npmAllowed], commands: [...allowedCommands] },
         }),
-        maxBytes,
+        Math.max(1, maxBytes - 128),
       );
       structuredContent = bounded.truncated
         ? { result: bounded.text, truncated: true }
         : JSON.parse(bounded.text);
-      break;
-    }
-    case "read_relevant": {
-      const query = String(args.query);
-      const contextLines = args.contextLines === undefined ? 3 : Number(args.contextLines);
-      if (!Number.isInteger(contextLines) || contextLines < 0 || contextLines > 20)
-        throw new Error("contextLines must be an integer between 0 and 20.");
-      const maxResults = numberArg(args.maxResults, 5, 20);
-      const matches = await searchCode(
-        root,
-        query,
-        Boolean(args.regex),
-        maxResults,
-        outputBytesArg(args.maxBytes),
-      );
-      const relevant = await Promise.all(
-        matches.map(async (match) => {
-          const range = await readRange(
-            root,
-            match.path,
-            Math.max(1, match.line - contextLines),
-            match.line + contextLines,
-          );
-          return {
-            ...match,
-            context: range.content,
-            startLine: range.startLine,
-            endLine: range.endLine,
-          };
-        }),
-      );
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const bounded = boundedItems(relevant, Math.max(1, maxBytes - 128));
-      const result = {
-        query,
-        matches: bounded.items,
-        count: relevant.length,
-        truncated: bounded.truncated || relevant.length >= maxResults,
-      };
-      structuredContent = result;
       break;
     }
     case "validate": {
@@ -2003,6 +1228,7 @@ async function callTool(
             : level === "full"
               ? ["check", "test"].filter((script) => npmAllowed.includes(script))
               : [];
+      if (scripts.length > 10) throw new Error("validate accepts at most 10 scripts per call.");
       const checks: Array<Record<string, unknown>> = [
         {
           kind: "diagnostics",
@@ -2021,63 +1247,53 @@ async function callTool(
         });
         if (result.exitCode !== 0) break;
       }
-      structuredContent = {
+      const validation = {
         level,
         ok: checks.every((check) => check.ok === true),
         checks,
         scriptsRequested: scripts,
       };
+      const serialized = JSON.stringify(validation);
+      if (Buffer.byteLength(serialized, "utf8") <= maxBytes) {
+        structuredContent = validation;
+      } else {
+        const perCheckBudget = Math.max(256, Math.floor((maxBytes - 256) / checks.length));
+        const compactChecks = checks.map((check) => {
+          if (check.kind === "npm" && isRecord(check.result))
+            return { ...check, result: boundCommandResult(check.result, perCheckBudget) };
+          if (check.kind === "diagnostics" && Array.isArray(check.issues))
+            return { ...check, issues: boundedItems(check.issues, perCheckBudget).items };
+          return check;
+        });
+        const compact = { ...validation, checks: compactChecks, truncated: true };
+        const compactJson = JSON.stringify(compact);
+        if (Buffer.byteLength(compactJson, "utf8") <= maxBytes) {
+          structuredContent = compact;
+        } else {
+          structuredContent = {
+            level,
+            ok: validation.ok,
+            truncated: true,
+            checks: checks.map((check) => ({
+              kind: check.kind,
+              ...(typeof check.script === "string" ? { script: check.script } : {}),
+              ok: check.ok,
+              ...(typeof check.count === "number" ? { count: check.count } : {}),
+            })),
+          };
+        }
+      }
       break;
     }
-    case "git_changes": {
-      const status = await gitStatus(root);
-      const includeDiff = Boolean(args.includeDiff);
-      const path = args.path === undefined ? undefined : String(args.path);
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const diff = includeDiff ? await gitDiff(root, false, path) : undefined;
-      const statusBytes = Buffer.byteLength(JSON.stringify(status), "utf8");
-      const diffBudget = Math.max(0, maxBytes - statusBytes - 64);
-      const boundedDiff = diff ? truncateText(diff.stdout, diffBudget) : undefined;
-      const result = {
-        status,
-        ...(diff
-          ? {
-              diff: {
-                ...diff,
-                stdout: boundedDiff?.text ?? "",
-                truncated: boundedDiff?.truncated ?? false,
-              },
-            }
-          : {}),
-      };
-      structuredContent = result;
-      break;
-    }
-    case "project_overview":
-      structuredContent = await projectOverview(root);
-      break;
-    case "package_info":
-      structuredContent = await packageInfo(root);
-      break;
-    case "allowed_commands":
-      structuredContent = {
-        npmScripts: [...npmAllowed],
-        commands: [...allowedCommands],
-        blacklistedCommands: [...blacklistedCommands],
-      };
-      break;
     case "file_info":
       structuredContent = await fileInfo(root, String(args.path));
       break;
-    case "diagnostics":
-      structuredContent = boundedItems(
-        await diagnostics(root, numberArg(args.maxResults, 200, 1000)),
-        outputBytesArg(args.maxBytes),
-      ).items;
-      break;
     case "run_npm_batch": {
       const output = [];
-      for (const script of stringArray(args.scripts, "scripts")) {
+      const scripts = stringArray(args.scripts, "scripts");
+      if (scripts.length > 10)
+        throw new Error("run_npm_batch accepts at most 10 scripts per call.");
+      for (const script of scripts) {
         const value = await runNpm(root, script, 120000, npmAllowed, signal);
         output.push(value);
         if (value.exitCode !== 0) break;
@@ -2101,7 +1317,10 @@ async function callTool(
     }
     case "run_command_batch": {
       const output = [];
-      for (const item of objectArray(args.commands, "commands")) {
+      const commands = objectArray(args.commands, "commands");
+      if (commands.length > 10)
+        throw new Error("run_command_batch accepts at most 10 commands per call.");
+      for (const item of commands) {
         const value = await runCommand(
           root,
           String(item.command),
@@ -2394,7 +1613,7 @@ function toolTelemetryMetrics(
   const duplicateOutputBytes = seenOutputFingerprints.has(outputFingerprint) ? outputBytes : 0;
   seenOutputFingerprints.add(outputFingerprint);
   return {
-    ...(paths.size > 0 && /^(write|patch|delete|read|file|git_changes|inspect)/.test(toolName)
+    ...(paths.size > 0 && /^(write|patch|delete|read|file)/.test(toolName)
       ? { affectedFiles: paths.size }
       : {}),
     ...(truncated ? { truncated: true } : {}),
@@ -2413,8 +1632,6 @@ function commandTelemetryDescriptor(
   if (toolName === "run_npm_batch") return { family: "npm", operation: "batch" };
   if (toolName === "run_command_batch") return { family: "command", operation: "batch" };
   if (toolName === "validate") return { family: "npm", operation: "validate" };
-  if (toolName.startsWith("git_"))
-    return { family: "git", operation: toolName.slice("git_".length) };
   return undefined;
 }
 
@@ -2488,8 +1705,8 @@ function objectArray(value: unknown, name: string): Record<string, unknown>[] {
 }
 function outputBytesArg(value: unknown): number {
   const result = value === undefined ? DEFAULT_OUTPUT_BYTES : Number(value);
-  if (!Number.isInteger(result) || result < 1024 || result > 1_000_000)
-    throw new Error("maxBytes must be an integer between 1024 and 1000000.");
+  if (!Number.isInteger(result) || result < 1024 || result > 64_000)
+    throw new Error("maxBytes must be an integer between 1024 and 64000.");
   return result;
 }
 
@@ -2592,42 +1809,6 @@ function decodeCursor(value: unknown): number {
   const offset = Number(decoded);
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid pagination cursor.");
   return offset;
-}
-
-async function patchFilesDryRun(
-  root: string,
-  files: Array<{
-    path: string;
-    patches: Array<{ search: string; replace: string; count?: number }>;
-  }>,
-): Promise<Array<{ path: string; applied: number; content: string; dryRun: true }>> {
-  return Promise.all(
-    files.map(async ({ path: relativePath, patches }) => {
-      let content = await readFile(root, relativePath);
-      for (const patch of patches) {
-        if (!patch.search) throw new Error("Patch search text cannot be empty.");
-        const occurrences = content.split(patch.search).length - 1;
-        const count = patch.count ?? 1;
-        if (occurrences === 0) throw new Error(`Patch text was not found in '${relativePath}'.`);
-        if (!Number.isInteger(count) || count < 1)
-          throw new Error("Patch count must be a positive integer.");
-        if (occurrences < count)
-          throw new Error(
-            `Patch text occurs ${occurrences} time(s), but ${count} replacement(s) were requested.`,
-          );
-        let offset = 0;
-        for (let index = 0; index < count; index += 1) {
-          const position = content.indexOf(patch.search, offset);
-          content =
-            content.slice(0, position) +
-            patch.replace +
-            content.slice(position + patch.search.length);
-          offset = position + patch.replace.length;
-        }
-      }
-      return { path: relativePath, applied: patches.length, content, dryRun: true as const };
-    }),
-  );
 }
 
 async function notifyResourceChange(

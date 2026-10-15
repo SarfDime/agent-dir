@@ -24,6 +24,8 @@ export interface TelemetryMcpRequestEvent {
   method: string;
   success: boolean;
   durationMs: number;
+  responseBytes?: number;
+  estimatedResponseTokens?: number;
   errorCategory?: string;
 }
 

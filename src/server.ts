@@ -3,7 +3,6 @@ import { authenticate, unauthorized } from "./auth.js";
 import { logRequest } from "./logging.js";
 import { createMcpHandler } from "./mcp.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
-import { deleteFile, listFiles, readFile, writeFile } from "./tools/files.js";
 import type { ServerOptions } from "./types.js";
 
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -115,9 +114,13 @@ export function startServer({
           return;
         }
         const response = await mcp(request);
+        const mcpResponseBody = await response
+          .clone()
+          .json()
+          .catch(() => undefined);
         const errorDetail = await getResponseErrorDetail(response);
+        const mcpLog = getMcpLog(body, mcpResponseBody);
         await sendResponse(res, response);
-        const mcpLog = getMcpLog(body);
         const mcpErrorContext =
           response.status >= 400 ? getMcpErrorContext(body, request) : undefined;
         logRequest({
@@ -137,57 +140,6 @@ export function startServer({
           authenticated,
           startedAt,
         );
-        return;
-      }
-      if (url.pathname === "/__tree" && req.method === "GET") {
-        const tree = await listFiles(root);
-        sendText(res, 200, JSON.stringify(tree, null, 2), "application/json; charset=utf-8");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "directory" });
-        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
-        return;
-      }
-      const relative = decodeURIComponent(url.pathname.slice(1));
-      if (!relative) {
-        sendText(res, 200, "agent-dir\n");
-        logRequest({
-          method: req.method ?? "UNKNOWN",
-          path: url.pathname,
-          status: 200,
-          detail: "server",
-        });
-        recordHttpTelemetry(
-          httpTelemetry,
-          req.method ?? "UNKNOWN",
-          url.pathname,
-          200,
-          authenticated,
-          startedAt,
-        );
-        return;
-      }
-      if (req.method === "GET") {
-        sendText(res, 200, await readFile(root, relative), "text/plain; charset=utf-8");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST GET" });
-        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
-        return;
-      }
-      if (req.method === "PUT") {
-        await writeFile(root, relative, body.toString("utf8"));
-        sendText(res, 200, "File updated successfully\n");
-        logRequest({ method: req.method, path: url.pathname, status: 200, detail: "REST PUT" });
-        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
-        return;
-      }
-      if (req.method === "DELETE") {
-        await deleteFile(root, relative);
-        sendText(res, 200, "File deleted successfully\n");
-        logRequest({
-          method: req.method,
-          path: url.pathname,
-          status: 200,
-          detail: "REST DELETE",
-        });
-        recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 200, authenticated, startedAt);
         return;
       }
       sendText(res, 404, "Not found\n");
@@ -434,7 +386,10 @@ async function getResponseErrorDetail(response: Response): Promise<string | unde
   return undefined;
 }
 
-export function getMcpLog(body: Buffer): { name: string; detail: string } | undefined {
+export function getMcpLog(
+  body: Buffer,
+  responseBody?: unknown,
+): { name: string; detail: string } | undefined {
   try {
     const message = JSON.parse(body.toString("utf8")) as {
       method?: string;
@@ -451,24 +406,7 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
     const name = message.params.name;
     const args = isRecordValue(message.params.arguments) ? message.params.arguments : {};
     const detail = (() => {
-      const paths = Array.isArray(args.paths)
-        ? args.paths.filter((value): value is string => typeof value === "string")
-        : [];
-      const files = Array.isArray(args.files)
-        ? args.files
-            .filter(
-              (value): value is Record<string, unknown> =>
-                typeof value === "object" && value !== null,
-            )
-            .map((value) => value.path)
-            .filter((value): value is string => typeof value === "string")
-        : [];
-
       switch (name) {
-        case "list_files":
-          return "all project files";
-        case "list_dirs":
-          return paths.join(", ");
         case "read_range": {
           const path = typeof args.path === "string" ? args.path : "";
           const startLine = typeof args.startLine === "number" ? args.startLine : undefined;
@@ -477,21 +415,12 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
             ? `${path}:${startLine}-${endLine}`
             : path;
         }
-        case "read_files":
-        case "delete_files":
-        case "git_stage":
-        case "git_unstage":
-          return paths.join(", ");
-        case "write_files":
-        case "patch_files":
-          return files.join(", ");
         case "run_npm_batch": {
           const scripts = Array.isArray(args.scripts)
             ? args.scripts.filter((value): value is string => typeof value === "string")
             : [];
           return scripts.map((script) => `npm run ${script}`).join(", ");
         }
-        case "search_files":
         case "search_code": {
           const query = typeof args.query === "string" ? args.query : "";
           const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
@@ -515,15 +444,6 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
               : `symbol: ${symbol}`
             : "";
         }
-        case "find_definition": {
-          const symbol = typeof args.symbol === "string" ? args.symbol : "";
-          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
-          return symbol
-            ? maxResults !== undefined
-              ? `definition: ${symbol} (max ${maxResults})`
-              : `definition: ${symbol}`
-            : "";
-        }
         case "find_references": {
           const symbol = typeof args.symbol === "string" ? args.symbol : "";
           const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
@@ -533,36 +453,40 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
               : `references: ${symbol}`
             : "";
         }
-        case "git_commit":
-          return "commit (message omitted)";
-        case "find_imports": {
-          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
-          return maxResults !== undefined ? `all imports (max ${maxResults})` : "all imports";
-        }
-        case "find_exports": {
-          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
-          return maxResults !== undefined ? `all exports (max ${maxResults})` : "all exports";
-        }
-        case "diagnostics": {
-          const maxResults = typeof args.maxResults === "number" ? args.maxResults : undefined;
-          return maxResults !== undefined ? `max ${maxResults}` : "";
-        }
-        case "git_restore":
-          return paths.join(", ");
-        case "git_push":
-          return "push (remote/branch omitted)";
-        case "git_diff": {
-          const staged = args.staged === true ? "staged" : "working tree";
-          const path = typeof args.path === "string" ? args.path : "";
-          return path ? `${staged}: ${path}` : staged;
-        }
-        case "git_log": {
-          const limit = typeof args.limit === "number" ? args.limit : 20;
-          const path = typeof args.path === "string" ? args.path : "";
-          return path ? `last ${limit}: ${path}` : `last ${limit}`;
-        }
         case "file_info":
           return typeof args.path === "string" ? args.path : "";
+        case "apply_changes": {
+          const response = isRecordValue(responseBody) ? responseBody : undefined;
+          const result = response && isRecordValue(response.result) ? response.result : undefined;
+          if (result?.isError === true || response?.error !== undefined) return "change failed";
+          const applied = Array.isArray(result?.structuredContent) ? result.structuredContent : [];
+          if (applied.length) {
+            const entries = applied
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  isRecordValue(item) && item.changed === true,
+              )
+              .map((item) => {
+                const kind =
+                  item.kind === "write" || item.kind === "patch" || item.kind === "delete"
+                    ? item.kind
+                    : "change";
+                const path = typeof item.path === "string" ? item.path : "(unknown path)";
+                return `${kind} ${path}`;
+              });
+            if (!entries.length)
+              return args.dryRun === true ? "preview: no file changes" : "no file changes";
+            const shown = entries.slice(0, 5);
+            const suffix =
+              entries.length > shown.length ? ` • +${entries.length - shown.length} more` : "";
+            return `${args.dryRun === true ? "preview" : "changed"}: ${shown.join(" • ")}${suffix}`;
+          }
+          const changes = Array.isArray(args.changes) ? args.changes : [];
+          const paths = changes
+            .filter((item): item is Record<string, unknown> => isRecordValue(item))
+            .map((item) => (typeof item.path === "string" ? item.path : "(unknown path)"));
+          return `requested: ${paths.slice(0, 5).join(" • ")}${paths.length > 5 ? ` • +${paths.length - 5} more` : ""}`;
+        }
         case "run_command_batch": {
           const commands = Array.isArray(args.commands) ? args.commands : [];
           return commands
@@ -586,37 +510,7 @@ export function getMcpLog(body: Buffer): { name: string; detail: string } | unde
 
 function getMcpMethodDetail(method: string, params: Record<string, unknown> | undefined): string {
   const value = params ?? {};
-  const capabilities = isRecordValue(value.capabilities)
-    ? Object.keys(value.capabilities).sort()
-    : [];
-  const clientInfo = isRecordValue(value.clientInfo) ? value.clientInfo : undefined;
-  const clientName = typeof clientInfo?.name === "string" ? clientInfo.name : undefined;
-  const clientVersion = typeof clientInfo?.version === "string" ? clientInfo.version : undefined;
-  const protocol =
-    typeof value.protocolVersion === "string"
-      ? value.protocolVersion
-      : isRecordValue(value._meta) &&
-          typeof value._meta["io.modelcontextprotocol/protocolVersion"] === "string"
-        ? value._meta["io.modelcontextprotocol/protocolVersion"]
-        : undefined;
-
   switch (method) {
-    case "initialize": {
-      const client = clientName
-        ? clientVersion
-          ? `${clientName} v${clientVersion}`
-          : clientName
-        : undefined;
-      return (
-        [
-          protocol ? `protocol: ${protocol}` : undefined,
-          client ? `client: ${client}` : undefined,
-          capabilities.length ? `capabilities: ${capabilities.join(", ")}` : undefined,
-        ]
-          .filter((part): part is string => Boolean(part))
-          .join(" • ") || "initialization handshake"
-      );
-    }
     case "notifications/initialized":
       return "initialization complete";
     case "tools/list":
@@ -669,16 +563,7 @@ function recordHttpTelemetry(
   authenticated: boolean,
   startedAt: number,
 ): void {
-  const route =
-    pathname === "/mcp"
-      ? "mcp"
-      : pathname === "/__tree"
-        ? "tree"
-        : pathname === "/"
-          ? "root"
-          : pathname.startsWith("/") && pathname.length > 1
-            ? "file"
-            : "other";
+  const route = pathname === "/mcp" ? "mcp" : "other";
   recorder.record({
     event: "http_request",
     method,

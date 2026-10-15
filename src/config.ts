@@ -119,6 +119,5 @@ function isProfile(value: unknown): value is Profile {
     )
       return false;
   }
-  if (profile.git !== undefined && typeof profile.git !== "boolean") return false;
   return true;
 }

@@ -6,9 +6,16 @@ import { listFiles } from "./files.js";
 const SKILL_ROOTS = ["skills", ".agents/skills", ".claude/skills", ".github/skills"];
 const MAX_RESOURCES = 512;
 const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+const MAX_RESOURCE_RESPONSE_BYTES = 32_000;
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_SKILL_NAME_LENGTH = 64;
 const MAX_DESCRIPTION_LENGTH = 1024;
+const DISCOVERY_CACHE_TTL_MS = 2_000;
+const discoveryCache = new Map<string, { expiresAt: number; promise: Promise<ParsedSkill[]> }>();
+
+export function invalidateSkillDiscoveryCache(root: string): void {
+  discoveryCache.delete(path.resolve(root));
+}
 
 export interface SkillResource {
   uri: string;
@@ -40,8 +47,48 @@ export async function readSkillResource(
   for (const skill of await discoverSkills(root)) {
     const filePath = skill.resources.get(uri);
     if (!filePath) continue;
+    const stats = await fs.stat(filePath);
+    if (stats.size > MAX_RESOURCE_RESPONSE_BYTES) {
+      const handle = await fs.open(filePath, "r");
+      let previewBytes: Buffer;
+      try {
+        previewBytes = Buffer.alloc(MAX_RESOURCE_RESPONSE_BYTES);
+        const { bytesRead } = await handle.read(previewBytes, 0, previewBytes.length, 0);
+        previewBytes = previewBytes.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+      if (previewBytes.includes(0)) {
+        return {
+          uri,
+          mimeType: "text/plain",
+          text: `Binary resource omitted: ${stats.size} bytes exceeds the ${MAX_RESOURCE_RESPONSE_BYTES}-byte response limit.`,
+        };
+      }
+      const marker = "\n…[resource truncated at 32000 bytes]";
+      let preview = previewBytes
+        .subarray(0, MAX_RESOURCE_RESPONSE_BYTES - Buffer.byteLength(marker, "utf8"))
+        .toString("utf8");
+      while (preview.endsWith("\uFFFD")) preview = preview.slice(0, -1);
+      return { uri, mimeType: mimeTypeFor(filePath), text: `${preview}${marker}` };
+    }
     const bytes = await fs.readFile(filePath);
     const text = bytes.toString("utf8");
+    if (bytes.length > MAX_RESOURCE_RESPONSE_BYTES) {
+      if (Buffer.from(text, "utf8").equals(bytes)) {
+        const marker = "\n…[resource truncated at 32000 bytes]";
+        let preview = bytes
+          .subarray(0, MAX_RESOURCE_RESPONSE_BYTES - Buffer.byteLength(marker, "utf8"))
+          .toString("utf8");
+        while (preview.endsWith("\uFFFD")) preview = preview.slice(0, -1);
+        return { uri, mimeType: mimeTypeFor(filePath), text: `${preview}${marker}` };
+      }
+      return {
+        uri,
+        mimeType: "text/plain",
+        text: `Binary resource omitted: ${bytes.length} bytes exceeds the ${MAX_RESOURCE_RESPONSE_BYTES}-byte response limit.`,
+      };
+    }
     if (Buffer.from(text, "utf8").equals(bytes)) {
       return { uri, mimeType: mimeTypeFor(filePath), text };
     }
@@ -117,6 +164,20 @@ export async function skillResourceUrisForPath(
 }
 
 async function discoverSkills(root: string): Promise<ParsedSkill[]> {
+  const resolvedRoot = await fs.realpath(root);
+  const cached = discoveryCache.get(resolvedRoot);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+  const promise = discoverSkillsUncached(resolvedRoot);
+  discoveryCache.set(resolvedRoot, { expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS, promise });
+  try {
+    return await promise;
+  } catch (error) {
+    if (discoveryCache.get(resolvedRoot)?.promise === promise) discoveryCache.delete(resolvedRoot);
+    throw error;
+  }
+}
+
+async function discoverSkillsUncached(root: string): Promise<ParsedSkill[]> {
   const resolvedRoot = await fs.realpath(root);
   const entries = await listFiles(root);
   const skills: ParsedSkill[] = [];

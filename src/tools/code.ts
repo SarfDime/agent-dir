@@ -46,16 +46,8 @@ export interface SymbolMatch extends SearchMatch {
   symbol: string;
   kind: string;
 }
-export interface ImportMatch extends SearchMatch {
-  module: string;
-  kind: "import" | "require";
-}
-export interface ExportMatch extends SearchMatch {
-  symbol: string;
-  kind: "export";
-}
-
-const DEFAULT_OUTPUT_BYTES = 32_000;
+const DEFAULT_OUTPUT_BYTES = 8_000;
+const MAX_SEARCH_FILE_BYTES = 1_000_000;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
@@ -111,7 +103,11 @@ async function readMatches(
     if (matches.length >= maxResults) break;
     let content: string;
     try {
-      content = await fs.readFile(await safePath(root, relativePath), "utf8");
+      const target = await safePath(root, relativePath);
+      const stat = await fs.stat(target);
+      if (!stat.isFile() || stat.size > MAX_SEARCH_FILE_BYTES) continue;
+      content = await fs.readFile(target, "utf8");
+      if (content.includes(String.fromCharCode(0))) continue;
     } catch {
       continue;
     }
@@ -125,17 +121,6 @@ async function readMatches(
     }
   }
   return matches;
-}
-
-export async function searchFiles(
-  root: string,
-  query: string,
-  regex = false,
-  maxResults = 200,
-  maxBytes = DEFAULT_OUTPUT_BYTES,
-): Promise<SearchMatch[]> {
-  if (!query.trim()) throw new Error("Search query cannot be empty.");
-  return boundMatches(await readMatches(root, query, { regex, maxResults }), maxBytes);
 }
 
 export async function searchCode(
@@ -188,15 +173,6 @@ export async function findSymbol(
   return boundMatches(matches, maxBytes);
 }
 
-export function findDefinition(
-  root: string,
-  symbol: string,
-  maxResults = 100,
-  maxBytes = DEFAULT_OUTPUT_BYTES,
-): Promise<SymbolMatch[]> {
-  return findSymbol(root, symbol, maxResults, maxBytes);
-}
-
 export function findReferences(
   root: string,
   symbol: string,
@@ -207,54 +183,6 @@ export function findReferences(
     throw new Error("Symbol must be a valid identifier.");
   const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return searchCode(root, `\\b${escaped}\\b`, true, maxResults, maxBytes);
-}
-
-export async function findImports(
-  root: string,
-  maxResults = 200,
-  maxBytes = DEFAULT_OUTPUT_BYTES,
-): Promise<ImportMatch[]> {
-  const matches = await readMatches(
-    root,
-    String.raw`(?:^|[;{}])\s*import\s*(?:[^"'\n]*?from\s*)?["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)`,
-    { codeOnly: true, regex: true, maxResults },
-  );
-  return boundMatches(
-    matches.map((match) => {
-      const captured = match.text.match(
-        /(?:from\s*)?["']([^"']+)["']|require\(\s*["']([^"']+)["']\s*\)/,
-      );
-      return {
-        ...match,
-        module: captured?.[1] ?? captured?.[2] ?? match.text,
-        kind: /require\s*\(/.test(match.text) ? "require" : "import",
-      };
-    }),
-    maxBytes,
-  );
-}
-
-export async function findExports(
-  root: string,
-  maxResults = 200,
-  maxBytes = DEFAULT_OUTPUT_BYTES,
-): Promise<ExportMatch[]> {
-  const matches = await readMatches(
-    root,
-    String.raw`\bexport\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)`,
-    { codeOnly: true, regex: true, maxResults },
-  );
-  return boundMatches(
-    matches.map((match) => ({
-      ...match,
-      symbol:
-        match.text.match(
-          /(?:function|class|const|let|var|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/,
-        )?.[1] ?? "default",
-      kind: "export",
-    })),
-    maxBytes,
-  );
 }
 
 function symbolKind(line: string): string {
