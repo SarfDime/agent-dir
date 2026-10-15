@@ -62,6 +62,18 @@ export class CodeGraphIntegration {
     return this.capabilityPromise;
   }
 
+  async prepare(): Promise<CodeGraphCapability> {
+    const capability = await this.capability();
+    if (capability.status === "available") {
+      try {
+        await this.ensureStarted();
+      } catch {
+        // Keep Agent Dir startup available even if CodeGraph fails to start.
+      }
+    }
+    return this.capability();
+  }
+
   async explore(query: string, maxFiles?: number): Promise<Record<string, unknown>> {
     const capability = await this.capability();
     if (capability.status === "not_installed")

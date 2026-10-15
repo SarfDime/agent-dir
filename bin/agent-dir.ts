@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
+import { CodeGraphIntegration } from "../src/codegraph.js";
 import { configPath, loadConfig, mergeProfile, saveConfig } from "../src/config.js";
 import { printBanner, printHelp, printRequestHeader } from "../src/logging.js";
 import { startServer } from "../src/server.js";
@@ -503,6 +504,9 @@ if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;
 }
 
+const codeGraph = new CodeGraphIntegration(directory);
+const codeGraphCapability = await codeGraph.prepare();
+if (codeGraphCapability.tool) bannerOptions.codeGraph = true;
 printBanner(bannerOptions);
 
 const telemetrySessionId = randomUUID();
@@ -511,12 +515,16 @@ const server = await startServer({
   port,
   token,
   commandConfig,
+  codeGraph,
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
     ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
     sessionId: telemetrySessionId,
     persist: true,
   },
+}).catch(async (error: unknown) => {
+  await codeGraph.close();
+  throw error;
 });
 let tunnelResult: TunnelResult | undefined;
 console.log("  ✓ SERVER ONLINE");
