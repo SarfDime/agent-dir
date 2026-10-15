@@ -10,7 +10,7 @@ test("telemetry defaults to no recorded events", () => {
   const recorder = new TelemetryRecorder({ level: "none" });
   recorder.record({
     event: "tool_call",
-    tool: "read_files",
+    tool: "read_range",
     success: true,
     durationMs: 10,
   });
@@ -22,7 +22,7 @@ test("anonymous telemetry contains bounded usage data only", () => {
     "anonymous",
     {
       event: "tool_call",
-      tool: "read_files",
+      tool: "read_range",
       success: true,
       durationMs: 42,
       outputBytes: 100,
@@ -52,7 +52,7 @@ test("anonymous telemetry contains bounded usage data only", () => {
   assert.equal(envelope.level, "anonymous");
   assert.deepEqual(envelope.event, {
     event: "tool_call",
-    tool: "read_files",
+    tool: "read_range",
     success: true,
     durationMs: 42,
     outputBytes: 100,
@@ -191,7 +191,7 @@ test("diagnostic telemetry explicitly includes bounded local troubleshooting met
 test("raw tool details are retained only in diagnostic telemetry", () => {
   const event = {
     event: "tool_call" as const,
-    tool: "read_files",
+    tool: "read_range",
     success: true,
     durationMs: 1,
     diagnosticDetails: {
@@ -208,7 +208,7 @@ test("raw tool details are retained only in diagnostic telemetry", () => {
 test("tool telemetry sanitization retains estimates and hashes but never file contents or paths", () => {
   const event = sanitizeAnonymousEvent({
     event: "tool_call",
-    tool: "read_files",
+    tool: "read_range",
     requestIdHash: "a".repeat(64),
     inputFingerprint: "b".repeat(64),
     outputFingerprint: "c".repeat(64),
@@ -255,7 +255,7 @@ test("privacy sanitizer rejects raw command arguments and identifying values", (
 test("recorder does not persist unless explicitly enabled", () => {
   const path = `/tmp/agent-dir-telemetry-default-${process.pid}.jsonl`;
   const recorder = new TelemetryRecorder({ level: "anonymous", persistPath: path });
-  recorder.record({ event: "tool_call", tool: "read_files", success: true, durationMs: 5 });
+  recorder.record({ event: "tool_call", tool: "read_range", success: true, durationMs: 5 });
   assert.equal(recorder.size, 1);
   const reloaded = new TelemetryRecorder({ level: "anonymous", persistPath: path });
   assert.equal(reloaded.size, 0);
@@ -270,7 +270,7 @@ test("recorder persists events and reloads them", () => {
     sessionId: "test-session",
   });
   first.clear();
-  first.record({ event: "tool_call", tool: "read_files", success: true, durationMs: 5 });
+  first.record({ event: "tool_call", tool: "read_range", success: true, durationMs: 5 });
   const firstEvent = first.snapshot()[0];
   assert.ok(firstEvent);
   assert.ok(!Number.isNaN(Date.parse(firstEvent.timestamp)));
@@ -304,8 +304,8 @@ test("recorder isolates persisted events by configuration identifier", () => {
   });
 
   first.clear();
-  first.record({ event: "tool_call", tool: "read_files", success: true, durationMs: 1 });
-  second.record({ event: "tool_call", tool: "read_files", success: true, durationMs: 2 });
+  first.record({ event: "tool_call", tool: "read_range", success: true, durationMs: 1 });
+  second.record({ event: "tool_call", tool: "read_range", success: true, durationMs: 2 });
 
   const reloadedFirst = new TelemetryRecorder({
     level: "anonymous",
@@ -359,7 +359,7 @@ test("telemetry aggregation separates configs and summarizes tool performance", 
       ...base,
       configId: "other",
       sessionId: "session-b",
-      event: { event: "tool_call", tool: "read_files", success: true, durationMs: 5 },
+      event: { event: "tool_call", tool: "read_range", success: true, durationMs: 5 },
     },
     {
       ...base,
@@ -472,7 +472,7 @@ test("persistent history is not truncated when the in-memory buffer rolls over",
   for (let index = 0; index < 7; index += 1) {
     recorder.record({
       event: "tool_call",
-      tool: "read_files",
+      tool: "read_range",
       success: true,
       durationMs: index,
     });

@@ -153,6 +153,50 @@ test("Agent Dir conditionally exposes codegraph_explore", async () => {
       body.result.tools.some((tool) => tool.name === "codegraph_explore"),
       true,
     );
+    const discoverResponse = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "server/discover",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "server/discover",
+          params: { _meta: META },
+        }),
+      }),
+    );
+    const discovery = (await discoverResponse.json()) as {
+      result: { instructions: string; codeGraph: { status: string } };
+    };
+    assert.equal(discovery.result.codeGraph.status, "available");
+    assert.match(discovery.result.instructions, /call codegraph_explore first/i);
+
+    const instructionsResponse = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "resources/read",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 3,
+          method: "resources/read",
+          params: { uri: "agent-dir://instructions", _meta: META },
+        }),
+      }),
+    );
+    const instructions = (await instructionsResponse.json()) as {
+      result: { contents: Array<{ text: string }> };
+    };
+    assert.match(instructions.result.contents[0]?.text ?? "", /REQUIRED FIRST STEP/);
     handler.closeSubscriptions();
   } finally {
     fake.restore();

@@ -214,15 +214,21 @@ test("modern tools expose output schemas and structured content", async () => {
     await fsWriteFile(path.join(root, "hello.txt"), "hello");
     const list = await request(root, 1, "tools/list");
     const tools = (list.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
-    const readTool = tools.find((tool) => tool.name === "read_files");
+    const readTool = tools.find((tool) => tool.name === "read_range");
     assert.ok(readTool?.outputSchema);
     const call = await request(root, 2, "tools/call", {
-      name: "read_files",
-      arguments: { paths: ["hello.txt"] },
+      name: "read_range",
+      arguments: { path: "hello.txt", startLine: 1, endLine: 1 },
     });
     const result = call.result as Record<string, unknown>;
     assert.equal(result.resultType, "complete");
-    assert.deepEqual(result.structuredContent, [{ path: "hello.txt", content: "hello" }]);
+    assert.deepEqual(result.structuredContent, {
+      path: "hello.txt",
+      startLine: 1,
+      endLine: 1,
+      content: "hello",
+      truncated: false,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

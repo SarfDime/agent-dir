@@ -33,7 +33,7 @@ agent-dir is designed to expose a trusted local project to an authenticated AI a
 - MCP and HTTP endpoints require authentication;
 - npm scripts and generic executables are explicitly allowlisted;
 - external commands are launched without a shell;
-- Git write operations are explicit tools rather than implicit side effects;
+- Git commands are available only when the `git` executable is allowlisted, with configured blacklist prefixes taking precedence;
 - request diagnostics avoid logging arbitrary request parameter values.
 
 When contributing, preserve these boundaries. A compatibility fix must not become an authentication bypass, path traversal, command-execution expansion, or sensitive-data logging change.
