@@ -7,14 +7,9 @@ description: Maintain and troubleshoot agent-dir MCP compatibility, transport be
 
 Use this skill when changing or troubleshooting the `agent-dir` project.
 
-## MCP compatibility contract
+## MCP protocol contract
 
-`POST /mcp` supports two protocol paths:
-
-- **Modern stateless:** MCP `2026-07-28`. Requests must carry `params._meta.io.modelcontextprotocol/protocolVersion` and `params._meta.io.modelcontextprotocol/clientCapabilities`. No initialize handshake or session id is required.
-- **Legacy initialize-based:** MCP `2025-11-25`. The client sends `initialize` with `protocolVersion`, `capabilities`, and `clientInfo`, then subsequent requests use `MCP-Protocol-Version: 2025-11-25` without the modern `_meta` object.
-
-Do not collapse these paths into one protocol implementation. The compatibility boundary is deliberate.
+`POST /mcp` supports the current stateless MCP protocol `2026-07-28` only. Requests must carry `params._meta.io.modelcontextprotocol/protocolVersion` and `params._meta.io.modelcontextprotocol/clientCapabilities`. An initialize handshake and session id are not supported or required. Requests using the older `2025-11-25` protocol or omitting required metadata are rejected.
 
 ## Streamable HTTP headers
 
@@ -44,11 +39,8 @@ The request logger deliberately exposes diagnostic structure without dumping req
 
 ## Tests
 
-Compatibility changes belong in `test/modern.test.ts`. Keep regression coverage for:
+Protocol and transport changes belong in `test/modern.test.ts`. Keep regression coverage for:
 
-- legacy initialize acceptance;
-- legacy protocol-header conflicts;
-- legacy post-initialize requests;
 - modern requests without optional implementation-specific headers;
 - modern header/body agreement;
 - malformed request metadata;
@@ -74,7 +66,7 @@ skills/
 .github/skills/
 ```
 
-The maintainer skill itself lives at `skills/agent-dir-maintainer/SKILL.md`. Keep its compatibility contract synchronized with `src/mcp.ts`, `src/server.ts`, and the corresponding regression tests.
+The maintainer skill itself lives at `skills/agent-dir-maintainer/SKILL.md`. Keep its protocol contract synchronized with `src/mcp.ts`, `src/server.ts`, and the corresponding regression tests.
 
 ## Release discipline
 

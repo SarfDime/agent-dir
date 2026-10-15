@@ -5,7 +5,7 @@ Thank you for contributing to agent-dir.
 ## Before you start
 
 - Search existing issues and pull requests before opening a new one.
-- For security vulnerabilities, do **not** open a public issue. Follow [SECURITY.md](SECURITY.md).
+- For security vulnerabilities, do **not** open a public issue. Follow [SECURITY.md](../SECURITY.md).
 - Keep changes focused and avoid unrelated refactors.
 - Preserve the security model: project-root path safety, explicit command allowlists, and non-shell command execution.
 - Do not commit tokens, credentials, private keys, local configuration, or other secrets.

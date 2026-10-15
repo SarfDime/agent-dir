@@ -17,12 +17,17 @@ function secureCompare(left: string, right: string): boolean {
 }
 
 export function unauthorized(): Response {
-  return new Response(JSON.stringify({ error: "Unauthorized" }), {
-    status: 401,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "www-authenticate": "Bearer",
-      "cache-control": "no-store",
+  return new Response(
+    JSON.stringify({
+      error: "Unauthorized: provide a valid Authorization: Bearer <token> header.",
+    }),
+    {
+      status: 401,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "www-authenticate": "Bearer",
+        "cache-control": "no-store",
+      },
     },
-  });
+  );
 }
