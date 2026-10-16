@@ -51,9 +51,15 @@ The core public tool set is intentionally small:
 | `validate` | Run lightweight diagnostics and explicitly requested allowed npm scripts |
 | `run_npm_batch` | Run explicitly allowlisted npm scripts sequentially |
 | `run_command_batch` | Run explicitly allowlisted executables sequentially without a shell |
+| `ast_grep_search` | Optional syntax-aware AST pattern search when ast-grep is installed |
 | `codegraph_explore` | Optional structural code intelligence when CodeGraph is available |
+| `serena_*` | Optional Serena semantic navigation and allowlisted symbol-aware edits when installed and configured |
+
+`ast_grep_search` is only advertised when the `ast-grep` or `sg` CLI is available on `PATH`. It runs read-only `ast-grep run` searches with an explicit argument array (no shell), supports pattern, language, include/exclude globs, and bounded context/results/output. Searches have a 30-second timeout and a 64 KB raw-output ceiling. Rewrites are not exposed. The result is compact JSON; use this tool for syntax-aware matching, `search_code` for exact text/regex, and CodeGraph for call/data-flow and impact analysis.
 
 `codegraph_explore` is only advertised when CodeGraph is installed and the current project has a readable `.codegraph/codegraph.db` index. Other CodeGraph tools are not forwarded.
+
+Serena is optional and exposes an explicit allowlist with the `serena_` prefix: read-only navigation plus selected semantic edits (`rename_symbol`, `replace_symbol_body`, `insert_before_symbol`, and `insert_after_symbol`). Agent Dir does not expose Serena’s general file-creation tools or shell-execution tools. When `.serena/project.yml` exists, Agent Dir checks for a symbol-index cache and runs `serena project index <project-root>` before starting Serena if no cache is found. Indexing failures are logged but do not prevent Agent Dir from starting. Serena updates its index during normal use. Set `AGENT_DIR_SERENA_AUTO_INDEX=0` to disable Agent Dir’s initial-indexing step.
 
 Batch command operations execute sequentially and stop at the first failed command. Tool results include structured content and a serialized text representation; tools returning structured data advertise an output schema.
 
@@ -82,6 +88,10 @@ Discovery distinguishes these states:
 - `startup_failed` / `runtime_failed` — CodeGraph failed to start or later terminated; Agent Dir remains available.
 
 When indexed, agents are instructed to use CodeGraph for non-trivial structural questions such as call/data flow, symbol relationships, and change impact. Exact-text searches and focused file edits use Agent Dir's native tools.
+
+## Serena integration
+
+Install Serena separately and create a project configuration from the project root with `serena project create .`. Agent Dir only advertises Serena tools when the CLI and `.serena/project.yml` are available. It exposes read-only navigation plus four symbol-aware edit operations: `rename_symbol`, `replace_symbol_body`, `insert_before_symbol`, and `insert_after_symbol`. General file creation and shell-execution tools remain unavailable through Serena; use Agent Dir’s native filesystem and allowlisted command tools for those tasks. On first startup without a symbol cache, Agent Dir runs `serena project index <project-root>`; use `AGENT_DIR_SERENA_AUTO_INDEX=0` to disable automatic initial indexing. Indexing can take time on large projects, so the startup logs report when it begins, completes, or fails.
 
 ## Agent instructions and Skills
 

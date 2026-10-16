@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
 import { getMcpLog, startServer, validateMcpHeaders } from "../src/server.js";
+import { isAstGrepAvailable } from "../src/tools/astgrep.js";
 import { startTunnel } from "../src/tunnel.js";
 
 test("CLI reports its package version", () => {
@@ -429,6 +430,7 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     "run_npm_batch",
     "search_code",
     "validate",
+    ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
   ];
   const removedTools = [
     "allowed_commands",
@@ -466,7 +468,7 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
       const body = (await listed.json()) as {
         result: { tools: Array<{ name: string }> };
       };
-      assert.deepEqual(body.result.tools.map((tool) => tool.name).sort(), expectedTools);
+      assert.deepEqual(body.result.tools.map((tool) => tool.name).sort(), expectedTools.sort());
       for (const [index, name] of removedTools.entries()) {
         const response = await handler(
           requestFor(index + 2, "tools/call", { name, arguments: {} }),

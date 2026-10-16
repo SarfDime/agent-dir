@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { CodeGraphIntegration } from "../src/codegraph.js";
 import { configPath, loadConfig, mergeProfile, saveConfig } from "../src/config.js";
 import { printBanner, printHelp, printRequestHeader } from "../src/logging.js";
+import { SerenaIntegration } from "../src/serena.js";
 import { startServer } from "../src/server.js";
 import { hasConfigFile, runFirstTimeSetup, shouldOfferSetup } from "../src/setup.js";
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
@@ -21,6 +22,7 @@ import {
   resetTelemetry,
   TELEMETRY_DIRECTORY,
 } from "../src/telemetry/storage.js";
+import { isAstGrepAvailable } from "../src/tools/astgrep.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
 
@@ -507,6 +509,10 @@ if (commandConfig.blacklistedCommands?.length) {
 const codeGraph = new CodeGraphIntegration(directory);
 const codeGraphCapability = await codeGraph.prepare();
 if (codeGraphCapability.tool) bannerOptions.codeGraph = true;
+const serena = new SerenaIntegration(directory);
+const serenaTools = await serena.prepare();
+if (serenaTools.length) bannerOptions.serena = serenaTools.map((item) => item.name);
+if (isAstGrepAvailable()) bannerOptions.astGrep = true;
 printBanner(bannerOptions);
 
 const telemetrySessionId = randomUUID();
@@ -516,6 +522,7 @@ const server = await startServer({
   token,
   commandConfig,
   codeGraph,
+  serena,
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
     ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
@@ -523,7 +530,7 @@ const server = await startServer({
     persist: true,
   },
 }).catch(async (error: unknown) => {
-  await codeGraph.close();
+  await Promise.all([codeGraph.close(), serena.close()]);
   throw error;
 });
 let tunnelResult: TunnelResult | undefined;

@@ -69,7 +69,12 @@ function boundMatches<T extends SearchMatch>(items: T[], maxBytes: number): T[] 
     const separatorBytes = bounded.length ? 1 : 0;
     const textBudget = maxBytes - bytes - separatorBytes - baseBytes;
     if (textBudget <= 0) break;
-    const candidate = { ...item, text: truncateUtf8(item.text, textBudget) };
+    // Keep one long source line from consuming the entire response budget and hiding later matches.
+    const perMatchTextBudget = Math.min(512, Math.max(64, Math.floor(maxBytes / 4)));
+    const candidate = {
+      ...item,
+      text: truncateUtf8(item.text, Math.min(textBudget, perMatchTextBudget)),
+    };
     const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
     if (bytes + separatorBytes + candidateBytes > maxBytes) break;
     bounded.push(candidate);
