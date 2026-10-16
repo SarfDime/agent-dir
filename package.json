@@ -1,6 +1,6 @@
 {
   "name": "agent-dir",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Expose a local project to an AI agent through authenticated MCP, filesystem tools, and allowlisted development commands",
   "repository": {
     "type": "git",
