@@ -22,12 +22,12 @@ async function makeFakeCodeGraph(): Promise<{ bin: string; restore: () => void }
     'if (args[0] !== "serve" || args[1] !== "--mcp") process.exit(2);',
     'const i = args.indexOf("--path"); const root = i === -1 ? process.cwd() : args[i + 1];',
     'const fail = fs.existsSync(path.join(root, ".codegraph", "startup-fail"));',
-    'const runtimeFail = fs.existsSync(path.join(root, ".codegraph", "runtime-fail")); let calls = 0; let buffer = "";',
+    'const runtimeFail = fs.existsSync(path.join(root, ".codegraph", "runtime-fail")); const oversized = fs.existsSync(path.join(root, ".codegraph", "oversized")); let calls = 0; let buffer = "";',
     'process.stdin.setEncoding("utf8");',
     'process.stdin.on("data", chunk => { buffer += chunk; while (true) { const n = buffer.indexOf("\\n"); if (n < 0) return; const line = buffer.slice(0, n).trim(); buffer = buffer.slice(n + 1); if (!line) continue; const m = JSON.parse(line);',
     'if (m.method === "initialize") { fs.writeFileSync(path.join(root, ".codegraph", "started"), "1"); if (fail) process.exit(7); process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{protocolVersion:"2025-11-25",capabilities:{tools:{}},serverInfo:{name:"codegraph",version:"1.6.0"}}})+"\\n"); }',
     'else if (m.method === "tools/list") process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{tools:[{name:"codegraph_explore",inputSchema:{type:"object"}}]}})+"\\n");',
-    'else if (m.method === "tools/call") { calls++; const r={calls,root,arguments:m.params.arguments}; process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{content:[{type:"text",text:JSON.stringify(r)}],structuredContent:r}})+"\\n"); if (runtimeFail) setImmediate(() => process.exit(9)); } } });',
+    'else if (m.method === "tools/call") { calls++; const r=oversized ? {summary:"s".repeat(12000), relationships:Array.from({length:100}, (_,i)=>({name:"symbol-"+i, detail:"d".repeat(500)})), arguments:m.params.arguments} : {calls,root,arguments:m.params.arguments}; process.stdout.write(JSON.stringify({jsonrpc:"2.0",id:m.id,result:{content:[{type:"text",text:JSON.stringify(r)}],structuredContent:r}})+"\\n"); if (runtimeFail) setImmediate(() => process.exit(9)); } } });',
   ].join("\n");
   await writeFile(executable, script, "utf8");
   await chmod(executable, 0o755);
@@ -215,6 +215,54 @@ test("Agent Dir conditionally exposes codegraph_explore", async () => {
     assert.match(instructions.result.contents[0]?.text ?? "", /REQUIRED FIRST STEP/);
     handler.closeSubscriptions();
   } finally {
+    fake.restore();
+    await rm(fake.bin, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CodeGraph MCP output stays within maxBytes and preserves valid structured JSON", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-codegraph-"));
+  const fake = await makeFakeCodeGraph();
+  let closeHandler: (() => void) | undefined;
+  try {
+    await writeIndex(root, "oversized");
+    const { createMcpHandler } = await import("../src/mcp.js");
+    const handler = createMcpHandler(root);
+    closeHandler = () => handler.closeSubscriptions();
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/call",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "codegraph_explore",
+            arguments: { query: "trace relationships", maxBytes: 1024 },
+            _meta: META,
+          },
+        }),
+      }),
+    );
+    const body = (await response.json()) as {
+      result: { structuredContent?: Record<string, unknown> };
+    };
+    const structured = body.result.structuredContent;
+    assert.ok(structured, "MCP should return structured content");
+    assert.ok(Buffer.byteLength(JSON.stringify(structured), "utf8") <= 1024);
+    const serialized = JSON.stringify(structured);
+    assert.doesNotThrow(() => JSON.parse(serialized));
+    assert.match(serialized, /truncated|budget|exceeded/i);
+    handler.closeSubscriptions();
+  } finally {
+    closeHandler?.();
     fake.restore();
     await rm(fake.bin, { recursive: true, force: true });
     await rm(root, { recursive: true, force: true });

@@ -4,6 +4,8 @@ import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
+import type { SerenaTool } from "./serena.js";
+import { SerenaIntegration } from "./serena.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import type { TelemetryConfig } from "./telemetry/types.js";
 import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
@@ -336,8 +338,10 @@ export function createMcpHandler(
   commandConfig: CommandConfig = {},
   telemetry: TelemetryConfig = { level: "none" },
   codeGraphIntegration?: CodeGraphIntegration,
+  serenaIntegration?: SerenaIntegration,
 ): McpHandler {
   const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
+  const serena = serenaIntegration ?? new SerenaIntegration(root);
   const telemetryRecorder = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -357,7 +361,7 @@ export function createMcpHandler(
   let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
   const getAvailableTools = async () => {
     if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
-    const value = await availableTools(codeGraph);
+    const value = await availableTools(codeGraph, serena);
     cachedTools = { expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS, value };
     return value;
   };
@@ -592,6 +596,7 @@ export function createMcpHandler(
               notify,
               request.signal,
               codeGraph,
+              serena,
             );
             const durationMs = performance.now() - startedAt;
             const count = resultCount(result);
@@ -960,18 +965,40 @@ export function createMcpHandler(
     }
     subscriptions.clear();
     void codeGraph.close();
+    void serena.close();
   };
 
   return handler;
 }
 
-async function availableTools(codeGraph: CodeGraphIntegration): Promise<ToolDefinition[]> {
+async function availableTools(
+  codeGraph: CodeGraphIntegration,
+  serena: SerenaIntegration,
+): Promise<ToolDefinition[]> {
   const capability = await codeGraph.capability();
-  return capability.status === "available" ||
+  const codeGraphTools =
+    capability.status === "available" ||
     capability.status === "startup_failed" ||
     capability.status === "runtime_failed"
-    ? [...baseTools, ...(isAstGrepAvailable() ? [astGrepTool] : []), codeGraphTool]
-    : [...baseTools, ...(isAstGrepAvailable() ? [astGrepTool] : [])];
+      ? [codeGraphTool]
+      : [];
+  const serenaTools = await serena.prepare();
+  return [
+    ...baseTools,
+    ...(isAstGrepAvailable() ? [astGrepTool] : []),
+    ...codeGraphTools,
+    ...serenaTools.map(serenaToolDefinition),
+  ];
+}
+
+function serenaToolDefinition(item: SerenaTool): ToolDefinition {
+  return {
+    name: `serena_${item.name}`,
+    title: `Serena: ${item.title}`,
+    description: item.description,
+    inputSchema: item.inputSchema,
+    outputSchema: item.outputSchema ?? { type: "object", additionalProperties: true },
+  };
 }
 
 function buildDiscoveryInstructions(
@@ -1079,8 +1106,14 @@ async function callTool(
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
+  serena?: SerenaIntegration,
 ): Promise<Record<string, unknown>> {
   let structuredContent: unknown;
+  if (name.startsWith("serena_")) {
+    if (!serena) throw new Error("Serena integration is unavailable.");
+    const result = await serena.call(name.slice("serena_".length), args);
+    return boundCodeGraphResult(result, outputBytesArg(args.maxBytes));
+  }
   if (name === "codegraph_explore") {
     if (!codeGraph) throw new Error("CodeGraph integration is unavailable.");
     if (typeof args.query !== "string" || args.query.trim().length === 0)
@@ -1095,14 +1128,7 @@ async function callTool(
       args.query,
       args.maxFiles === undefined ? 10 : Number(args.maxFiles),
     );
-    const serialized = JSON.stringify(result);
-    if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
-    return completeToolResult({
-      truncated: true,
-      originalBytes: Buffer.byteLength(serialized, "utf8"),
-      message: "CodeGraph response exceeded the output budget. Narrow the query or lower maxFiles.",
-      preview: truncateText(serialized, Math.min(2_000, Math.max(256, maxBytes - 512))).text,
-    });
+    return boundCodeGraphResult(result, maxBytes);
   }
   switch (name) {
     case "ast_grep_search": {
@@ -1755,6 +1781,68 @@ function truncateText(value: string, maxBytes: number): { text: string; truncate
   return {
     text: `${buffer.subarray(0, Math.max(0, maxBytes - 32)).toString("utf8")}\n…[truncated]`,
     truncated: true,
+  };
+}
+
+function boundCodeGraphResult(
+  value: Record<string, unknown>,
+  maxBytes: number,
+): Record<string, unknown> {
+  const originalBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (originalBytes <= maxBytes) return value;
+
+  const trim = (item: unknown, budget: number): unknown => {
+    if (typeof item === "string") return truncateText(item, Math.max(0, budget - 24)).text;
+    if (Array.isArray(item)) {
+      const output: unknown[] = [];
+      for (const entry of item) {
+        const candidate = [
+          ...output,
+          trim(entry, Math.max(128, Math.floor(budget / Math.max(1, item.length)))),
+        ];
+        if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > budget) break;
+        output.push(candidate[candidate.length - 1]);
+      }
+      return output;
+    }
+    if (isRecord(item)) {
+      const output: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(item)) {
+        const remaining =
+          budget - Buffer.byteLength(JSON.stringify(output), "utf8") - key.length - 8;
+        if (remaining < 64) break;
+        output[key] = trim(
+          entry,
+          Math.min(
+            remaining,
+            Math.max(128, Math.floor(budget / Math.max(1, Object.keys(item).length))),
+          ),
+        );
+        if (Buffer.byteLength(JSON.stringify(output), "utf8") > budget) {
+          delete output[key];
+          break;
+        }
+      }
+      return output;
+    }
+    return item;
+  };
+
+  const result = trim(value, Math.max(256, maxBytes - 256)) as Record<string, unknown>;
+  const bounded: Record<string, unknown> = {
+    ...result,
+    truncated: true,
+    originalBytes,
+    budgetBytes: maxBytes,
+    message:
+      "CodeGraph output was trimmed to fit maxBytes. Narrow the query or lower maxFiles for more complete results.",
+  };
+  if (Buffer.byteLength(JSON.stringify(bounded), "utf8") <= maxBytes) return bounded;
+  return {
+    truncated: true,
+    originalBytes,
+    budgetBytes: maxBytes,
+    message: "CodeGraph output exceeded maxBytes. Narrow the query or lower maxFiles.",
   };
 }
 

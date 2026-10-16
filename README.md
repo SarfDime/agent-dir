@@ -68,7 +68,7 @@ See [Configuration and tunnel setup](docs/CONFIGURATION.md) for the setup wizard
 - A compact MCP toolset for project context, file discovery, source search, bounded reads, targeted changes, and validation.
 - Authenticated, stateless MCP over `POST /mcp`.
 - Explicit npm-script and executable allowlists; commands run without a shell.
-- Optional ast-grep syntax-aware structural search when its CLI is installed, plus optional CodeGraph code intelligence when CodeGraph is installed and the project is indexed.
+- Optional ast-grep syntax-aware structural search when its CLI is installed, optional CodeGraph code intelligence when CodeGraph is installed and the project is indexed, and optional Serena read-only semantic navigation when Serena is installed and configured.
 - Optional local-only telemetry, disabled by default.
 
 See [MCP interface and security model](docs/MCP.md) for the supported protocol, tools, authentication, command policy, and optional ast-grep and CodeGraph integrations.

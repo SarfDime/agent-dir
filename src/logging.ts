@@ -214,6 +214,8 @@ export function printBanner(options: {
   commands?: string[];
   blacklistedCommands?: string[];
   codeGraph?: boolean;
+  astGrep?: boolean;
+  serena?: string[];
 }): void {
   writeLine("");
   writeLine(
@@ -283,6 +285,9 @@ export function printBanner(options: {
     color(toolLabel("file_info"), YELLOW),
   ];
   if (options.codeGraph) toolRows.push(color(toolLabel("codegraph_explore"), BRIGHT_MAGENTA));
+  if (options.astGrep) toolRows.push(color(toolLabel("ast_grep_search"), BRIGHT_GREEN));
+  for (const name of options.serena ?? [])
+    toolRows.push(color(toolLabel(`serena_${name}`), BRIGHT_YELLOW));
   printGrid(toolRows, 2);
   writeLine(boxBottom(BRIGHT_BLUE));
   writeLine("");
