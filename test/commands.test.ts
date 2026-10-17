@@ -9,7 +9,7 @@ import {
   isCommandBlacklisted,
   runCommand,
 } from "../src/tools/commands.js";
-import { runNpm } from "../src/tools/npm.js";
+import { runPackageScript } from "../src/tools/package-scripts.js";
 
 test("command output is bounded and marked when truncated", () => {
   const output = appendBoundedOutput("", "x".repeat(600_000));
@@ -32,7 +32,7 @@ test("child command environment filters common secret-bearing variables", () => 
   }
 });
 
-test("npm scripts run with the filtered environment while retaining build essentials", async () => {
+test("package scripts run with the filtered environment while retaining build essentials", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-npm-env-"));
   const previousToken = process.env.AGENT_DIR_TEST_TOKEN;
   process.env.AGENT_DIR_TEST_TOKEN = "must-not-reach-script";
@@ -47,7 +47,7 @@ test("npm scripts run with the filtered environment while retaining build essent
         },
       }),
     );
-    const result = await runNpm(root, "env-check", 10_000, ["env-check"]);
+    const result = await runPackageScript(root, "env-check", 10_000, ["env-check"]);
     assert.equal(result.exitCode, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout.trim().split("\n").at(-1) ?? ""), {
       token: null,
@@ -61,9 +61,9 @@ test("npm scripts run with the filtered environment while retaining build essent
   }
 });
 
-test("configured npm check scripts work with the filtered environment", async () => {
+test("configured package scripts work with the filtered environment", async () => {
   for (const script of ["check", "format:check"]) {
-    const result = await runNpm(process.cwd(), script, 120_000, [script]);
+    const result = await runPackageScript(process.cwd(), script, 120_000, [script]);
     assert.equal(result.exitCode, 0, `${script} failed:\n${result.stderr}\n${result.stdout}`);
   }
 });

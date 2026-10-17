@@ -1,11 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { configPath, saveConfig } from "./config.js";
-import type { AgentConfig, Profile } from "./types.js";
+import type { AgentConfig, PackageManager, Profile } from "./types.js";
 
 export async function hasConfigFile(): Promise<boolean> {
   try {
@@ -122,6 +122,16 @@ export async function runFirstTimeSetup(
     const name = await requiredText(rl, "Profile name", "default");
     const directory = resolve(await requiredText(rl, "Directory to expose", defaultDirectory));
     const port = await requiredPort(rl, 3002);
+    const detectedPackageManager = await detectPackageManager(directory);
+    console.log("");
+    console.log(`${section("◆")} ${section(bold("Package manager"))}`);
+    console.log(rule());
+    const packageManager = await choose(
+      rl,
+      `Package manager${detectedPackageManager ? ` (detected ${detectedPackageManager})` : ""}`,
+      ["npm", "pnpm", "yarn", "bun"] as const,
+      detectedPackageManager ?? "npm",
+    );
     let hostname: string | undefined;
     let cloudflaredToken: string | undefined;
     let subdomain: string | undefined;
@@ -146,7 +156,10 @@ export async function runFirstTimeSetup(
       subdomain = await requiredText(rl, "Wormhole subdomain");
     }
     const tunnel = useCloudflared ? "cloudflared" : useWormhole ? "wormhole" : "none";
-    const npm = await optionalList(rl, "Allowed npm scripts (comma-separated, blank for none)");
+    const allowedScripts = await optionalList(
+      rl,
+      `Allowed ${packageManager} scripts (comma-separated, blank for none)`,
+    );
     const commands = await optionalList(rl, "Allowed commands (comma-separated, blank for none)");
 
     console.log("");
@@ -190,6 +203,7 @@ export async function runFirstTimeSetup(
       defaultTunnel: tunnel,
       token: randomBytes(24).toString("hex"),
     };
+    profile.packageManager = packageManager;
     if (subdomain) profile.subdomain = subdomain;
     if (hostname) profile.hostname = hostname;
     if (useCloudflared || useWormhole) {
@@ -200,7 +214,7 @@ export async function runFirstTimeSetup(
           : {}),
       };
     }
-    if (npm.length) profile.npm = { allowedScripts: npm };
+    if (allowedScripts.length) profile.scripts = { allowedScripts };
     if (commands.length) profile.commands = commands;
     config.profiles[name] = profile;
     config.telemetry = { level: telemetry };
@@ -212,6 +226,7 @@ export async function runFirstTimeSetup(
       `${dim("Profile")}   ${bold(name)}`,
       `${dim("Directory")} ${directory}`,
       `${dim("Tunnel")}    ${tunnel}`,
+      `${dim("Package manager")} ${packageManager}`,
       `${dim("Telemetry")} ${telemetry}`,
     ]);
     console.log("");
@@ -221,6 +236,32 @@ export async function runFirstTimeSetup(
   } finally {
     rl.close();
   }
+}
+
+async function detectPackageManager(directory: string): Promise<PackageManager | undefined> {
+  try {
+    const packageJson = JSON.parse(await readFile(resolve(directory, "package.json"), "utf8")) as {
+      packageManager?: unknown;
+    };
+    if (typeof packageJson.packageManager === "string") {
+      const declared = packageJson.packageManager.split("@", 1)[0];
+      if (declared && ["npm", "pnpm", "yarn", "bun"].includes(declared))
+        return declared as PackageManager;
+    }
+  } catch {
+    // Fall back to lockfile detection when package metadata is absent or invalid.
+  }
+
+  try {
+    const files = new Set(await readdir(directory));
+    if (files.has("pnpm-lock.yaml")) return "pnpm";
+    if (files.has("yarn.lock")) return "yarn";
+    if (files.has("bun.lock") || files.has("bun.lockb")) return "bun";
+    if (files.has("package-lock.json")) return "npm";
+  } catch {
+    // A missing or unreadable directory simply leaves npm as the default.
+  }
+  return undefined;
 }
 
 async function requiredText(

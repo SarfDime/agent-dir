@@ -62,7 +62,7 @@ const { values, positionals } = parseArgs({
     subdomain: { type: "string", short: "s" },
     hostname: { type: "string" },
     "cloudflared-token": { type: "string" },
-    npm: { type: "string" },
+    scripts: { type: "string" },
     command: { type: "string" },
     blacklist: { type: "string" },
     token: { type: "string" },
@@ -389,8 +389,8 @@ if (command === "config") {
       };
       profile.defaultTunnel = tunnel;
     }
-    const npm = parseList(values.npm);
-    if (npm !== undefined) profile.npm = { allowedScripts: npm };
+    const scripts = parseList(values.scripts);
+    if (scripts !== undefined) profile.scripts = { allowedScripts: scripts };
     const commands = parseList(values.command);
     if (commands !== undefined) profile.commands = commands;
     const blacklist = parseList(values.blacklist);
@@ -462,11 +462,11 @@ if (randomTunnel && tunnel !== "wormhole") {
 }
 
 const token = values.token ?? profile?.token ?? randomBytes(24).toString("hex");
-const npm = parseList(values.npm);
+const scripts = parseList(values.scripts);
 const commands = parseList(values.command);
 const blacklist = parseList(values.blacklist);
 const overrides: CommandConfig = {};
-if (npm !== undefined) overrides.npm = { allowedScripts: npm };
+if (scripts !== undefined) overrides.scripts = { allowedScripts: scripts };
 if (commands !== undefined) overrides.commands = commands;
 if (blacklist !== undefined) overrides.blacklistedCommands = blacklist;
 const commandConfig = mergeProfile(profile ?? { directory, port, tunnel }, overrides);
@@ -481,7 +481,7 @@ const telemetryConfigId = profile
           subdomain,
           hostname,
           randomTunnel,
-          npm: commandConfig.npm?.allowedScripts ?? [],
+          scripts: commandConfig.scripts?.allowedScripts ?? [],
           commands: commandConfig.commands ?? [],
           blacklistedCommands: commandConfig.blacklistedCommands ?? [],
         }),
@@ -495,13 +495,14 @@ const bannerOptions: Parameters<typeof printBanner>[0] = {
   tunnel,
 };
 
-const npmScripts = commandConfig.npm?.allowedScripts;
+const allowedScripts = commandConfig.scripts?.allowedScripts;
+bannerOptions.packageManager = commandConfig.packageManager ?? "npm";
 const allowedCommands = commandConfig.commands;
 
 if (profile && command) bannerOptions.profileName = command;
 if (subdomain) bannerOptions.subdomain = subdomain;
 if (hostname) bannerOptions.hostname = hostname;
-if (npmScripts) bannerOptions.npmScripts = npmScripts;
+if (allowedScripts) bannerOptions.allowedScripts = allowedScripts;
 if (allowedCommands) bannerOptions.commands = allowedCommands;
 if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;

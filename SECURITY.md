@@ -31,7 +31,7 @@ agent-dir is designed to expose a trusted local project to an authenticated AI a
 - file access is rooted at the configured project directory;
 - existing paths are resolved through their real filesystem targets to prevent symlink escapes;
 - MCP and HTTP endpoints require authentication;
-- npm scripts and generic executables are explicitly allowlisted;
+- Package scripts and generic executables are explicitly allowlisted;
 - external commands are launched without a shell;
 - Git commands are available only when the `git` executable is allowlisted, with configured blacklist prefixes taking precedence;
 - request diagnostics avoid logging arbitrary request parameter values.
