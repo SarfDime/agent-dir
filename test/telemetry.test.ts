@@ -188,7 +188,7 @@ test("diagnostic telemetry explicitly includes bounded local troubleshooting met
   assert.equal("environment" in envelope, false);
 });
 
-test("raw tool details are retained only in diagnostic telemetry", () => {
+test("raw tool details are never retained in telemetry, including diagnostic level", () => {
   const event = {
     event: "tool_call" as const,
     tool: "read_range",
@@ -202,7 +202,7 @@ test("raw tool details are retained only in diagnostic telemetry", () => {
   const detailed = createTelemetryEnvelope("detailed", event);
   const diagnostic = createTelemetryEnvelope("diagnostic", event);
   assert.equal("diagnosticDetails" in detailed.event, false);
-  assert.deepEqual((diagnostic.event as typeof event).diagnosticDetails, event.diagnosticDetails);
+  assert.equal("diagnosticDetails" in diagnostic.event, false);
 });
 
 test("tool telemetry sanitization retains estimates and hashes but never file contents or paths", () => {

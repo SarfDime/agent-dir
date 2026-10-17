@@ -90,6 +90,17 @@ Do not infer agent reasoning time, user wait time, or network latency from tool 
 
 Telemetry is persisted locally only when enabled. Persistence failures must never affect MCP request handling.
 
+## MCP telemetry analytics (opt-in)
+
+Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool. It reads persisted telemetry across all profiles and sessions on the host; this is separate from enabling collection. Keep the flag off unless the connected agent needs access to this history.
+
+- `mode=summary` returns aggregate reliability, timing, and usage metrics.
+- `mode=sessions` returns per-session tool counts and failure summaries.
+- `mode=events` returns bounded event records, with runtime/project context reduced to coarse fields and legacy raw diagnostic tool details removed.
+- Optional `profile`, `session`, `since`, and `until` filters narrow the dataset. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
+
+Diagnostic-level telemetry can still include identifying runtime metadata, so only enable remote analytics on a connector you trust. The analytics tool is hidden by default and is registered only when the explicit flag is true.
+
 ## Reading telemetry show
 
 telemetry show is the raw event stream grouped by configuration and session. Use it when exact event order, timestamps, event fields, or individual failures matter.

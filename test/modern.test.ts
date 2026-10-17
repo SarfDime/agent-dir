@@ -1205,7 +1205,7 @@ test("Mcp-Param headers validate annotated arguments", () => {
   );
 });
 
-test("legacy MCP initialization is rejected; only the current protocol is supported", async () => {
+test("standard MCP initialization accepts protocol version 2025-11-25 without custom metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     const handler = createMcpHandler(root);
@@ -1229,17 +1229,19 @@ test("legacy MCP initialization is rejected; only the current protocol is suppor
         }),
       }),
     );
-    assert.equal(response.status, 400);
-    const result = (await response.json()) as { error: { code: number; message: string } };
-    assert.equal(result.error.code, -32602);
-    assert.match(result.error.message, /Missing required request metadata/);
+    assert.equal(response.status, 200);
+    const result = (await response.json()) as {
+      result: { protocolVersion: string; serverInfo: { name: string } };
+    };
+    assert.equal(result.result.protocolVersion, "2025-11-25");
+    assert.equal(result.result.serverInfo.name, "agent-dir");
     handler.closeSubscriptions();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("missing protocol version metadata returns invalid params", async () => {
+test("standard MCP requests do not require custom protocol metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     const handler = createMcpHandler(root);
@@ -1254,8 +1256,7 @@ test("missing protocol version metadata returns invalid params", async () => {
         }),
       }),
     );
-    assert.equal(response.status, 400);
-    assert.equal(((await response.json()) as { error: { code: number } }).error.code, -32602);
+    assert.equal(response.status, 200);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1270,7 +1271,7 @@ test("unsupported protocol versions negotiate with -32022", async () => {
       headers: {
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
-        "mcp-protocol-version": "2025-11-25",
+        "mcp-protocol-version": "2024-11-05",
         "mcp-method": "server/discover",
       },
       body: JSON.stringify({
@@ -1279,7 +1280,7 @@ test("unsupported protocol versions negotiate with -32022", async () => {
         method: "server/discover",
         params: {
           _meta: {
-            "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+            "io.modelcontextprotocol/protocolVersion": "2024-11-05",
             "io.modelcontextprotocol/clientCapabilities": {},
           },
         },
@@ -1291,8 +1292,8 @@ test("unsupported protocol versions negotiate with -32022", async () => {
       error: { code: number; data: { supported: string[]; requested: string } };
     };
     assert.equal(result.error.code, -32022);
-    assert.deepEqual(result.error.data.supported, ["2026-07-28"]);
-    assert.equal(result.error.data.requested, "2025-11-25");
+    assert.deepEqual(result.error.data.supported, ["2025-11-25", "2026-07-28"]);
+    assert.equal(result.error.data.requested, "2024-11-05");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

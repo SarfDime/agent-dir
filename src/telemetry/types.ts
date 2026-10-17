@@ -41,8 +41,6 @@ export interface TelemetryToolEvent {
   requestIdHash?: string;
   inputFingerprint?: string;
   outputFingerprint?: string;
-  /** Full local-only troubleshooting payload, emitted only at diagnostic level. */
-  diagnosticDetails?: Record<string, unknown>;
   estimatedInputTokens?: number;
   estimatedOutputTokens?: number;
   cumulativeOutputBytes?: number;

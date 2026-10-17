@@ -42,6 +42,7 @@ export interface ServerOptions {
   telemetry?: TelemetryConfig;
   codeGraph?: import("./codegraph.js").CodeGraphIntegration;
   serena?: import("./serena.js").SerenaIntegration;
+  analytics?: boolean;
 }
 
 export interface RequestLog {

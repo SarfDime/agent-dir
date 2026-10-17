@@ -63,7 +63,6 @@ const TOOL_COLORS: Record<string, string> = {
 };
 
 const NARROW_TOOL_ICONS = new Set(["✎", "✖", "⚙", "⌘", "↪", "↗"]);
-const TOOL_ICON_SLOT_WIDTH = 3;
 const DIM = "\x1b[90m";
 
 function visibleLength(value: string): number {
@@ -153,9 +152,9 @@ function toolColor(name?: string): string | undefined {
 function toolLabel(name: string): string {
   const icon = toolIcon(name);
   const iconWidth = NARROW_TOOL_ICONS.has(icon) ? 1 : 2;
-  const iconSlot = `${icon}${" ".repeat(TOOL_ICON_SLOT_WIDTH - iconWidth)}`;
-  const nameWidth = Object.hasOwn(TOOL_ICONS, name) ? TOOL_NAME_WIDTH : MCP_METHOD_NAME_WIDTH;
-  return `${iconSlot}${name.padEnd(nameWidth)}`;
+  const iconSlot = `${icon}${" ".repeat(Math.max(0, 2 - iconWidth))}`;
+  const nameWidth = Math.max(TOOL_NAME_WIDTH, MCP_METHOD_NAME_WIDTH);
+  return `${iconSlot} ${name.padEnd(nameWidth)}`;
 }
 
 export function printHelp(): void {
@@ -178,6 +177,7 @@ export function printHelp(): void {
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
   writeLine("      --token <token>        Explicit Bearer token");
+  writeLine("      --analytics            Expose local telemetry analytics through MCP (opt-in)");
   writeLine("      --no-tunnel            Disable tunneling");
   writeLine("      --random               Use a random Wormhole URL (no subdomain)");
   writeLine("  -h, --help                 Show this help");
@@ -216,6 +216,7 @@ export function printBanner(options: {
   codeGraph?: boolean;
   astGrep?: boolean;
   serena?: string[];
+  analytics?: boolean;
 }): void {
   writeLine("");
   writeLine(
@@ -288,6 +289,7 @@ export function printBanner(options: {
   if (options.astGrep) toolRows.push(color(toolLabel("ast_grep_search"), BRIGHT_GREEN));
   for (const name of options.serena ?? [])
     toolRows.push(color(toolLabel(`serena_${name}`), BRIGHT_YELLOW));
+  if (options.analytics) toolRows.push(color(toolLabel("telemetry_analytics"), BRIGHT_GREEN));
   printGrid(toolRows, 2);
   writeLine(boxBottom(BRIGHT_BLUE));
   writeLine("");
@@ -317,7 +319,7 @@ export function printBanner(options: {
 }
 
 const LOG_METHOD_WIDTH = 6;
-const LOG_PATH_WIDTH = 16;
+const LOG_PATH_WIDTH = 4;
 const LOG_STATUS_WIDTH = 5;
 
 export function printRequestLog(entry: RequestLog): void {
@@ -344,7 +346,7 @@ export function printRequestLog(entry: RequestLog): void {
 
   const detailLines = detail ? detail.split("\n") : [];
   writeLine(
-    `  ├─ ${color(method, methodCode)}  ${color(path, methodCode)}  ${color(status, statusCode)}  ${color("•", methodCode)}${detailLines[0] ? ` ${detailLines[0]}` : ""}`,
+    `  ├─ ${color(method, methodCode)} ${color(path, methodCode)} ${color("·", DIM)} ${color(status, statusCode)} ${color("·", methodCode)}${detailLines[0] ? ` ${detailLines[0]}` : ""}`,
   );
   for (const line of detailLines.slice(1)) writeLine(`  │      ${line}`);
 }

@@ -24,8 +24,9 @@ export function startServer({
   telemetry = { level: "none" },
   codeGraph,
   serena,
+  analytics = false,
 }: ServerOptions): Promise<ServerHandle> {
-  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, serena);
+  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, serena, analytics);
   const httpTelemetry = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,

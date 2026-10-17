@@ -6,7 +6,9 @@ import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import type { SerenaTool } from "./serena.js";
 import { SerenaIntegration } from "./serena.js";
+import { summarizeTelemetry } from "./telemetry/aggregate.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
+import { readAllTelemetryEvents } from "./telemetry/storage.js";
 import type { TelemetryConfig } from "./telemetry/types.js";
 import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
@@ -32,7 +34,6 @@ const PROTOCOL_VERSION = "2026-07-28";
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
-const CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
 const PAGE_SIZE = 50;
 const DISCOVERY_CACHE_TTL_MS = 300_000;
 const DEFAULT_OUTPUT_BYTES = 8_000;
@@ -339,6 +340,7 @@ export function createMcpHandler(
   telemetry: TelemetryConfig = { level: "none" },
   codeGraphIntegration?: CodeGraphIntegration,
   serenaIntegration?: SerenaIntegration,
+  analyticsEnabled = false,
 ): McpHandler {
   const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
   const serena = serenaIntegration ?? new SerenaIntegration(root);
@@ -361,7 +363,7 @@ export function createMcpHandler(
   let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
   const getAvailableTools = async () => {
     if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
-    const value = await availableTools(codeGraph, serena);
+    const value = await availableTools(codeGraph, serena, analyticsEnabled);
     cachedTools = { expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS, value };
     return value;
   };
@@ -478,40 +480,75 @@ export function createMcpHandler(
     }
     const params = message.params ?? {};
     runtime = telemetryRuntime(params);
-    if (!isRecord(params._meta)) {
-      telemetryRequestErrorCategory = "invalid_input";
-      recordMcpRequest();
-      return jsonRpcError(message.id ?? null, -32602, "Missing required request metadata.", 400);
-    }
-    const meta = params._meta;
-    const version = meta[PROTOCOL_META];
-    if (typeof version !== "string") {
-      telemetryRequestErrorCategory = "invalid_input";
-      recordMcpRequest();
-      return jsonRpcError(
-        message.id ?? null,
-        -32602,
-        "Missing required protocol version metadata.",
-        400,
-      );
-    }
-    if (version !== PROTOCOL_VERSION) {
-      telemetryRequestErrorCategory = "invalid_input";
-      recordMcpRequest();
-      return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
-        supported: [PROTOCOL_VERSION],
-        requested: version,
+    const meta = isRecord(params._meta) ? params._meta : undefined;
+    if (message.method === "initialize") {
+      const requestedVersion = params.protocolVersion;
+      if (
+        typeof requestedVersion !== "string" ||
+        !isRecord(params.capabilities) ||
+        !isRecord(params.clientInfo)
+      ) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
+        return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
+      }
+      const supportedVersions = ["2025-11-25", PROTOCOL_VERSION];
+      if (!supportedVersions.includes(requestedVersion)) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
+        return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
+          supported: supportedVersions,
+          requested: requestedVersion,
+        });
+      }
+      mcpSuccess = true;
+      return trackedJson({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: requestedVersion,
+          capabilities: {
+            tools: { listChanged: true },
+            resources: { subscribe: true, listChanged: true },
+            prompts: { listChanged: true },
+          },
+          serverInfo: SERVER_INFO,
+          instructions: buildAgentInstructions(
+            npmAllowed,
+            allowedCommands,
+            blacklistedCommands,
+            await codeGraph.capability(),
+            analyticsEnabled,
+          ),
+        },
       });
     }
-    if (!isRecord(meta[CLIENT_CAPABILITIES_META])) {
-      telemetryRequestErrorCategory = "invalid_input";
-      recordMcpRequest();
-      return jsonRpcError(
-        message.id ?? null,
-        -32602,
-        "Missing required client capabilities metadata.",
-        400,
-      );
+    if (meta) {
+      const clientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"];
+      if (clientCapabilities !== undefined && !isRecord(clientCapabilities)) {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
+        return jsonRpcError(
+          message.id ?? null,
+          -32602,
+          "Invalid client capabilities metadata.",
+          400,
+        );
+      }
+      const version = meta[PROTOCOL_META];
+      if (version !== undefined && typeof version !== "string") {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
+        return jsonRpcError(message.id ?? null, -32602, "Invalid protocol version metadata.", 400);
+      }
+      if (typeof version === "string" && version !== PROTOCOL_VERSION && version !== "2025-11-25") {
+        telemetryRequestErrorCategory = "invalid_input";
+        recordMcpRequest();
+        return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
+          supported: ["2025-11-25", PROTOCOL_VERSION],
+          requested: version,
+        });
+      }
     }
     try {
       switch (message.method) {
@@ -597,6 +634,7 @@ export function createMcpHandler(
               request.signal,
               codeGraph,
               serena,
+              analyticsEnabled,
             );
             const durationMs = performance.now() - startedAt;
             const count = resultCount(result);
@@ -620,9 +658,6 @@ export function createMcpHandler(
                 cumulativeOutputBytes: sessionOutputBytes,
                 cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
                 inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
-                ...(telemetry.level === "diagnostic"
-                  ? { diagnosticDetails: diagnosticToolDetails(argumentsValue, result) }
-                  : {}),
                 ...(count === undefined ? {} : { resultCount: count }),
                 ...toolTelemetryMetrics(toolName, result, seenOutputFingerprints),
               },
@@ -665,16 +700,6 @@ export function createMcpHandler(
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
                 inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
-                ...(telemetry.level === "diagnostic"
-                  ? {
-                      diagnosticDetails: diagnosticToolDetails(argumentsValue, {
-                        error:
-                          error instanceof Error
-                            ? { name: error.name, message: error.message, stack: error.stack }
-                            : String(error),
-                      }),
-                    }
-                  : {}),
                 errorCategory,
               },
               runtime,
@@ -759,6 +784,7 @@ export function createMcpHandler(
                       allowedCommands,
                       blacklistedCommands,
                       await codeGraph.capability(),
+                      analyticsEnabled,
                     ),
                   },
                 ],
@@ -785,6 +811,7 @@ export function createMcpHandler(
                         allowedCommands,
                         blacklistedCommands,
                         await codeGraph.capability(),
+                        analyticsEnabled,
                       ),
                       null,
                       2,
@@ -974,6 +1001,7 @@ export function createMcpHandler(
 async function availableTools(
   codeGraph: CodeGraphIntegration,
   serena: SerenaIntegration,
+  analyticsEnabled = false,
 ): Promise<ToolDefinition[]> {
   const capability = await codeGraph.capability();
   const codeGraphTools =
@@ -988,8 +1016,24 @@ async function availableTools(
     ...(isAstGrepAvailable() ? [astGrepTool] : []),
     ...codeGraphTools,
     ...serenaTools.map(serenaToolDefinition),
+    ...(analyticsEnabled ? [telemetryAnalyticsTool] : []),
   ];
 }
+
+const telemetryAnalyticsTool: ToolDefinition = tool(
+  "telemetry_analytics",
+  "Analyze locally persisted Agent Dir telemetry across all profiles and sessions. Summary mode is aggregate-only; event mode returns bounded sanitized event records. Available only when Agent Dir is started with --analytics.",
+  {
+    mode: { type: "string", enum: ["summary", "sessions", "events"], default: "summary" },
+    profile: { type: "string", maxLength: 100 },
+    session: { type: "string", maxLength: 100 },
+    since: { type: "string", description: "Optional ISO timestamp lower bound." },
+    until: { type: "string", description: "Optional ISO timestamp upper bound." },
+    limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
+    maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
+  },
+  { type: "object", additionalProperties: true },
+);
 
 function serenaToolDefinition(item: SerenaTool): ToolDefinition {
   return {
@@ -1023,6 +1067,7 @@ function buildAgentInstructions(
   allowedCommands: string[],
   blacklistedCommands: string[],
   codeGraph: CodeGraphCapability,
+  analyticsEnabled = false,
 ): string {
   const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
   const commands = allowedCommands.length
@@ -1040,7 +1085,7 @@ function buildAgentInstructions(
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- Prefer find_symbol/find_references for known symbols instead of scanning source files manually.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested npm scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed npm scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Discovery: project_context > find_files > search_code.\n- Code location: find_symbol > find_references > search_code.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted npm script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- For semantic navigation, use Serena tools first when available: serena_find_symbol for definitions and serena_find_referencing_symbols for callers/references; use supported Serena symbol-edit tools for targeted edits. If Serena returns no match or errors, verify the path/name and fall back to find_symbol/search_code.\n- Use ast_grep_search when syntax shape matters, not for literal text. Specify lang and narrow globs whenever possible; start with a small maxResults and expand only if needed.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with Serena and native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested npm scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed npm scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: Serena tools first when available; fall back to find_symbol/find_references/search_code on empty or failed results.\n- Structural syntax matching: ast_grep_search with explicit language and narrow globs.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted npm script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function buildAgentCapabilities(
@@ -1048,6 +1093,7 @@ function buildAgentCapabilities(
   allowedCommands: string[],
   blacklistedCommands: string[],
   codeGraph: CodeGraphCapability,
+  analyticsEnabled = false,
 ): Record<string, unknown> {
   return {
     version: packageVersion,
@@ -1055,6 +1101,7 @@ function buildAgentCapabilities(
       ...baseTools.map((item) => item.name),
       ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
       ...(codeGraph.status === "available" ? ["codegraph_explore"] : []),
+      ...(analyticsEnabled ? ["telemetry_analytics"] : []),
     ],
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
     execution: {
@@ -1073,6 +1120,7 @@ function buildAgentCapabilities(
         reading: ["read_range"],
         editing: ["apply_changes"],
         validation: ["validate", "targeted npm script"],
+        ...(analyticsEnabled ? { telemetryAnalytics: "telemetry_analytics" } : {}),
       },
       avoid: [
         "recursive discovery when targeted search is enough",
@@ -1107,6 +1155,7 @@ async function callTool(
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
   serena?: SerenaIntegration,
+  analyticsEnabled = false,
 ): Promise<Record<string, unknown>> {
   let structuredContent: unknown;
   if (name.startsWith("serena_")) {
@@ -1129,6 +1178,148 @@ async function callTool(
       args.maxFiles === undefined ? 10 : Number(args.maxFiles),
     );
     return boundCodeGraphResult(result, maxBytes);
+  }
+  if (name === "telemetry_analytics") {
+    if (!analyticsEnabled)
+      throw new Error("Telemetry analytics is disabled; start Agent Dir with --analytics.");
+    const mode = typeof args.mode === "string" ? args.mode : "summary";
+    if (!["summary", "sessions", "events"].includes(mode))
+      throw new Error("mode must be summary, sessions, or events.");
+    const limit = Math.max(
+      1,
+      Math.min(500, Number.isInteger(args.limit) ? Number(args.limit) : 100),
+    );
+    const since =
+      typeof args.since === "string" ? Date.parse(args.since) : Number.NEGATIVE_INFINITY;
+    const until =
+      typeof args.until === "string" ? Date.parse(args.until) : Number.POSITIVE_INFINITY;
+    if (Number.isNaN(since) || Number.isNaN(until))
+      throw new Error("since and until must be valid ISO timestamps.");
+    const all = readAllTelemetryEvents().filter(
+      (event) =>
+        (!args.profile || event.configId === args.profile) &&
+        (!args.session || event.sessionId === args.session) &&
+        Date.parse(event.timestamp) >= since &&
+        Date.parse(event.timestamp) <= until,
+    );
+    let result: Record<string, unknown>;
+    if (mode === "summary") {
+      const summary = summarizeTelemetry(all);
+      result = {
+        mode,
+        matchedEvents: all.length,
+        configCount: summary.configCount,
+        totalEvents: summary.totalEvents,
+        configs: Object.fromEntries(
+          Object.entries(summary.configs).map(([configId, config]) => [
+            configId,
+            {
+              eventCount: config.eventCount,
+              httpRequests: config.httpRequests,
+              httpAuthFailures: config.httpAuthFailures,
+              httpErrors: config.httpErrors,
+              mcpRequests: config.mcpRequests,
+              toolCalls: config.toolCalls,
+              commandCalls: config.commandCalls,
+              tunnelEvents: config.tunnelEvents,
+              tunnelDisconnects: config.tunnelDisconnects,
+              tunnelReconnects: config.tunnelReconnects,
+              tunnelFailures: config.tunnelFailures,
+              mcpSuccessRate: config.mcpSuccessRate,
+              toolSuccessRate: config.toolSuccessRate,
+              commandSuccessRate: config.commandSuccessRate,
+              failuresByCategory: config.failuresByCategory,
+              tools: config.tools,
+              commands: config.commands,
+              sessionCount: Object.keys(config.sessions).length,
+              legacySessionEvents: config.legacySessionEvents,
+            },
+          ]),
+        ),
+      };
+    } else if (mode === "sessions") {
+      const groups = new Map<string, typeof all>();
+      for (const event of all) {
+        const key = `${event.configId}/${event.sessionId}`;
+        const group = groups.get(key) ?? [];
+        group.push(event);
+        groups.set(key, group);
+      }
+      result = {
+        mode,
+        matchedEvents: all.length,
+        sessions: [...groups.entries()].slice(-limit).map(([key, events]) => ({
+          key,
+          eventCount: events.length,
+          start: events[0]?.timestamp,
+          end: events.at(-1)?.timestamp,
+          tools: events
+            .filter((event) => event.event.event === "tool_call")
+            .reduce<Record<string, number>>((counts, event) => {
+              if (event.event.event === "tool_call")
+                counts[event.event.tool] = (counts[event.event.tool] ?? 0) + 1;
+              return counts;
+            }, {}),
+          failures: events
+            .filter((event) => "success" in event.event && !event.event.success)
+            .map((event) => ({
+              timestamp: event.timestamp,
+              event: event.event.event,
+              ...("tool" in event.event ? { tool: event.event.tool } : {}),
+              ...("errorCategory" in event.event && event.event.errorCategory
+                ? { category: event.event.errorCategory }
+                : {}),
+            })),
+        })),
+      };
+    } else {
+      result = {
+        mode,
+        matchedEvents: all.length,
+        events: all.slice(-limit).map((item) => ({
+          timestamp: item.timestamp,
+          configId: item.configId,
+          sessionId: item.sessionId,
+          level: item.level,
+          event:
+            item.event.event === "tool_call"
+              ? Object.fromEntries(
+                  Object.entries(item.event).filter(([key]) => key !== "diagnosticDetails"),
+                )
+              : item.event,
+          runtime: item.runtime
+            ? {
+                agentDirVersion: item.runtime.agentDirVersion,
+                nodeMajor: item.runtime.nodeMajor,
+                os: item.runtime.os,
+                arch: item.runtime.arch,
+                mcpClientName: item.runtime.mcpClientName,
+                mcpClientVersion: item.runtime.mcpClientVersion,
+              }
+            : undefined,
+          project: item.project
+            ? {
+                language: item.project.language,
+                framework: item.project.framework,
+                packageManager: item.project.packageManager,
+                hasGit: item.project.hasGit,
+                hasCodegraph: item.project.hasCodegraph,
+                projectSize: item.project.projectSize,
+              }
+            : undefined,
+        })),
+      };
+    }
+    const maxBytes = outputBytesArg(args.maxBytes);
+    const serialized = JSON.stringify(result);
+    if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
+    return {
+      mode,
+      matchedEvents: all.length,
+      truncated: true,
+      preview: serialized.slice(0, Math.max(0, maxBytes - 200)),
+      note: "Reduce limit or filter by profile/session/time range to retrieve a smaller result.",
+    };
   }
   switch (name) {
     case "ast_grep_search": {
@@ -1597,24 +1788,6 @@ function linuxDistribution(): { distroId?: string; distroName?: string; distroVe
   } catch {
     return {};
   }
-}
-
-function diagnosticToolDetails(input: unknown, output: unknown): Record<string, unknown> {
-  const serialize = (value: unknown): unknown => {
-    try {
-      const json = JSON.stringify(value);
-      if (json === undefined) return null;
-      if (Buffer.byteLength(json, "utf8") <= 64_000) return value;
-      return {
-        truncated: true,
-        byteLength: Buffer.byteLength(json, "utf8"),
-        preview: json.slice(0, 64_000),
-      };
-    } catch {
-      return { serializationFailed: true };
-    }
-  };
-  return { input: serialize(input), output: serialize(output) };
 }
 
 function telemetryHash(value: string): string {
