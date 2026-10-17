@@ -49,6 +49,14 @@ For a temporary Wormhole endpoint:
 agent-dir . --random --tunnel wormhole
 ```
 
+To expose local telemetry analytics to the connected agent, opt in explicitly when starting Agent Dir:
+
+```bash
+agent-dir . --analytics
+```
+
+This grants the connected agent access to persisted Agent Dir telemetry across profiles and sessions. Keep it disabled unless the remote agent needs telemetry analysis. It does not enable telemetry collection; configure telemetry separately with `agent-dir telemetry enable <level>`.
+
 For a configured Wormhole subdomain:
 
 ```bash

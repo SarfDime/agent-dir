@@ -72,6 +72,7 @@ const { values, positionals } = parseArgs({
     follow: { type: "boolean" },
     all: { type: "boolean" },
     yes: { type: "boolean", short: "y" },
+    analytics: { type: "boolean" },
   },
   allowPositionals: true,
   allowNegative: true,
@@ -513,6 +514,7 @@ const serena = new SerenaIntegration(directory);
 const serenaTools = await serena.prepare();
 if (serenaTools.length) bannerOptions.serena = serenaTools.map((item) => item.name);
 if (isAstGrepAvailable()) bannerOptions.astGrep = true;
+if (values.analytics) bannerOptions.analytics = true;
 printBanner(bannerOptions);
 
 const telemetrySessionId = randomUUID();
@@ -523,6 +525,7 @@ const server = await startServer({
   commandConfig,
   codeGraph,
   serena,
+  analytics: values.analytics === true,
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
     ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),

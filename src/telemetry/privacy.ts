@@ -153,15 +153,6 @@ export function createTelemetryEnvelope(
     event: sanitizeAnonymousEvent(event),
   };
 
-  if (
-    level === "diagnostic" &&
-    event.event === "tool_call" &&
-    event.diagnosticDetails &&
-    envelope.event.event === "tool_call"
-  ) {
-    envelope.event.diagnosticDetails = event.diagnosticDetails;
-  }
-
   if (level === "basic" || level === "detailed" || level === "diagnostic") {
     if (runtime) envelope.runtime = sanitizeRuntimeContext(runtime);
   }

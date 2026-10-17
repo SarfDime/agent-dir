@@ -36,6 +36,67 @@ async function request(
   return (await response.json()) as Record<string, unknown>;
 }
 
+test("telemetry analytics is only exposed when explicitly enabled", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-analytics-"));
+  try {
+    for (const enabled of [false, true]) {
+      const handler = createMcpHandler(root, {}, { level: "none" }, undefined, undefined, enabled);
+      const response = await handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/list",
+            params: { _meta: META },
+          }),
+        }),
+      );
+      const body = (await response.json()) as { result?: { tools?: Array<{ name: string }> } };
+      const names = body.result?.tools?.map((item) => item.name) ?? [];
+      assert.equal(names.includes("telemetry_analytics"), enabled);
+      if (enabled) {
+        const analyticsResponse = await handler(
+          new Request("http://localhost/mcp", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              accept: "application/json, text/event-stream",
+              "mcp-protocol-version": "2026-07-28",
+              "mcp-method": "tools/call",
+              "mcp-name": "telemetry_analytics",
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 2,
+              method: "tools/call",
+              params: {
+                name: "telemetry_analytics",
+                arguments: { mode: "summary", maxBytes: 8000 },
+                _meta: META,
+              },
+            }),
+          }),
+        );
+        const analyticsBody = (await analyticsResponse.json()) as {
+          result?: {
+            isError?: boolean;
+            mode?: string;
+            matchedEvents?: number;
+          };
+        };
+        assert.equal(analyticsBody.result?.isError, undefined);
+        assert.equal(analyticsBody.result?.mode, "summary", JSON.stringify(analyticsBody));
+        assert.equal(typeof analyticsBody.result?.matchedEvents, "number");
+      }
+      handler.closeSubscriptions();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("MCP protocol requests are recorded separately from tool calls", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {
