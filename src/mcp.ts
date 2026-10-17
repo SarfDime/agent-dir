@@ -16,7 +16,8 @@ import { runCommand } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile, readRange } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
-import { runNpm } from "./tools/npm.js";
+import { runPackageScript } from "./tools/package-scripts.js";
+
 import {
   getSkill,
   invalidateSkillDiscoveryCache,
@@ -261,7 +262,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "validate",
-    "Run a unified project validation pass: lightweight diagnostics first, then explicitly requested allowed npm scripts. Use level=diagnostics for cheap checks and request scripts only when executable validation is needed.",
+    "Run a unified project validation pass: lightweight diagnostics first, then explicitly requested allowed package scripts. Use level=diagnostics for cheap checks and request scripts only when executable validation is needed.",
     {
       level: { type: "string", enum: ["diagnostics", "scripts", "full"], default: "diagnostics" },
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
@@ -278,8 +279,8 @@ const baseTools: ToolDefinition[] = [
     ["path"],
   ),
   tool(
-    "run_npm_batch",
-    "Run one or more explicitly allowed npm scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
+    "run_package_scripts_batch",
+    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
     {
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
@@ -371,7 +372,8 @@ export function createMcpHandler(
     telemetry.level === "detailed" || telemetry.level === "diagnostic"
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
       : undefined;
-  const npmAllowed = commandConfig.npm?.allowedScripts ?? [];
+  const allowedScripts = commandConfig.scripts?.allowedScripts ?? [];
+  const packageManager = commandConfig.packageManager ?? "npm";
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
   const subscriptions = new Set<Subscription>();
@@ -514,7 +516,7 @@ export function createMcpHandler(
           },
           serverInfo: SERVER_INFO,
           instructions: buildAgentInstructions(
-            npmAllowed,
+            allowedScripts,
             allowedCommands,
             blacklistedCommands,
             await codeGraph.capability(),
@@ -563,7 +565,7 @@ export function createMcpHandler(
               capabilities: capabilities(),
               _meta: SERVER_INFO_META,
               instructions: buildDiscoveryInstructions(
-                npmAllowed,
+                allowedScripts,
                 allowedCommands,
                 await codeGraph.capability(),
               ),
@@ -627,7 +629,8 @@ export function createMcpHandler(
               toolName,
               argumentsValue,
               root,
-              npmAllowed,
+              allowedScripts,
+              packageManager,
               allowedCommands,
               blacklistedCommands,
               notify,
@@ -780,7 +783,7 @@ export function createMcpHandler(
                     uri: INSTRUCTIONS_URI,
                     mimeType: "text/markdown",
                     text: buildAgentInstructions(
-                      npmAllowed,
+                      allowedScripts,
                       allowedCommands,
                       blacklistedCommands,
                       await codeGraph.capability(),
@@ -807,7 +810,7 @@ export function createMcpHandler(
                     mimeType: "application/json",
                     text: JSON.stringify(
                       buildAgentCapabilities(
-                        npmAllowed,
+                        allowedScripts,
                         allowedCommands,
                         blacklistedCommands,
                         await codeGraph.capability(),
@@ -1046,11 +1049,11 @@ function serenaToolDefinition(item: SerenaTool): ToolDefinition {
 }
 
 function buildDiscoveryInstructions(
-  npmAllowed: string[],
+  allowedScripts: string[],
   allowedCommands: string[],
   codeGraph: CodeGraphCapability,
 ): string {
-  const scripts = npmAllowed.length ? npmAllowed.join(", ") : "none";
+  const scripts = allowedScripts.length ? allowedScripts.join(", ") : "none";
   const commands = allowedCommands.length ? allowedCommands.join(", ") : "none";
   const graph =
     codeGraph.status === "available"
@@ -1059,17 +1062,19 @@ function buildDiscoveryInstructions(
   const structuralSearch = isAstGrepAvailable()
     ? " Use ast_grep_search for syntax-aware structural pattern matching; use search_code for exact text and codegraph_explore for call/data flow."
     : "";
-  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed npm scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph}${structuralSearch} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed npm scripts: ${scripts}. Allowed commands: ${commands}.`;
+  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed package scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph}${structuralSearch} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed package scripts: ${scripts}. Allowed commands: ${commands}.`;
 }
 
 function buildAgentInstructions(
-  npmAllowed: string[],
+  allowedScripts: string[],
   allowedCommands: string[],
   blacklistedCommands: string[],
   codeGraph: CodeGraphCapability,
   analyticsEnabled = false,
 ): string {
-  const npm = npmAllowed.length ? npmAllowed.map((item) => `- ${item}`).join("\n") : "- none";
+  const scripts = allowedScripts.length
+    ? allowedScripts.map((item) => `- ${item}`).join("\n")
+    : "- none";
   const commands = allowedCommands.length
     ? allowedCommands.map((item) => `- ${item}`).join("\n")
     : "- none";
@@ -1085,11 +1090,11 @@ function buildAgentInstructions(
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- For semantic navigation, use Serena tools first when available: serena_find_symbol for definitions and serena_find_referencing_symbols for callers/references; use supported Serena symbol-edit tools for targeted edits. If Serena returns no match or errors, verify the path/name and fall back to find_symbol/search_code.\n- Use ast_grep_search when syntax shape matters, not for literal text. Specify lang and narrow globs whenever possible; start with a small maxResults and expand only if needed.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with Serena and native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested npm scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed npm scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed npm scripts:\n${npm}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: Serena tools first when available; fall back to find_symbol/find_references/search_code on empty or failed results.\n- Structural syntax matching: ast_grep_search with explicit language and narrow globs.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted npm script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- For semantic navigation, use Serena tools first when available: serena_find_symbol for definitions and serena_find_referencing_symbols for callers/references; use supported Serena symbol-edit tools for targeted edits. If Serena returns no match or errors, verify the path/name and fall back to find_symbol/search_code.\n- Use ast_grep_search when syntax shape matters, not for literal text. Specify lang and narrow globs whenever possible; start with a small maxResults and expand only if needed.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with Serena and native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested package scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed package scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed package scripts:\n${scripts}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: Serena tools first when available; fall back to find_symbol/find_references/search_code on empty or failed results.\n- Structural syntax matching: ast_grep_search with explicit language and narrow globs.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted package script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function buildAgentCapabilities(
-  npmAllowed: string[],
+  allowedScripts: string[],
   allowedCommands: string[],
   blacklistedCommands: string[],
   codeGraph: CodeGraphCapability,
@@ -1105,7 +1110,7 @@ function buildAgentCapabilities(
     ],
     resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
     execution: {
-      npmScripts: [...npmAllowed],
+      allowedScripts: [...allowedScripts],
       commands: [...allowedCommands],
       blacklistedCommands: [...blacklistedCommands],
     },
@@ -1119,7 +1124,7 @@ function buildAgentCapabilities(
         symbolNavigation: ["find_symbol", "find_references"],
         reading: ["read_range"],
         editing: ["apply_changes"],
-        validation: ["validate", "targeted npm script"],
+        validation: ["validate", "targeted package script"],
         ...(analyticsEnabled ? { telemetryAnalytics: "telemetry_analytics" } : {}),
       },
       avoid: [
@@ -1148,7 +1153,8 @@ async function callTool(
   name: string,
   args: Record<string, unknown>,
   root: string,
-  npmAllowed: string[],
+  allowedScripts: string[],
+  packageManager: "npm" | "pnpm" | "yarn" | "bun",
   allowedCommands: string[],
   blacklistedCommands: string[],
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
@@ -1461,7 +1467,10 @@ async function callTool(
         JSON.stringify({
           ...overview,
           package: pkg,
-          execution: { npmScripts: [...npmAllowed], commands: [...allowedCommands] },
+          execution: {
+            allowedScripts: [...allowedScripts],
+            commands: [...allowedCommands],
+          },
         }),
         Math.max(1, maxBytes - 128),
       );
@@ -1481,7 +1490,7 @@ async function callTool(
           : args.scripts !== undefined
             ? stringArray(args.scripts, "scripts")
             : level === "full"
-              ? ["check", "test"].filter((script) => npmAllowed.includes(script))
+              ? ["check", "test"].filter((script) => allowedScripts.includes(script))
               : [];
       if (scripts.length > 10) throw new Error("validate accepts at most 10 scripts per call.");
       const checks: Array<Record<string, unknown>> = [
@@ -1493,9 +1502,16 @@ async function callTool(
         },
       ];
       for (const script of scripts) {
-        const result = await runNpm(root, script, 120000, npmAllowed, signal);
+        const result = await runPackageScript(
+          root,
+          script,
+          120000,
+          allowedScripts,
+          signal,
+          packageManager,
+        );
         checks.push({
-          kind: "npm",
+          kind: "package-script",
           script,
           ok: result.exitCode === 0,
           result,
@@ -1514,7 +1530,7 @@ async function callTool(
       } else {
         const perCheckBudget = Math.max(256, Math.floor((maxBytes - 256) / checks.length));
         const compactChecks = checks.map((check) => {
-          if (check.kind === "npm" && isRecord(check.result))
+          if (check.kind === "package-script" && isRecord(check.result))
             return { ...check, result: boundCommandResult(check.result, perCheckBudget) };
           if (check.kind === "diagnostics" && Array.isArray(check.issues))
             return { ...check, issues: boundedItems(check.issues, perCheckBudget).items };
@@ -1543,13 +1559,20 @@ async function callTool(
     case "file_info":
       structuredContent = await fileInfo(root, String(args.path));
       break;
-    case "run_npm_batch": {
+    case "run_package_scripts_batch": {
       const output = [];
       const scripts = stringArray(args.scripts, "scripts");
       if (scripts.length > 10)
-        throw new Error("run_npm_batch accepts at most 10 scripts per call.");
+        throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
       for (const script of scripts) {
-        const value = await runNpm(root, script, 120000, npmAllowed, signal);
+        const value = await runPackageScript(
+          root,
+          script,
+          120000,
+          allowedScripts,
+          signal,
+          packageManager,
+        );
         output.push(value);
         if (value.exitCode !== 0) break;
       }
@@ -1866,9 +1889,10 @@ function toolTelemetryMetrics(
 function commandTelemetryDescriptor(
   toolName: string,
 ): { family: string; operation: string } | undefined {
-  if (toolName === "run_npm_batch") return { family: "npm", operation: "batch" };
+  if (toolName === "run_package_scripts_batch")
+    return { family: "package-scripts", operation: "batch" };
   if (toolName === "run_command_batch") return { family: "command", operation: "batch" };
-  if (toolName === "validate") return { family: "npm", operation: "validate" };
+  if (toolName === "validate") return { family: "package-scripts", operation: "validate" };
   return undefined;
 }
 

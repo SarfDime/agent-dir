@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import type { PackageManager } from "../types.js";
 import type { CommandResult } from "./commands.js";
 import {
   appendBoundedOutput,
@@ -13,14 +14,15 @@ interface PackageJson {
   scripts?: Record<string, string>;
 }
 
-export function runNpm(
+export function runPackageScript(
   root: string,
   script: string,
   timeoutMs = 120000,
   allowedScripts: string[] = [],
   signal?: AbortSignal,
+  packageManager: PackageManager = "npm",
 ): Promise<CommandResult> {
-  if (!/^[A-Za-z0-9:_-]+$/.test(script)) throw new Error("Invalid npm script name.");
+  if (!/^[A-Za-z0-9:_-]+$/.test(script)) throw new Error("Invalid package script name.");
   return (async () => {
     let packageJson: PackageJson;
     try {
@@ -31,11 +33,11 @@ export function runNpm(
       throw new Error("No valid package.json found.");
     }
     if (!packageJson.scripts?.[script])
-      throw new Error(`npm script '${script}' does not exist in package.json.`);
+      throw new Error(`Package script '${script}' does not exist in package.json.`);
     if (!allowedScripts.includes(script))
-      throw new Error(`npm script '${script}' is not allowed by this profile.`);
+      throw new Error(`Package script '${script}' is not allowed by this profile.`);
     return new Promise<CommandResult>((resolve, reject) => {
-      const executable = process.platform === "win32" ? "npm.cmd" : "npm";
+      const executable = process.platform === "win32" ? `${packageManager}.cmd` : packageManager;
       const child = spawn(executable, ["run", script], {
         cwd: root,
         shell: false,
@@ -51,14 +53,14 @@ export function runNpm(
         finished = true;
         clearTimeout(timer);
         terminateProcessTree(child);
-        reject(new Error(`npm run ${script} was aborted.`));
+        reject(new Error(`${packageManager} run ${script} was aborted.`));
       };
       timer = setTimeout(() => {
         if (finished) return;
         finished = true;
         terminateProcessTree(child);
         signal?.removeEventListener("abort", abort);
-        reject(new Error(`npm run ${script} timed out after ${timeoutMs}ms.`));
+        reject(new Error(`${packageManager} run ${script} timed out after ${timeoutMs}ms.`));
       }, timeoutMs);
       if (signal?.aborted) {
         abort();
@@ -84,7 +86,12 @@ export function runNpm(
           finished = true;
           clearTimeout(timer);
           signal?.removeEventListener("abort", abort);
-          resolve({ command: `npm run ${script}`, exitCode: code ?? 1, stdout, stderr });
+          resolve({
+            command: `${packageManager} run ${script}`,
+            exitCode: code ?? 1,
+            stdout,
+            stderr,
+          });
         }
       });
     });

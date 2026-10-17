@@ -1,7 +1,9 @@
 import type { ChildProcess } from "node:child_process";
 import type { TelemetryConfig } from "./telemetry/types.js";
 
-export interface NpmConfig {
+export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
+export interface PackageScriptsConfig {
   allowedScripts: string[];
 }
 
@@ -17,7 +19,8 @@ export interface Profile {
   subdomain?: string;
   hostname?: string;
   token?: string;
-  npm?: NpmConfig;
+  packageManager?: PackageManager;
+  scripts?: PackageScriptsConfig;
   commands?: string[];
   blacklistedCommands?: string[];
 }
@@ -29,7 +32,8 @@ export interface AgentConfig {
 }
 
 export interface CommandConfig {
-  npm?: NpmConfig;
+  packageManager?: PackageManager;
+  scripts?: PackageScriptsConfig;
   commands?: string[];
   blacklistedCommands?: string[];
 }

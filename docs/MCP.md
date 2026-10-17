@@ -48,8 +48,8 @@ The core public tool set is intentionally small:
 | `read_range` | Read a bounded line range from a UTF-8 file |
 | `apply_changes` | Create, patch, or delete files |
 | `file_info` | Inspect filesystem metadata |
-| `validate` | Run lightweight diagnostics and explicitly requested allowed npm scripts |
-| `run_npm_batch` | Run explicitly allowlisted npm scripts sequentially |
+| `validate` | Run lightweight diagnostics and explicitly requested allowed package scripts |
+| `run_package_scripts_batch` | Run explicitly allowlisted package scripts sequentially |
 | `run_command_batch` | Run explicitly allowlisted executables sequentially without a shell |
 | `ast_grep_search` | Optional syntax-aware AST pattern search when ast-grep is installed |
 | `codegraph_explore` | Optional structural code intelligence when CodeGraph is available |
@@ -65,7 +65,7 @@ Batch command operations execute sequentially and stop at the first failed comma
 
 ## Command execution policy
 
-npm scripts and other executables use separate allowlists. An executable not in the configured allowlist is rejected, and configured `blacklistedCommands` prefixes override the allowlist. Commands are launched without a shell.
+Package scripts and other executables use separate allowlists. An executable not in the configured allowlist is rejected, and configured `blacklistedCommands` prefixes override the allowlist. Commands are launched without a shell.
 
 Git is run through `run_command_batch` when `git` is allowlisted. There are no dedicated Git MCP tools. This keeps the advertised tool set small while preserving explicit executable and argument restrictions. Avoid allowing shells or interpreters unless broader command execution is intentional.
 

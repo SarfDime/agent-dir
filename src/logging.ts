@@ -20,7 +20,7 @@ const color = (value: string, code: string): string => `${code}${value}${RESET}`
 
 const TOOL_ICONS: Record<string, string> = {
   read_range: "📐",
-  run_npm_batch: "🔧",
+  run_package_scripts_batch: "🔧",
   run_command_batch: "🛠️",
   find_files: "🧭",
   search_code: "🧠",
@@ -58,7 +58,7 @@ const MCP_METHOD_ICONS: Record<string, string> = {
 const TOOL_NAME_WIDTH = Math.max(...Object.keys(TOOL_ICONS).map((name) => name.length));
 const MCP_METHOD_NAME_WIDTH = Math.max(...Object.keys(MCP_METHOD_ICONS).map((name) => name.length));
 const TOOL_COLORS: Record<string, string> = {
-  run_npm_batch: BRIGHT_BLUE,
+  run_package_scripts_batch: BRIGHT_BLUE,
   run_command_batch: BRIGHT_CYAN,
 };
 
@@ -173,7 +173,7 @@ export function printHelp(): void {
     "      --cloudflared-token <token> Cloudflare Tunnel connector token (stored in config)",
   );
   writeLine("      --directory <path>     Directory to expose");
-  writeLine("      --npm <scripts>        Comma-separated allowed npm scripts");
+  writeLine("      --scripts <scripts>    Comma-separated allowed package scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
   writeLine("      --token <token>        Explicit Bearer token");
@@ -210,7 +210,8 @@ export function printBanner(options: {
   subdomain?: string;
   hostname?: string;
   token?: string;
-  npmScripts?: string[];
+  allowedScripts?: string[];
+  packageManager?: "npm" | "pnpm" | "yarn" | "bun";
   commands?: string[];
   blacklistedCommands?: string[];
   codeGraph?: boolean;
@@ -281,7 +282,7 @@ export function printBanner(options: {
     color(toolLabel("read_range"), GREEN),
     color(toolLabel("apply_changes"), BRIGHT_MAGENTA),
     color(toolLabel("validate"), BRIGHT_YELLOW),
-    color(toolLabel("run_npm_batch"), BRIGHT_BLUE),
+    color(toolLabel("run_package_scripts_batch"), BRIGHT_BLUE),
     color(toolLabel("run_command_batch"), BRIGHT_CYAN),
     color(toolLabel("file_info"), YELLOW),
   ];
@@ -293,14 +294,15 @@ export function printBanner(options: {
   printGrid(toolRows, 2);
   writeLine(boxBottom(BRIGHT_BLUE));
   writeLine("");
-  if (options.npmScripts?.length) {
+  if (options.allowedScripts?.length) {
+    const packageManager = options.packageManager ?? "npm";
     writeLine(
-      `  ${color("◆ NPM SCRIPTS", BRIGHT_YELLOW)}  ${color("· scripts are allowlisted", "\x1b[90m")}`,
+      `  ${color(`◆ ${packageManager.toUpperCase()} SCRIPTS`, BRIGHT_YELLOW)}  ${color("· scripts are allowlisted", "\x1b[90m")}`,
     );
     printGrid(
-      options.npmScripts.map(
+      options.allowedScripts.map(
         (script) =>
-          `${color("›", BRIGHT_YELLOW)} ${color("npm run", BRIGHT_YELLOW)} ${color(script, BRIGHT_CYAN)}`,
+          `${color("›", BRIGHT_YELLOW)} ${color(`${packageManager} run`, BRIGHT_YELLOW)} ${color(script, BRIGHT_CYAN)}`,
       ),
       2,
     );

@@ -5,7 +5,7 @@ This guide covers first-run setup, saved profiles, authentication tokens, tunnel
 ## Requirements
 
 - Node.js 24 or newer
-- npm
+- npm, pnpm, Yarn, or Bun, depending on the project
 - Wormhole CLI or `cloudflared` CLI for remote access
 
 ## First-run setup
@@ -28,14 +28,14 @@ agent-dir . --random --tunnel wormhole
 
 ## Profiles
 
-Profiles store the project directory, port, tunnel settings, allowed npm scripts, allowed non-npm commands, and blocked command prefixes.
+Profiles store the project directory, port, tunnel settings, allowed package scripts, allowed executables, and blocked command prefixes.
 
 ```bash
 agent-dir config add my-project \
   --directory ~/src/my-project \
   --tunnel wormhole \
   --subdomain my-project-x7k4m2 \
-  --npm typecheck,lint,format,test,build \
+  --scripts typecheck,lint,format,test,build \
   --command grep,find,rg,git \
   --blacklist "git commit,git push --force"
 ```
@@ -57,7 +57,7 @@ agent-dir config delete --all
 
 Deletion asks for confirmation by default. Use `--yes` for automation. The older `config remove <name>` command is an alias for `config delete <name>`.
 
-Profile configuration is stored at `~/.config/agent-dir/config.json`, outside the project repository, with user-only permissions. CLI options can override saved values for a single run. `config show` redacts configured tunnel tokens.
+Profile configuration is stored at `~/.config/agent-dir/config.json`, outside the project repository, with user-only permissions. CLI options can override saved values for a single run. `config show` redacts configured tunnel tokens. Package scripts are configured with `packageManager` and `scripts.allowedScripts`; if upgrading from an older config, move `npm.allowedScripts` to `scripts.allowedScripts` and set `packageManager` to the project\u2019s manager.
 
 ### Example profile
 
@@ -65,6 +65,10 @@ Profile configuration is stored at `~/.config/agent-dir/config.json`, outside th
 {
   "directory": "~/src/my-project",
   "port": 3002,
+  "packageManager": "pnpm",
+  "scripts": {
+    "allowedScripts": ["typecheck", "lint", "test"]
+  },
   "tunnel": "cloudflared",
   "defaultTunnel": "cloudflared",
   "tunnels": {
@@ -133,12 +137,12 @@ Clients should send `Authorization: Bearer <token>`. Query-string tokens are sup
 
 ## Command permissions
 
-npm scripts and general executables have separate allowlists.
+Package scripts and general executables have separate allowlists.
 
-Allow npm scripts:
+Allow package scripts:
 
 ```text
---npm typecheck,lint,format,test,build
+--scripts typecheck,lint,format,test,build
 ```
 
 Allow executables:

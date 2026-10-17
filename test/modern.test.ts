@@ -427,7 +427,7 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     "project_context",
     "read_range",
     "run_command_batch",
-    "run_npm_batch",
+    "run_package_scripts_batch",
     "search_code",
     "validate",
     ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
@@ -842,7 +842,7 @@ test("low-level read and command outputs honor maxBytes", async () => {
       JSON.stringify({ scripts: { check: "node -e 'console.log(\"x\".repeat(5000))'" } }),
     );
     const handler = createMcpHandler(root, {
-      npm: { allowedScripts: ["check"] },
+      scripts: { allowedScripts: ["check"] },
     });
 
     const range = await handler(
@@ -906,7 +906,7 @@ test("low-level read and command outputs honor maxBytes", async () => {
 
     const command = await handler(
       requestFor(4, "tools/call", {
-        name: "run_npm_batch",
+        name: "run_package_scripts_batch",
         arguments: { scripts: ["check"], maxBytes: 1024 },
       }),
     );
@@ -983,14 +983,14 @@ test("file, symbol, and code lookups return bounded context", async () => {
   }
 });
 
-test("validate composes diagnostics with explicitly allowed npm scripts", async () => {
+test("validate composes diagnostics with explicitly allowed package scripts", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     await writeFile(
       path.join(root, "package.json"),
       JSON.stringify({ scripts: { check: "node -e 'process.exit(0)'" } }),
     );
-    const handler = createMcpHandler(root, { npm: { allowedScripts: ["check"] } });
+    const handler = createMcpHandler(root, { scripts: { allowedScripts: ["check"] } });
     const response = await handler(
       requestFor(4, "tools/call", {
         name: "validate",
@@ -1010,7 +1010,7 @@ test("validate composes diagnostics with explicitly allowed npm scripts", async 
       body.result.structuredContent.checks.map((check) => [check.kind, check.script, check.ok]),
       [
         ["diagnostics", undefined, true],
-        ["npm", "check", true],
+        ["package-script", "check", true],
       ],
     );
   } finally {
@@ -1081,7 +1081,7 @@ test("project_context reports the active command policy", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     const handler = createMcpHandler(root, {
-      npm: { allowedScripts: ["check", "test"] },
+      scripts: { allowedScripts: ["check", "test"] },
       commands: ["git", "node", "npm"],
       blacklistedCommands: ["git commit"],
     });
@@ -1093,10 +1093,12 @@ test("project_context reports the active command policy", async () => {
     );
     assert.equal(response.status, 200);
     const result = (await response.json()) as {
-      result: { structuredContent: { execution: { npmScripts: string[]; commands: string[] } } };
+      result: {
+        structuredContent: { execution: { allowedScripts: string[]; commands: string[] } };
+      };
     };
     assert.deepEqual(result.result.structuredContent.execution, {
-      npmScripts: ["check", "test"],
+      allowedScripts: ["check", "test"],
       commands: ["git", "node", "npm"],
     });
   } finally {
@@ -1115,10 +1117,12 @@ test("project_context defaults to an empty command policy", async () => {
       }),
     );
     const result = (await response.json()) as {
-      result: { structuredContent: { execution: { npmScripts: string[]; commands: string[] } } };
+      result: {
+        structuredContent: { execution: { allowedScripts: string[]; commands: string[] } };
+      };
     };
     assert.deepEqual(result.result.structuredContent.execution, {
-      npmScripts: [],
+      allowedScripts: [],
       commands: [],
     });
   } finally {
@@ -1579,7 +1583,7 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
   try {
     const handler = createMcpHandler(root, {
-      npm: { allowedScripts: ["check", "test"] },
+      scripts: { allowedScripts: ["check", "test"] },
       commands: ["git", "rg"],
     });
     const listed = await handler(requestFor(1, "resources/list"));
@@ -1613,14 +1617,14 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
     assert.ok(capabilityText);
     const capabilityDocument = JSON.parse(capabilityText) as {
       execution: {
-        npmScripts: string[];
+        allowedScripts: string[];
         commands: string[];
         blacklistedCommands: string[];
       };
       efficiency: { preferred: { orientation: string } };
     };
     assert.deepEqual(capabilityDocument.execution, {
-      npmScripts: ["check", "test"],
+      allowedScripts: ["check", "test"],
       commands: ["git", "rg"],
       blacklistedCommands: [],
     });
@@ -1648,7 +1652,7 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
     );
 
     const handler = createMcpHandler(root, {
-      npm: { allowedScripts: ["check"] },
+      scripts: { allowedScripts: ["check"] },
       commands: ["git"],
     });
 
@@ -1657,13 +1661,13 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
       result: {
         structuredContent: {
           package: { name: string };
-          execution: { npmScripts: string[]; commands: string[] };
+          execution: { allowedScripts: string[]; commands: string[] };
         };
       };
     };
     assert.equal(context.result.structuredContent.package.name, "demo");
     assert.deepEqual(context.result.structuredContent.execution, {
-      npmScripts: ["check"],
+      allowedScripts: ["check"],
       commands: ["git"],
     });
 

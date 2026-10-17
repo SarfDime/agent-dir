@@ -40,7 +40,11 @@ export function mergeProfile(profile: Profile, overrides: CommandConfig = {}): C
   return {
     ...profile,
     ...overrides,
-    npm: { ...(profile.npm ?? { allowedScripts: [] }), ...(overrides.npm ?? {}) },
+    scripts: {
+      ...(profile.scripts ?? { allowedScripts: [] }),
+      ...(overrides.scripts ?? {}),
+    },
+    packageManager: overrides.packageManager ?? profile.packageManager ?? "npm",
   };
 }
 
@@ -96,12 +100,17 @@ function isProfile(value: unknown): value is Profile {
       if (cloudflared.token !== undefined && typeof cloudflared.token !== "string") return false;
     }
   }
-  if (profile.npm !== undefined) {
-    if (!profile.npm || typeof profile.npm !== "object") return false;
-    const npm = profile.npm as Record<string, unknown>;
+  if (
+    profile.packageManager !== undefined &&
+    !["npm", "pnpm", "yarn", "bun"].includes(String(profile.packageManager))
+  )
+    return false;
+  if (profile.scripts !== undefined) {
+    if (!profile.scripts || typeof profile.scripts !== "object") return false;
+    const scripts = profile.scripts as Record<string, unknown>;
     if (
-      !Array.isArray(npm.allowedScripts) ||
-      npm.allowedScripts.some((item) => typeof item !== "string")
+      !Array.isArray(scripts.allowedScripts) ||
+      scripts.allowedScripts.some((item) => typeof item !== "string")
     )
       return false;
   }

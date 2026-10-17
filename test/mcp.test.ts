@@ -152,7 +152,7 @@ test("MCP telemetry records command, session, and detailed project context", asy
     const configId = `test-mcp-commands-${process.pid}-${Date.now()}`;
     const handler = createMcpHandler(
       root,
-      { npm: { allowedScripts: ["check"] }, commands: ["git"] },
+      { scripts: { allowedScripts: ["check"] }, commands: ["git"] },
       { level: "detailed", configId },
     );
 

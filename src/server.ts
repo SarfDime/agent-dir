@@ -421,11 +421,11 @@ export function getMcpLog(
             ? `${path}:${startLine}-${endLine}`
             : path;
         }
-        case "run_npm_batch": {
+        case "run_package_scripts_batch": {
           const scripts = Array.isArray(args.scripts)
             ? args.scripts.filter((value): value is string => typeof value === "string")
             : [];
-          return scripts.map((script) => `npm run ${script}`).join(", ");
+          return scripts.map((script) => `package script: ${script}`).join(", ");
         }
         case "search_code": {
           const query = typeof args.query === "string" ? args.query : "";
