@@ -18,7 +18,12 @@ The server also accepts a query-string token for clients that cannot set an Auth
 
 ## Stateless protocol behavior
 
-The implementation supports MCP protocol version `2026-07-28`. Requests carry protocol version and client capabilities in `params._meta`; this path does not require an initialize handshake or `Mcp-Session-Id`.
+The implementation supports MCP protocol versions `2025-11-25` and `2026-07-28`.
+
+- `2025-11-25` (standard handshake): clients call `initialize`, then `notifications/initialized`, and send `MCP-Protocol-Version` on later requests. If a client requests a version Agent Dir does not support, `initialize` answers with `2025-11-25` so the client can decide whether to continue. Only implemented capabilities (`tools`, `resources`) are advertised. `ping` is supported.
+- `2026-07-28` (stateless): requests carry protocol version and client capabilities in `params._meta`; this path does not require an initialize handshake or `Mcp-Session-Id`. `server/discover` lists both supported versions.
+
+Both versions are covered by HTTP-level contract tests (`test/protocol-contract.test.ts`).
 
 Standard Streamable HTTP requests do not need implementation-specific `MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` headers. If supplied, these headers are validated against the JSON-RPC request and metadata.
 

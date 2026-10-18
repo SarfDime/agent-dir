@@ -82,13 +82,50 @@ test("telemetry analytics is only exposed when explicitly enabled", async () => 
         const analyticsBody = (await analyticsResponse.json()) as {
           result?: {
             isError?: boolean;
-            mode?: string;
-            matchedEvents?: number;
+            resultType?: string;
+            content?: Array<{ type: string; text: string }>;
+            structuredContent?: { mode?: string; matchedEvents?: number; truncated?: boolean };
           };
         };
-        assert.equal(analyticsBody.result?.isError, undefined);
-        assert.equal(analyticsBody.result?.mode, "summary", JSON.stringify(analyticsBody));
-        assert.equal(typeof analyticsBody.result?.matchedEvents, "number");
+        const analyticsResult = analyticsBody.result;
+        assert.equal(analyticsResult?.isError, undefined, JSON.stringify(analyticsBody));
+        assert.equal(analyticsResult?.resultType, "complete");
+        assert.equal(analyticsResult?.content?.[0]?.type, "text");
+        assert.equal(analyticsResult?.structuredContent?.mode, "summary");
+        assert.equal(typeof analyticsResult?.structuredContent?.matchedEvents, "number");
+        for (const mode of ["summary", "sessions", "events"]) {
+          const small = await handler(
+            new Request("http://localhost/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+                "mcp-protocol-version": "2026-07-28",
+                "mcp-method": "tools/call",
+                "mcp-name": "telemetry_analytics",
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 3,
+                method: "tools/call",
+                params: {
+                  name: "telemetry_analytics",
+                  arguments: { mode, maxBytes: 1024 },
+                  _meta: META,
+                },
+              }),
+            }),
+          );
+          const smallBody = (await small.json()) as {
+            result?: {
+              content?: Array<{ text: string }>;
+              structuredContent?: { mode?: string; preview?: unknown; truncated?: boolean };
+            };
+          };
+          assert.equal(smallBody.result?.structuredContent?.mode, mode);
+          assert.equal(smallBody.result?.structuredContent?.preview, undefined);
+          assert.equal(typeof smallBody.result?.structuredContent?.truncated, "boolean");
+        }
       }
       handler.closeSubscriptions();
     }
@@ -258,7 +295,10 @@ test("modern MCP discovery is stateless and advertises skills", async () => {
     const first = await request(root, 1, "server/discover");
     const second = await request(root, 2, "server/discover");
     assert.deepEqual(first.result, second.result);
-    assert.deepEqual((first.result as Record<string, unknown>).supportedVersions, ["2026-07-28"]);
+    assert.deepEqual((first.result as Record<string, unknown>).supportedVersions, [
+      "2026-07-28",
+      "2025-11-25",
+    ]);
     assert.deepEqual(
       ((first.result as Record<string, unknown>).capabilities as Record<string, unknown>)
         .extensions,

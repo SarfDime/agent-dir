@@ -117,10 +117,15 @@ export function startServer({
           return;
         }
         const response = await mcp(request);
-        const mcpResponseBody = await response
-          .clone()
-          .json()
-          .catch(() => undefined);
+        // Streaming (SSE) responses must not be buffered or parsed: the stream stays open.
+        const isStream =
+          response.headers.get("content-type")?.includes("text/event-stream") === true;
+        const mcpResponseBody = isStream
+          ? undefined
+          : await response
+              .clone()
+              .json()
+              .catch(() => undefined);
         const errorDetail = await getResponseErrorDetail(response);
         const mcpLog = getMcpLog(body, mcpResponseBody);
         await sendResponse(res, response);

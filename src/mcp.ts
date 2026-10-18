@@ -32,6 +32,8 @@ import type { CommandConfig } from "./types.js";
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
 const PROTOCOL_VERSION = "2026-07-28";
+const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION];
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
@@ -494,26 +496,20 @@ export function createMcpHandler(
         recordMcpRequest();
         return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
       }
-      const supportedVersions = ["2025-11-25", PROTOCOL_VERSION];
-      if (!supportedVersions.includes(requestedVersion)) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
-          supported: supportedVersions,
-          requested: requestedVersion,
-        });
-      }
+      const supportedVersions = SUPPORTED_PROTOCOL_VERSIONS;
+      // Lifecycle negotiation: answer with a version we support instead of failing,
+      // so older clients can decide whether to continue.
+      const negotiatedVersion = supportedVersions.includes(requestedVersion)
+        ? requestedVersion
+        : LEGACY_PROTOCOL_VERSION;
       mcpSuccess = true;
-      return trackedJson({
+      const initializeResponse = trackedJson({
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          protocolVersion: requestedVersion,
-          capabilities: {
-            tools: { listChanged: true },
-            resources: { subscribe: true, listChanged: true },
-            prompts: { listChanged: true },
-          },
+          protocolVersion: negotiatedVersion,
+          // Only capabilities that are implemented for the legacy handshake.
+          capabilities: { tools: {}, resources: {} },
           serverInfo: SERVER_INFO,
           instructions: buildAgentInstructions(
             allowedScripts,
@@ -524,6 +520,8 @@ export function createMcpHandler(
           ),
         },
       });
+      recordMcpRequest();
+      return initializeResponse;
     }
     if (meta) {
       const clientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"];
@@ -554,6 +552,9 @@ export function createMcpHandler(
     }
     try {
       switch (message.method) {
+        case "ping":
+          mcpSuccess = true;
+          return trackedJson({ jsonrpc: "2.0", id: message.id, result: {} });
         case "server/discover":
           mcpSuccess = true;
           return trackedJson({
@@ -561,7 +562,7 @@ export function createMcpHandler(
             id: message.id,
             result: {
               resultType: "complete",
-              supportedVersions: [PROTOCOL_VERSION],
+              supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
               capabilities: capabilities(),
               _meta: SERVER_INFO_META,
               instructions: buildDiscoveryInstructions(
@@ -1143,7 +1144,7 @@ function buildAgentCapabilities(
 
 function capabilities(): Record<string, unknown> {
   return {
-    tools: { listChanged: true },
+    tools: {},
     resources: { listChanged: true, subscribe: true },
     extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
   };
@@ -1316,16 +1317,7 @@ async function callTool(
         })),
       };
     }
-    const maxBytes = outputBytesArg(args.maxBytes);
-    const serialized = JSON.stringify(result);
-    if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
-    return {
-      mode,
-      matchedEvents: all.length,
-      truncated: true,
-      preview: serialized.slice(0, Math.max(0, maxBytes - 200)),
-      note: "Reduce limit or filter by profile/session/time range to retrieve a smaller result.",
-    };
+    return completeToolResult(fitAnalyticsResult(result, outputBytesArg(args.maxBytes)));
   }
   switch (name) {
     case "ast_grep_search": {
@@ -1753,6 +1745,55 @@ function mcpHeaderValuesEqual(
   if (type === "integer")
     return Number.isSafeInteger(Number(headerValue)) && Number(headerValue) === Number(bodyValue);
   return bodyValue === headerValue;
+}
+
+const ANALYTICS_TRUNCATION_NOTE =
+  "Result exceeded maxBytes; narrow by profile/session/time range or lower limit.";
+
+/** Keeps analytics output valid structured data: trims arrays or detail keys, never cuts JSON text. */
+function fitAnalyticsResult(
+  result: Record<string, unknown>,
+  maxBytes: number,
+): Record<string, unknown> {
+  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (size(result) <= maxBytes) return { ...result, truncated: false };
+  for (const key of ["events", "sessions"] as const) {
+    const items = result[key];
+    if (!Array.isArray(items)) continue;
+    let kept: unknown[] = items;
+    const build = () => ({
+      ...result,
+      [key]: kept,
+      truncated: true,
+      returned: kept.length,
+      note: ANALYTICS_TRUNCATION_NOTE,
+    });
+    while (kept.length > 0 && size(build()) > maxBytes)
+      kept = kept.slice(Math.ceil(kept.length / 4));
+    return build();
+  }
+  const configs = isRecord(result.configs) ? result.configs : {};
+  const slim = Object.fromEntries(
+    Object.entries(configs).map(([configId, config]) => [
+      configId,
+      isRecord(config)
+        ? Object.fromEntries(
+            Object.entries(config).filter(
+              ([key]) => key !== "tools" && key !== "commands" && key !== "failuresByCategory",
+            ),
+          )
+        : config,
+    ]),
+  );
+  const reduced = { ...result, configs: slim, truncated: true, note: ANALYTICS_TRUNCATION_NOTE };
+  if (size(reduced) <= maxBytes) return reduced;
+  return {
+    mode: result.mode,
+    matchedEvents: result.matchedEvents,
+    configs: Object.keys(configs),
+    truncated: true,
+    note: ANALYTICS_TRUNCATION_NOTE,
+  };
 }
 
 function completeToolResult(structuredContent: unknown): Record<string, unknown> {
@@ -2223,7 +2264,7 @@ function subscriptionResponse(
 }
 
 function writeSse(controller: ReadableStreamDefaultController<Uint8Array>, message: unknown): void {
-  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(message)}\\n\\n`));
+  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(message)}\n\n`));
 }
 
 function json(value: unknown, status = 200): Response {
