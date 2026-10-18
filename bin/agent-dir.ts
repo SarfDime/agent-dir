@@ -18,9 +18,12 @@ import { formatTelemetrySummary } from "../src/telemetry/format.js";
 import {
   ensureTelemetryDirectory,
   migrateLegacyTelemetry,
+  pruneTelemetry,
   readAllTelemetryEvents,
   resetTelemetry,
   TELEMETRY_DIRECTORY,
+  TELEMETRY_RETENTION_BYTES,
+  TELEMETRY_RETENTION_DAYS,
 } from "../src/telemetry/storage.js";
 import { isAstGrepAvailable } from "../src/tools/astgrep.js";
 import { startTunnel } from "../src/tunnel.js";
@@ -125,6 +128,9 @@ if (command === "telemetry") {
     console.log(`Telemetry: ${currentLevel === "none" ? "disabled" : "enabled"}`);
     console.log(`Level: ${currentLevel}`);
     console.log(`Config: ${configPath()}`);
+    console.log(
+      `Retention: ${TELEMETRY_RETENTION_DAYS} days or ${TELEMETRY_RETENTION_BYTES / 1024 / 1024} MB, whichever is reached first`,
+    );
     process.exit(0);
   }
   if (action === "enable") {
@@ -134,6 +140,11 @@ if (command === "telemetry") {
     config.telemetry = { level };
     await saveConfig(config);
     console.log(`✓ Telemetry enabled at ${level} level.`);
+    if (level === "diagnostic") {
+      console.log(
+        "⚠ The diagnostic level is for debugging only. It records the host name, user name and project paths locally and may expose sensitive details. Use it temporarily.",
+      );
+    }
     process.exit(0);
   }
   if (action === "disable") {
@@ -246,6 +257,13 @@ if (command === "telemetry") {
     }
     process.exit(0);
   }
+  if (action === "prune") {
+    const result = pruneTelemetry();
+    console.log(
+      `✓ Telemetry pruned (limits: ${TELEMETRY_RETENTION_DAYS} days, ${TELEMETRY_RETENTION_BYTES / 1024 / 1024} MB): removed ${result.deletedFiles} session file(s) (${result.deletedBytes} bytes), scrubbed legacy raw details from ${result.scrubbedEvents} event(s); ${result.remainingFiles} file(s) / ${result.remainingBytes} bytes remain.`,
+    );
+    process.exit(0);
+  }
   if (action === "reset") {
     if (values.all && telemetryProfile) fail("Use either a profile name or --all, not both.");
     if (!values.all && !telemetryProfile)
@@ -262,7 +280,7 @@ if (command === "telemetry") {
     }
     process.exit(0);
   }
-  fail("Usage: agent-dir telemetry {status|enable|disable|schema|show|summary|reset}");
+  fail("Usage: agent-dir telemetry {status|enable|disable|schema|show|summary|prune|reset}");
 }
 
 if (command === "config") {

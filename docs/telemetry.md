@@ -1,6 +1,6 @@
 # Telemetry interpretation
 
-Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths at standard levels. The opt-in diagnostic level additionally records local troubleshooting metadata, including project paths, hostname, username, process identifiers, full Node version, Linux distribution ID/name/version, kernel version, memory usage, process uptime, and bounded raw tool inputs/outputs or error details. Diagnostic records can contain source code, command arguments, project data, and other sensitive material; they are stored locally and should be enabled only when intended.
+Agent Dir telemetry is a local operational record of MCP activity. It describes what the server handled, how long it took, and where failures occurred without recording project contents, command arguments, tokens, environment variables, or project paths at standard levels. The opt-in diagnostic level additionally records local troubleshooting metadata, including project paths, hostname, username, process identifiers, full Node version, Linux distribution ID/name/version, kernel version, memory usage, process uptime, and process details. Raw tool inputs, tool outputs, command arguments, and error messages are never recorded at any level (Agent Dir 1.2.x recorded bounded raw tool details at the diagnostic level; `agent-dir telemetry prune` scrubs that legacy data). The diagnostic level is for debugging only: its identifying metadata can still be sensitive, so enable it temporarily and disable it afterwards.
 
 ## Data hierarchy
 
@@ -10,7 +10,7 @@ Telemetry is organized as:
 - `anonymous`: operational events without runtime/project context.
 - `basic`: anonymous events plus coarse runtime context.
 - `detailed`: basic context plus coarse project classification.
-- `diagnostic`: detailed context plus identifying/troubleshooting metadata and bounded raw tool input/output or error details. This can contain source code, command arguments, and sensitive project information; it is stored locally. Use only when intended.
+- `diagnostic`: detailed context plus identifying/troubleshooting metadata (project paths, hostname, username, process details). Debugging use only: it can expose sensitive information about your machine and projects, and it is stored locally. Enable it temporarily.
 
 configuration → session → event
 
@@ -100,6 +100,14 @@ Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool.
 - Optional `profile`, `session`, `since`, and `until` filters narrow the dataset. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
 
 Diagnostic-level telemetry can still include identifying runtime metadata, so only enable remote analytics on a connector you trust. The analytics tool is hidden by default and is registered only when the explicit flag is true.
+
+## Retention and maintenance
+
+Recorded telemetry is kept for at most **30 days or 100 MB, whichever limit is reached first**. Agent Dir enforces this when a persisting session starts and then at most every six hours, deleting the oldest session files first (the active session file is never deleted). `agent-dir telemetry prune` applies the policy immediately and also scrubs the legacy raw `diagnosticDetails` field that Agent Dir 1.2.x stored. `agent-dir telemetry status` shows the limits. Reading analytics (`telemetry_analytics`) never migrates, rewrites, or deletes data.
+
+## Fingerprints and identity
+
+Every hash (request, input and output fingerprints, path and content hashes) is an HMAC-SHA256 keyed by a per-installation secret stored in `~/.config/agent-dir/telemetry.key` (mode 600, created only when telemetry is enabled). Equal values hash equally on one machine, so duplicate calls stay detectable, but hashes cannot be confirmed by guessing common paths or queries and cannot be correlated between installations. Input fingerprints are canonical: argument key order and the output budget (`maxBytes`) do not change them. MCP requests record the protocol version (`mcpProtocolVersion`) and the client name/version, taken from `initialize` or from request `_meta` for stateless clients. Calls to unknown tools are recorded as failed `tool_call` events with the tool name `unknown` and error category `unknown_tool`. Errors for unavailable integrations (not installed, not indexed, not running) use `unavailable_integration`.
 
 ## Reading telemetry show
 

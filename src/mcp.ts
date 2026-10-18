@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
@@ -7,9 +7,14 @@ import { CodeGraphIntegration } from "./codegraph.js";
 import type { SerenaTool } from "./serena.js";
 import { SerenaIntegration } from "./serena.js";
 import { summarizeTelemetry } from "./telemetry/aggregate.js";
+import {
+  fingerprintInput,
+  telemetryHmac,
+  usePersistentTelemetryKey,
+} from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
-import { readAllTelemetryEvents } from "./telemetry/storage.js";
-import type { TelemetryConfig } from "./telemetry/types.js";
+import { readTelemetryEvents } from "./telemetry/storage.js";
+import type { TelemetryConfig, TelemetryLevel } from "./telemetry/types.js";
 import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { runCommand } from "./tools/commands.js";
@@ -353,6 +358,7 @@ export function createMcpHandler(
     ...(telemetry.configId ? { configId: telemetry.configId } : {}),
     sessionId: telemetry.sessionId ?? randomUUID(),
   });
+  if (telemetry.level !== "none" && telemetry.persist) usePersistentTelemetryKey();
   let sessionStartedAt: number | undefined;
   let sessionLastActivityAt: number | undefined;
   let sessionActiveRequestDurationMs = 0;
@@ -483,7 +489,11 @@ export function createMcpHandler(
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
     }
     const params = message.params ?? {};
-    runtime = telemetryRuntime(params);
+    runtime = telemetryRuntime(
+      params,
+      telemetry.level,
+      request.headers.get("mcp-protocol-version"),
+    );
     const meta = isRecord(params._meta) ? params._meta : undefined;
     if (message.method === "initialize") {
       const requestedVersion = params.protocolVersion;
@@ -602,10 +612,39 @@ export function createMcpHandler(
             );
           }
           const toolName = params.name;
+          const recordRejectedToolCall = (
+            tool: string,
+            category: string,
+            rejected?: unknown,
+          ): void => {
+            const serialized = JSON.stringify(rejected ?? {});
+            telemetryRecorder.record(
+              {
+                event: "tool_call",
+                tool,
+                requestIdHash: telemetryHash(String(message.id)),
+                success: false,
+                durationMs: 0,
+                inputBytes: Buffer.byteLength(serialized, "utf8"),
+                estimatedInputTokens: estimateTokens(serialized),
+                errorCategory: category,
+              },
+              telemetryRuntime(
+                params,
+                telemetry.level,
+                request.headers.get("mcp-protocol-version"),
+              ),
+              telemetryProject,
+            );
+          };
           const toolDefinition = (await getAvailableTools()).find((item) => item.name === toolName);
-          if (!toolDefinition) throw new Error(`Unknown tool: ${toolName}`);
+          if (!toolDefinition) {
+            recordRejectedToolCall("unknown", "unknown_tool", params.arguments);
+            throw new Error(`Unknown tool: ${toolName}`);
+          }
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
+            recordRejectedToolCall(toolName, "invalid_input", params.arguments);
             return jsonRpcError(
               message.id ?? null,
               -32602,
@@ -621,6 +660,7 @@ export function createMcpHandler(
           );
           if (headerError) {
             telemetryRequestErrorCategory = "invalid_input";
+            recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
             return jsonRpcError(message.id ?? null, -32020, headerError, 400);
           }
           sessionToolCallCount += 1;
@@ -647,7 +687,11 @@ export function createMcpHandler(
             const estimatedOutputTokens = estimateTokens(serializedResult);
             sessionOutputBytes += outputBytes;
             sessionEstimatedOutputTokens += estimatedOutputTokens;
-            const runtime = telemetryRuntime(params);
+            const runtime = telemetryRuntime(
+              params,
+              telemetry.level,
+              request.headers.get("mcp-protocol-version"),
+            );
             telemetryRecorder.record(
               {
                 event: "tool_call",
@@ -661,7 +705,7 @@ export function createMcpHandler(
                 estimatedOutputTokens,
                 cumulativeOutputBytes: sessionOutputBytes,
                 cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
-                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...(count === undefined ? {} : { resultCount: count }),
                 ...toolTelemetryMetrics(toolName, result, seenOutputFingerprints),
               },
@@ -692,7 +736,11 @@ export function createMcpHandler(
             });
           } catch (error) {
             const durationMs = performance.now() - startedAt;
-            const runtime = telemetryRuntime(params);
+            const runtime = telemetryRuntime(
+              params,
+              telemetry.level,
+              request.headers.get("mcp-protocol-version"),
+            );
             const errorCategory = classifyTelemetryError(error);
             telemetryRecorder.record(
               {
@@ -703,7 +751,7 @@ export function createMcpHandler(
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
-                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 errorCategory,
               },
               runtime,
@@ -1202,7 +1250,11 @@ async function callTool(
       typeof args.until === "string" ? Date.parse(args.until) : Number.POSITIVE_INFINITY;
     if (Number.isNaN(since) || Number.isNaN(until))
       throw new Error("since and until must be valid ISO timestamps.");
-    const all = readAllTelemetryEvents().filter(
+    const all = readTelemetryEvents({
+      ...(typeof args.profile === "string" && args.profile ? { profile: args.profile } : {}),
+      ...(typeof args.session === "string" && args.session ? { session: args.session } : {}),
+      ...(Number.isFinite(since) ? { sinceMs: since } : {}),
+    }).filter(
       (event) =>
         (!args.profile || event.configId === args.profile) &&
         (!args.session || event.sessionId === args.session) &&
@@ -1804,11 +1856,12 @@ function completeToolResult(structuredContent: unknown): Record<string, unknown>
     _meta: SERVER_INFO_META,
   };
 }
-function telemetryRuntime(
-  params: Record<string, unknown>,
-): import("./telemetry/types.js").TelemetryRuntimeContext {
-  const clientInfo = isRecord(params.clientInfo) ? params.clientInfo : undefined;
-  return {
+type TelemetryRuntime = import("./telemetry/types.js").TelemetryRuntimeContext;
+let cachedStaticRuntime: TelemetryRuntime | undefined;
+
+/** Fields that never change during the process lifetime are collected once. */
+function staticTelemetryRuntime(): TelemetryRuntime {
+  cachedStaticRuntime ??= {
     agentDirVersion: packageVersion,
     nodeMajor: Number(process.versions.node.split(".")[0]),
     os:
@@ -1820,17 +1873,47 @@ function telemetryRuntime(
             ? "windows"
             : "other",
     arch: process.arch,
-    ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
-    ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
     nodeVersion: process.versions.node,
     ...linuxDistribution(),
     kernelVersion: release(),
     hostname: hostname(),
     username: userInfo().username,
-    processId: process.pid,
-    parentProcessId: process.ppid,
-    processUptimeMs: Math.round(process.uptime() * 1000),
-    memoryRssBytes: process.memoryUsage().rss,
+  };
+  return cachedStaticRuntime;
+}
+
+function telemetryRuntime(
+  params: Record<string, unknown>,
+  level: TelemetryLevel,
+  headerProtocolVersion?: string | null,
+): TelemetryRuntime {
+  const meta = isRecord(params._meta) ? params._meta : undefined;
+  const metaClient = meta?.["io.modelcontextprotocol/clientInfo"];
+  const clientInfo = isRecord(params.clientInfo)
+    ? params.clientInfo
+    : isRecord(metaClient)
+      ? metaClient
+      : undefined;
+  const metaVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
+  const protocolVersion =
+    typeof params.protocolVersion === "string"
+      ? params.protocolVersion
+      : typeof metaVersion === "string"
+        ? metaVersion
+        : (headerProtocolVersion ?? undefined);
+  return {
+    ...staticTelemetryRuntime(),
+    ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
+    ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
+    ...(protocolVersion ? { mcpProtocolVersion: protocolVersion } : {}),
+    ...(level === "none"
+      ? {}
+      : {
+          processId: process.pid,
+          parentProcessId: process.ppid,
+          processUptimeMs: Math.round(process.uptime() * 1000),
+          memoryRssBytes: process.memoryUsage().rss,
+        }),
   };
 }
 
@@ -1855,7 +1938,7 @@ function linuxDistribution(): { distroId?: string; distroName?: string; distroVe
 }
 
 function telemetryHash(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+  return telemetryHmac(value);
 }
 
 // A rough byte-based proxy, not a model-tokenizer count or Claude billing measurement.
@@ -1980,7 +2063,22 @@ function resultCount(result: Record<string, unknown>): number | undefined {
 
 function classifyTelemetryError(error: unknown): string {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (message.includes("not found")) return "not_found";
+  if (message.startsWith("unknown tool")) return "unknown_tool";
+  if (
+    message.includes("integration is unavailable") ||
+    message.includes("is not installed") ||
+    message.includes("process is not running") ||
+    message.includes("analytics is disabled") ||
+    message.includes("not indexed")
+  )
+    return "unavailable_integration";
+  if (
+    message.includes("not found") ||
+    message.includes("enoent") ||
+    message.includes("no such file") ||
+    message.includes("does not exist")
+  )
+    return "not_found";
   if (message.includes("invalid") || message.includes("must be")) return "invalid_input";
   if (message.includes("blocked") || message.includes("not allowed")) return "authorization";
   if (message.includes("timeout") || message.includes("timed out")) return "timeout";

@@ -105,6 +105,7 @@ export interface TelemetryRuntimeContext {
   arch: string;
   mcpClientName?: string;
   mcpClientVersion?: string;
+  mcpProtocolVersion?: string;
   nodeVersion?: string;
   distroId?: string;
   distroName?: string;

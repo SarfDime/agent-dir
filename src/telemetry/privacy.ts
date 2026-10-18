@@ -17,6 +17,8 @@ const SAFE_ERROR_CATEGORIES = new Set([
   "internal",
   "startup",
   "unknown",
+  "unknown_tool",
+  "unavailable_integration",
 ]);
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
@@ -221,6 +223,9 @@ function sanitizeRuntimeContext(context: TelemetryRuntimeContext): TelemetryRunt
     ...(context.mcpClientVersion === undefined
       ? {}
       : { mcpClientVersion: sanitizeVersion(context.mcpClientVersion) }),
+    ...(context.mcpProtocolVersion === undefined
+      ? {}
+      : { mcpProtocolVersion: sanitizeProtocolVersion(context.mcpProtocolVersion) }),
   };
 }
 
@@ -281,6 +286,10 @@ function sanitizeVersion(value: string): string {
   return /^v?[0-9]+(?:\.[0-9]+){0,3}(?:[-+][a-z0-9.-]+)?$/i.test(normalized)
     ? normalized
     : "unknown";
+}
+
+function sanitizeProtocolVersion(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value.trim()) ? value.trim() : "unknown";
 }
 
 function sanitizeHash(value: string): string {
