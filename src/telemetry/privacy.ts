@@ -219,7 +219,7 @@ function sanitizeRuntimeContext(context: TelemetryRuntimeContext): TelemetryRunt
     arch: sanitizeIdentifier(context.arch, /^[a-z0-9_]+$/),
     ...(context.mcpClientName === undefined
       ? {}
-      : { mcpClientName: sanitizeFreeIdentifier(context.mcpClientName) }),
+      : { mcpClientName: sanitizeClientName(context.mcpClientName) }),
     ...(context.mcpClientVersion === undefined
       ? {}
       : { mcpClientVersion: sanitizeVersion(context.mcpClientVersion) }),
@@ -276,9 +276,10 @@ function sanitizeLocalPath(value: string): string {
     : "unknown";
 }
 
-function sanitizeFreeIdentifier(value: string): string {
+/** Client names such as `vendor/product` are not sensitive; keep a conservative character set. */
+function sanitizeClientName(value: string): string {
   const normalized = value.trim().slice(0, 64);
-  return /^[a-z0-9][a-z0-9 ._-]*$/i.test(normalized) ? normalized : "unknown";
+  return /^[a-z0-9][a-z0-9 ._/@:+()-]*$/i.test(normalized) ? normalized : "unknown";
 }
 
 function sanitizeVersion(value: string): string {

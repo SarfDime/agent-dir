@@ -11,6 +11,7 @@ import {
   telemetryHmac,
   usePersistentTelemetryKey,
 } from "../src/telemetry/fingerprint.js";
+import { createTelemetryEnvelope } from "../src/telemetry/privacy.js";
 
 const MODERN_META = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -165,4 +166,22 @@ test("identical read calls with different budgets or key order share one input f
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("client names with a vendor/product shape are kept, unsafe ones are not", () => {
+  const event = { event: "tool_call", tool: "read_range", success: true, durationMs: 1 } as const;
+  const runtime = (name: string) => ({
+    agentDirVersion: "1.3.0",
+    nodeMajor: 24,
+    os: "linux" as const,
+    arch: "x64",
+    mcpClientName: name,
+    mcpClientVersion: "1.0.0",
+    mcpProtocolVersion: "2026-07-28",
+  });
+  const kept = createTelemetryEnvelope("basic", event, runtime("Anthropic/ClaudeAI"));
+  assert.equal(kept.runtime?.mcpClientName, "Anthropic/ClaudeAI");
+  assert.equal(kept.runtime?.mcpProtocolVersion, "2026-07-28");
+  const unsafe = createTelemetryEnvelope("basic", event, runtime("/home/user/secret\nname"));
+  assert.equal(unsafe.runtime?.mcpClientName, "unknown");
 });

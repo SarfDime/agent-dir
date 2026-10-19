@@ -1354,6 +1354,7 @@ async function callTool(
                 arch: item.runtime.arch,
                 mcpClientName: item.runtime.mcpClientName,
                 mcpClientVersion: item.runtime.mcpClientVersion,
+                mcpProtocolVersion: item.runtime.mcpProtocolVersion,
               }
             : undefined,
           project: item.project
