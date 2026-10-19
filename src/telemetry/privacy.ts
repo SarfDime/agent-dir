@@ -91,6 +91,7 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...optionalNumber("affectedFiles", event.affectedFiles),
       ...(event.truncated === undefined ? {} : { truncated: event.truncated === true }),
       ...(event.paginated === undefined ? {} : { paginated: event.paginated === true }),
+      ...(event.outcome === undefined ? {} : { outcome: sanitizeOutcome(event.outcome) }),
       ...(event.errorCategory === undefined
         ? {}
         : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
@@ -118,6 +119,9 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...(event.operation === undefined
         ? {}
         : { operation: sanitizeIdentifier(event.operation, SAFE_OPERATION) }),
+      ...(event.executables === undefined
+        ? {}
+        : { executables: event.executables.slice(0, 10).map(sanitizeExecutable) }),
       success: event.success === true,
       durationMs: boundedNumber(event.durationMs),
       ...optionalNumber("outputBytes", event.outputBytes),
@@ -274,6 +278,14 @@ function sanitizeLocalPath(value: string): string {
   return normalized.startsWith("/") || /^[A-Za-z]:[\\\\/]/.test(normalized)
     ? normalized
     : "unknown";
+}
+
+function sanitizeOutcome(value: string): "ok" | "empty" | "truncated" | "error" {
+  return value === "empty" || value === "truncated" || value === "error" ? value : "ok";
+}
+
+function sanitizeExecutable(value: string): string {
+  return /^[a-z0-9][a-z0-9._+-]{0,31}$/i.test(value) ? value : "other";
 }
 
 /** Client names such as `vendor/product` are not sensitive; keep a conservative character set. */

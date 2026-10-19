@@ -185,3 +185,27 @@ test("client names with a vendor/product shape are kept, unsafe ones are not", (
   const unsafe = createTelemetryEnvelope("basic", event, runtime("/home/user/secret\nname"));
   assert.equal(unsafe.runtime?.mcpClientName, "unknown");
 });
+
+test("session summaries are snapshotted before shutdown so killed processes keep one", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-session-"));
+  try {
+    const configId = `test-session-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "basic", configId, sessionSnapshotMs: 0 });
+    for (const id of [1, 2, 3]) {
+      await handler(post({ jsonrpc: "2.0", id, method: "ping", params: {} }));
+    }
+    const sessions = () =>
+      handler
+        .telemetrySnapshot()
+        .filter((event) => event.configId === configId && event.event.event === "session");
+    assert.ok(sessions().length >= 1, "a snapshot exists without closing the handler");
+    const before = sessions().length;
+    handler.closeSubscriptions();
+    assert.equal(sessions().length, before + 1, "graceful close still records a final summary");
+    const last = sessions().at(-1)?.event;
+    assert.ok(last && last.event === "session");
+    assert.equal(last.requestCount, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

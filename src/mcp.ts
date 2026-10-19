@@ -365,10 +365,31 @@ export function createMcpHandler(
   let sessionRequestCount = 0;
   let sessionToolCallCount = 0;
   let sessionCommandCallCount = 0;
-  let sessionRecorded = false;
   let sessionOutputBytes = 0;
   let sessionEstimatedOutputTokens = 0;
   const seenOutputFingerprints = new Set<string>();
+  // Session summaries are snapshotted periodically (last one wins in aggregation) so a killed
+  // process still leaves a summary behind, and written again on graceful close.
+  const sessionSnapshotMs = telemetry.sessionSnapshotMs ?? 60_000;
+  let lastSessionSnapshotAt = Date.now();
+  const recordSessionSummary = (): void => {
+    if (sessionRequestCount === 0 || telemetry.level === "none") return;
+    const started = sessionStartedAt ?? performance.now();
+    const lastActivity = sessionLastActivityAt ?? performance.now();
+    telemetryRecorder.record({
+      event: "session",
+      wallClockDurationMs: Math.max(0, lastActivity - started),
+      activeRequestDurationMs: sessionActiveRequestDurationMs,
+      idleGapDurationMs: Math.max(0, lastActivity - started - sessionActiveRequestDurationMs),
+      requestCount: sessionRequestCount,
+      toolCallCount: sessionToolCallCount,
+      commandCallCount: sessionCommandCallCount,
+    });
+    lastSessionSnapshotAt = Date.now();
+  };
+  const maybeSnapshotSession = (): void => {
+    if (Date.now() - lastSessionSnapshotAt >= sessionSnapshotMs) recordSessionSummary();
+  };
   let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
   const getAvailableTools = async () => {
     if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
@@ -430,6 +451,7 @@ export function createMcpHandler(
       });
     };
     if (sessionStartedAt === undefined) sessionStartedAt = requestStartedAt;
+    maybeSnapshotSession();
     sessionRequestCount += 1;
     const telemetryProject = telemetryProjectPromise ? await telemetryProjectPromise : undefined;
     let message: JsonRpcRequest | undefined;
@@ -624,6 +646,7 @@ export function createMcpHandler(
                 tool,
                 requestIdHash: telemetryHash(String(message.id)),
                 success: false,
+                outcome: "error",
                 durationMs: 0,
                 inputBytes: Buffer.byteLength(serialized, "utf8"),
                 estimatedInputTokens: estimateTokens(serialized),
@@ -692,12 +715,15 @@ export function createMcpHandler(
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
             );
+            const metrics = toolTelemetryMetrics(toolName, result, seenOutputFingerprints);
+            const outcome = toolOutcome(result, count, metrics.truncated === true);
             telemetryRecorder.record(
               {
                 event: "tool_call",
                 tool: toolName,
                 requestIdHash: telemetryHash(String(message.id)),
-                success: true,
+                success: result.isError !== true,
+                outcome,
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 outputBytes,
@@ -707,7 +733,7 @@ export function createMcpHandler(
                 cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
                 inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...(count === undefined ? {} : { resultCount: count }),
-                ...toolTelemetryMetrics(toolName, result, seenOutputFingerprints),
+                ...metrics,
               },
               runtime,
               telemetryProject,
@@ -720,6 +746,7 @@ export function createMcpHandler(
                   event: "command_call",
                   commandFamily: command.family,
                   operation: command.operation,
+                  ...commandExecutables(toolName, argumentsValue),
                   success: true,
                   durationMs,
                   outputBytes,
@@ -748,6 +775,7 @@ export function createMcpHandler(
                 tool: toolName,
                 requestIdHash: telemetryHash(String(message.id)),
                 success: false,
+                outcome: "error",
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
@@ -765,6 +793,7 @@ export function createMcpHandler(
                   event: "command_call",
                   commandFamily: command.family,
                   operation: command.operation,
+                  ...commandExecutables(toolName, argumentsValue),
                   success: false,
                   durationMs,
                   errorCategory,
@@ -1008,26 +1037,7 @@ export function createMcpHandler(
   handler.telemetrySnapshot = () => telemetryRecorder.snapshot();
 
   handler.closeSubscriptions = () => {
-    if (!sessionRecorded && sessionRequestCount > 0 && telemetry.level !== "none") {
-      sessionRecorded = true;
-      telemetryRecorder.record({
-        event: "session",
-        wallClockDurationMs: Math.max(
-          0,
-          (sessionLastActivityAt ?? performance.now()) - (sessionStartedAt ?? performance.now()),
-        ),
-        activeRequestDurationMs: sessionActiveRequestDurationMs,
-        idleGapDurationMs: Math.max(
-          0,
-          (sessionLastActivityAt ?? performance.now()) -
-            (sessionStartedAt ?? performance.now()) -
-            sessionActiveRequestDurationMs,
-        ),
-        requestCount: sessionRequestCount,
-        toolCallCount: sessionToolCallCount,
-        commandCallCount: sessionCommandCallCount,
-      });
-    }
+    recordSessionSummary();
     for (const subscription of subscriptions) {
       writeSse(subscription.controller, {
         jsonrpc: "2.0",
@@ -1962,7 +1972,19 @@ function toolTelemetryMetrics(
   files?: Array<{ pathHash: string; contentHash?: string; bytes: number }>;
 } {
   const structured = result.structuredContent;
-  if (!Array.isArray(structured) && !isRecord(structured)) return {};
+  if (!Array.isArray(structured) && !isRecord(structured)) {
+    // Integration results (CodeGraph, Serena) carry no structured content; still measure them.
+    const json = JSON.stringify(result);
+    const fingerprint = telemetryHash(json);
+    const bytes = Buffer.byteLength(json, "utf8");
+    const duplicate = seenOutputFingerprints.has(fingerprint) ? bytes : 0;
+    seenOutputFingerprints.add(fingerprint);
+    return {
+      outputFingerprint: fingerprint,
+      duplicateOutputBytes: duplicate,
+      ...(result.truncated === true ? { truncated: true } : {}),
+    };
+  }
   const paths = new Set<string>();
   const files = new Map<string, { pathHash: string; contentHash?: string; bytes: number }>();
   let truncated = false;
@@ -1992,6 +2014,7 @@ function toolTelemetryMetrics(
     for (const child of Object.values(value)) visit(child);
   };
   visit(structured);
+  if (result.truncated === true) truncated = true;
   const outputJson = JSON.stringify(result);
   const outputFingerprint = telemetryHash(outputJson);
   const outputBytes = Buffer.byteLength(outputJson, "utf8");
@@ -2009,6 +2032,26 @@ function toolTelemetryMetrics(
     uniqueFileCount: files.size,
     ...(files.size ? { files: [...files.values()].slice(0, 100) } : {}),
   };
+}
+
+function toolOutcome(
+  result: Record<string, unknown>,
+  count: number | undefined,
+  truncated: boolean,
+): "ok" | "empty" | "truncated" | "error" {
+  if (result.isError === true) return "error";
+  if (truncated) return "truncated";
+  if (count === 0) return "empty";
+  return "ok";
+}
+
+function commandExecutables(toolName: string, argumentsValue: unknown): { executables?: string[] } {
+  if (toolName !== "run_command_batch" || !isRecord(argumentsValue)) return {};
+  if (!Array.isArray(argumentsValue.commands)) return {};
+  const names = argumentsValue.commands.flatMap((item) =>
+    isRecord(item) && typeof item.command === "string" ? [item.command] : [],
+  );
+  return names.length > 0 ? { executables: names.slice(0, 10) } : {};
 }
 
 function commandTelemetryDescriptor(
