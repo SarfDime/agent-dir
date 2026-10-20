@@ -16,7 +16,7 @@ Agent Dir is a cross-platform TypeScript CLI for bounded project-file access, ta
 
 - Node.js 24+
 - npm
-- Wormhole CLI or `cloudflared` if remote access is required
+- Wormhole CLI or `cloudflared`
 
 ## Quick start
 
