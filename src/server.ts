@@ -48,16 +48,13 @@ export function startServer({
         sendText(res, 200, "ok\n");
         return;
       }
-      const body = await readBody(req, requestController.signal);
-      const requestInit: RequestInit = {
-        method: req.method ?? "GET",
-        headers: toFetchHeaders(req.headers),
-        signal: requestController.signal,
-      };
-      if (body.length) requestInit.body = body;
-      const request = new Request(url, requestInit);
-      authenticated = authenticate(request, token);
+      // Authenticate from headers and URL alone, before buffering any request body.
+      authenticated = authenticate(
+        new Request(url, { method: req.method ?? "GET", headers: toFetchHeaders(req.headers) }),
+        token,
+      );
       if (!authenticated) {
+        res.setHeader("connection", "close");
         const response = unauthorized();
         await sendResponse(res, response);
         logRequest({
@@ -76,6 +73,14 @@ export function startServer({
         );
         return;
       }
+      const body = await readBody(req, requestController.signal);
+      const requestInit: RequestInit = {
+        method: req.method ?? "GET",
+        headers: toFetchHeaders(req.headers),
+        signal: requestController.signal,
+      };
+      if (body.length) requestInit.body = body;
+      const request = new Request(url, requestInit);
       if (url.pathname === "/mcp") {
         if (req.method !== "POST") {
           res.setHeader("allow", "POST");

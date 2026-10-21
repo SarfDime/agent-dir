@@ -16,12 +16,20 @@ import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { readTelemetryEvents } from "./telemetry/storage.js";
 import type { TelemetryConfig, TelemetryLevel } from "./telemetry/types.js";
 import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
+import { type BatchOnError, runBatch } from "./tools/batch.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
-import { runCommand } from "./tools/commands.js";
+import { checkCommand, spawnCapture } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile, readRange } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
-import { runPackageScript } from "./tools/package-scripts.js";
+import {
+  packageScriptCapture,
+  packageScriptLabel,
+  packageScriptProblem,
+  runPackageScript,
+} from "./tools/package-scripts.js";
+import type { CommandPolicyConfig } from "./tools/policy.js";
+import type { PathProtectionConfig } from "./tools/protected-paths.js";
 
 import {
   getSkill,
@@ -98,15 +106,45 @@ const searchMatchSchema = objectOutput(
   },
   ["path", "line", "column", "text"],
 );
-const commandResultSchema = objectOutput(
+const batchItemSchema = objectOutput(
   {
-    command: stringSchema,
+    index: { type: "integer" },
+    command: { type: "string" },
+    status: { type: "string", enum: ["success", "failure", "skipped"] },
+    reason: { type: "string" },
+    ran: { type: "boolean" },
     exitCode: { type: "integer" },
-    stdout: stringSchema,
-    stderr: stringSchema,
+    durationMs: { type: "number" },
+    stdout: { type: "string" },
+    stderr: { type: "string" },
+    outputTruncated: { type: "boolean" },
   },
-  ["command", "exitCode", "stdout", "stderr"],
+  ["index", "command", "status", "ran"],
 );
+const batchResultSchema = objectOutput(
+  {
+    ok: { type: "boolean" },
+    onError: { type: "string", enum: ["continue", "stop"] },
+    summary: objectOutput(
+      {
+        total: { type: "integer" },
+        success: { type: "integer" },
+        failure: { type: "integer" },
+        skipped: { type: "integer" },
+      },
+      ["total", "success", "failure", "skipped"],
+    ),
+    items: arrayOutput(batchItemSchema),
+    truncated: { type: "boolean" },
+  },
+  ["ok", "onError", "summary", "items", "truncated"],
+);
+const onErrorSchema = {
+  type: "string",
+  enum: ["continue", "stop"],
+  description:
+    "What to do after an item fails. Every item always reports status success, failure or skipped (with a reason), so you never have to guess whether it ran.",
+};
 
 const codeGraphTool: ToolDefinition = tool(
   "codegraph_explore",
@@ -287,30 +325,41 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "run_package_scripts_batch",
-    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
+    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
     {
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
+      onError: onErrorSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(commandResultSchema),
+    batchResultSchema,
     ["scripts"],
   ),
   tool(
     "run_command_batch",
-    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead.",
+    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead. Default onError is continue, so independent inspection commands still run after one fails. Use okExitCodes (for example [0, 1] for rg or grep) when a non-zero exit is a normal outcome.",
     {
       commands: {
         type: "array",
         items: objectOutput(
-          { command: stringSchema, args: { type: "array", items: stringSchema } },
+          {
+            command: stringSchema,
+            args: { type: "array", items: stringSchema },
+            okExitCodes: {
+              type: "array",
+              items: { type: "integer", minimum: 0, maximum: 255 },
+              maxItems: 8,
+              description: "Exit codes that count as success. Default [0].",
+            },
+          },
           ["command"],
         ),
         minItems: 1,
         maxItems: 10,
       },
+      onError: onErrorSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(commandResultSchema),
+    batchResultSchema,
     ["commands"],
   ),
 ];
@@ -405,6 +454,8 @@ export function createMcpHandler(
   const packageManager = commandConfig.packageManager ?? "npm";
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
+  const commandPolicy = commandConfig.commandPolicy;
+  const pathProtection = commandConfig.protectedPaths;
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -697,6 +748,8 @@ export function createMcpHandler(
               packageManager,
               allowedCommands,
               blacklistedCommands,
+              commandPolicy,
+              pathProtection,
               notify,
               request.signal,
               codeGraph,
@@ -1216,6 +1269,8 @@ async function callTool(
   packageManager: "npm" | "pnpm" | "yarn" | "bun",
   allowedCommands: string[],
   blacklistedCommands: string[],
+  commandPolicy: CommandPolicyConfig | undefined,
+  pathProtection: PathProtectionConfig | undefined,
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1451,7 +1506,7 @@ async function callTool(
       const affected = [...new Set(changes.map((change) => change.path))];
       const before = new Map<string, string[]>();
       for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
-      const applied = await applyFileChanges(root, changes, dryRun);
+      const applied = await applyFileChanges(root, changes, dryRun, pathProtection);
       structuredContent = applied.map((item) => {
         if (!isRecord(item)) return item;
         const { content: _content, previousContent: _previousContent, ...summary } = item;
@@ -1615,72 +1670,57 @@ async function callTool(
       structuredContent = await fileInfo(root, String(args.path));
       break;
     case "run_package_scripts_batch": {
-      const output = [];
       const scripts = stringArray(args.scripts, "scripts");
       if (scripts.length > 10)
         throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
-      for (const script of scripts) {
-        const value = await runPackageScript(
-          root,
-          script,
-          120000,
-          allowedScripts,
-          signal,
-          packageManager,
-        );
-        output.push(value);
-        if (value.exitCode !== 0) break;
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const boundedOutput = [];
-      let remaining = maxBytes - 2;
-      for (const item of output) {
-        const separatorBytes = boundedOutput.length ? 1 : 0;
-        if (remaining <= separatorBytes) break;
-        const budget = remaining - separatorBytes;
-        const bounded = boundCommandResult(item, budget);
-        const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
-        if (boundedBytes > budget) break;
-        boundedOutput.push(bounded);
-        remaining -= separatorBytes + boundedBytes;
-        if (remaining <= 0) break;
-      }
-      structuredContent = boundedOutput;
+      structuredContent = await runBatch(
+        scripts.map((script) => ({
+          label: packageScriptLabel(packageManager, script),
+          preflight: () => packageScriptProblem(root, script, allowedScripts),
+          execute: () =>
+            packageScriptCapture(root, script, {
+              timeoutMs: 120000,
+              packageManager,
+              ...(signal ? { signal } : {}),
+            }),
+        })),
+        { onError: batchOnError(args.onError, "stop"), maxBytes: outputBytesArg(args.maxBytes) },
+      );
       break;
     }
     case "run_command_batch": {
-      const output = [];
       const commands = objectArray(args.commands, "commands");
       if (commands.length > 10)
         throw new Error("run_command_batch accepts at most 10 commands per call.");
-      for (const item of commands) {
-        const value = await runCommand(
-          root,
-          String(item.command),
-          Array.isArray(item.args) ? item.args.map(String) : [],
-          allowedCommands,
-          blacklistedCommands,
-          120000,
-          signal,
-        );
-        output.push(value);
-        if (value.exitCode !== 0) break;
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const boundedOutput = [];
-      let remaining = maxBytes - 2;
-      for (const item of output) {
-        const separatorBytes = boundedOutput.length ? 1 : 0;
-        if (remaining <= separatorBytes) break;
-        const budget = remaining - separatorBytes;
-        const bounded = boundCommandResult(item, budget);
-        const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
-        if (boundedBytes > budget) break;
-        boundedOutput.push(bounded);
-        remaining -= separatorBytes + boundedBytes;
-        if (remaining <= 0) break;
-      }
-      structuredContent = boundedOutput;
+      structuredContent = await runBatch(
+        commands.map((item) => {
+          const command = typeof item.command === "string" ? item.command : "";
+          const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
+          const okExitCodes = okExitCodesArg(item.okExitCodes);
+          return {
+            label: [command, ...commandArgs.map(String)].join(" "),
+            ...(okExitCodes ? { okExitCodes } : {}),
+            preflight: () =>
+              typeof item.command !== "string"
+                ? "command must be a string."
+                : checkCommand(root, command, commandArgs, {
+                    allowedCommands,
+                    blacklistedCommands,
+                    allowedScripts,
+                    ...(commandPolicy ? { policy: commandPolicy } : {}),
+                  }),
+            execute: () =>
+              spawnCapture(root, command, commandArgs, {
+                timeoutMs: 120000,
+                ...(signal ? { signal } : {}),
+              }),
+          };
+        }),
+        {
+          onError: batchOnError(args.onError, "continue"),
+          maxBytes: outputBytesArg(args.maxBytes),
+        },
+      );
       break;
     }
     default:
@@ -2100,8 +2140,27 @@ async function buildTelemetryProjectContext(
   };
 }
 
+function batchOnError(value: unknown, fallback: BatchOnError): BatchOnError {
+  if (value === undefined) return fallback;
+  if (value === "continue" || value === "stop") return value;
+  throw new Error("onError must be 'continue' or 'stop'.");
+}
+
+function okExitCodesArg(value: unknown): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 8 ||
+    value.some((code) => !Number.isInteger(code) || code < 0 || code > 255)
+  )
+    throw new Error("okExitCodes must be 1 to 8 integers between 0 and 255.");
+  return value as number[];
+}
+
 function resultCount(result: Record<string, unknown>): number | undefined {
   const structured = result.structuredContent;
+  if (isRecord(structured) && Array.isArray(structured.items)) return structured.items.length;
   return Array.isArray(structured) ? structured.length : undefined;
 }
 

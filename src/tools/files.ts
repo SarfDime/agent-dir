@@ -1,6 +1,7 @@
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { type PathProtectionConfig, protectedPathProblem } from "./protected-paths.js";
 
 const IGNORED = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
 
@@ -197,6 +198,7 @@ export async function applyFileChanges(
   root: string,
   changes: FileChange[],
   dryRun = false,
+  protection?: PathProtectionConfig,
 ): Promise<AppliedFileChange[]> {
   if (changes.length === 0) throw new Error("At least one change is required.");
 
@@ -206,6 +208,11 @@ export async function applyFileChanges(
 
   for (const change of changes) {
     const changeTarget = await safePath(resolvedRoot, change.path, change.kind === "write");
+    const protectedProblem = protectedPathProblem(
+      path.relative(resolvedRoot, changeTarget),
+      protection,
+    );
+    if (protectedProblem) throw new Error(protectedProblem);
     if (seen.has(changeTarget)) throw new Error(`Duplicate change path: '${change.path}'.`);
     seen.add(changeTarget);
 

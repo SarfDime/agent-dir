@@ -1,5 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import type { TelemetryConfig } from "./telemetry/types.js";
+import type { CommandPolicyConfig } from "./tools/policy.js";
+import type { PathProtectionConfig } from "./tools/protected-paths.js";
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
@@ -23,6 +25,8 @@ export interface Profile {
   scripts?: PackageScriptsConfig;
   commands?: string[];
   blacklistedCommands?: string[];
+  commandPolicy?: CommandPolicyConfig;
+  protectedPaths?: PathProtectionConfig;
 }
 
 export interface AgentConfig {
@@ -36,6 +40,8 @@ export interface CommandConfig {
   scripts?: PackageScriptsConfig;
   commands?: string[];
   blacklistedCommands?: string[];
+  commandPolicy?: CommandPolicyConfig;
+  protectedPaths?: PathProtectionConfig;
 }
 
 export interface ServerOptions {

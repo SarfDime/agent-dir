@@ -72,6 +72,18 @@ Batch command operations execute sequentially and stop at the first failed comma
 
 Package scripts and other executables use separate allowlists. An executable not in the configured allowlist is rejected, and configured `blacklistedCommands` prefixes override the allowlist. Commands are launched without a shell.
 
+Agent Dir is not a security boundary against a hostile agent; see `SECURITY.md`. Built-in argument-aware guardrails (global-option-aware blacklist matching, git/package-manager/gh/rg/find rules) and protected paths for `apply_changes` reduce accidents and common bypasses, and are configurable per profile (`commandPolicy`, `protectedPaths`).
+
+### Batch results
+
+`run_command_batch` and `run_package_scripts_batch` return one object: `{ ok, onError, summary, items, truncated }`. Every item has exactly one `status`: `success`, `failure` or `skipped`, plus `ran` (whether the process was started) and, when not successful, a `reason`. Agents never have to infer whether a command ran.
+
+- The whole batch is validated (allowlist, blacklist, guardrails, script existence) before anything runs.
+- `onError: "continue"` (default for commands) keeps running independent commands after a failure; `onError: "stop"` (default for scripts) reports later items as `skipped` with the reason. In `stop` mode a rejected item means nothing runs.
+- A command item may set `okExitCodes` (for example `[0, 1]` for `rg` or `grep`) so a normal non-zero exit counts as success.
+- A timeout or abort is a `failure` that keeps the partial output; earlier results are never discarded.
+- Output is shared fairly across items within `maxBytes`; truncated items carry `outputTruncated`, and failures keep the tail of their output.
+
 Git is run through `run_command_batch` when `git` is allowlisted. There are no dedicated Git MCP tools. This keeps the advertised tool set small while preserving explicit executable and argument restrictions. Avoid allowing shells or interpreters unless broader command execution is intentional.
 
 ## CodeGraph integration
