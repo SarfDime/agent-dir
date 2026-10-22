@@ -17,6 +17,8 @@ const SAFE_ERROR_CATEGORIES = new Set([
   "internal",
   "startup",
   "unknown",
+  "unknown_tool",
+  "unavailable_integration",
 ]);
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
@@ -89,6 +91,7 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...optionalNumber("affectedFiles", event.affectedFiles),
       ...(event.truncated === undefined ? {} : { truncated: event.truncated === true }),
       ...(event.paginated === undefined ? {} : { paginated: event.paginated === true }),
+      ...(event.outcome === undefined ? {} : { outcome: sanitizeOutcome(event.outcome) }),
       ...(event.errorCategory === undefined
         ? {}
         : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
@@ -116,6 +119,9 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...(event.operation === undefined
         ? {}
         : { operation: sanitizeIdentifier(event.operation, SAFE_OPERATION) }),
+      ...(event.executables === undefined
+        ? {}
+        : { executables: event.executables.slice(0, 10).map(sanitizeExecutable) }),
       success: event.success === true,
       durationMs: boundedNumber(event.durationMs),
       ...optionalNumber("outputBytes", event.outputBytes),
@@ -217,10 +223,13 @@ function sanitizeRuntimeContext(context: TelemetryRuntimeContext): TelemetryRunt
     arch: sanitizeIdentifier(context.arch, /^[a-z0-9_]+$/),
     ...(context.mcpClientName === undefined
       ? {}
-      : { mcpClientName: sanitizeFreeIdentifier(context.mcpClientName) }),
+      : { mcpClientName: sanitizeClientName(context.mcpClientName) }),
     ...(context.mcpClientVersion === undefined
       ? {}
       : { mcpClientVersion: sanitizeVersion(context.mcpClientVersion) }),
+    ...(context.mcpProtocolVersion === undefined
+      ? {}
+      : { mcpProtocolVersion: sanitizeProtocolVersion(context.mcpProtocolVersion) }),
   };
 }
 
@@ -271,9 +280,18 @@ function sanitizeLocalPath(value: string): string {
     : "unknown";
 }
 
-function sanitizeFreeIdentifier(value: string): string {
+function sanitizeOutcome(value: string): "ok" | "empty" | "truncated" | "error" {
+  return value === "empty" || value === "truncated" || value === "error" ? value : "ok";
+}
+
+function sanitizeExecutable(value: string): string {
+  return /^[a-z0-9][a-z0-9._+-]{0,31}$/i.test(value) ? value : "other";
+}
+
+/** Client names such as `vendor/product` are not sensitive; keep a conservative character set. */
+function sanitizeClientName(value: string): string {
   const normalized = value.trim().slice(0, 64);
-  return /^[a-z0-9][a-z0-9 ._-]*$/i.test(normalized) ? normalized : "unknown";
+  return /^[a-z0-9][a-z0-9 ._/@:+()-]*$/i.test(normalized) ? normalized : "unknown";
 }
 
 function sanitizeVersion(value: string): string {
@@ -281,6 +299,10 @@ function sanitizeVersion(value: string): string {
   return /^v?[0-9]+(?:\.[0-9]+){0,3}(?:[-+][a-z0-9.-]+)?$/i.test(normalized)
     ? normalized
     : "unknown";
+}
+
+function sanitizeProtocolVersion(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value.trim()) ? value.trim() : "unknown";
 }
 
 function sanitizeHash(value: string): string {

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
@@ -7,17 +7,29 @@ import { CodeGraphIntegration } from "./codegraph.js";
 import type { SerenaTool } from "./serena.js";
 import { SerenaIntegration } from "./serena.js";
 import { summarizeTelemetry } from "./telemetry/aggregate.js";
+import {
+  fingerprintInput,
+  telemetryHmac,
+  usePersistentTelemetryKey,
+} from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
-import { readAllTelemetryEvents } from "./telemetry/storage.js";
-import type { TelemetryConfig } from "./telemetry/types.js";
+import { readTelemetryEvents } from "./telemetry/storage.js";
+import type { TelemetryConfig, TelemetryLevel } from "./telemetry/types.js";
 import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
+import { type BatchOnError, runBatch } from "./tools/batch.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
-import { runCommand } from "./tools/commands.js";
+import { checkCommand, spawnCapture } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile, readRange } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
-import { runPackageScript } from "./tools/package-scripts.js";
-
+import {
+  packageScriptCapture,
+  packageScriptLabel,
+  packageScriptProblem,
+  runPackageScript,
+} from "./tools/package-scripts.js";
+import type { CommandPolicyConfig } from "./tools/policy.js";
+import type { PathProtectionConfig } from "./tools/protected-paths.js";
 import {
   getSkill,
   invalidateSkillDiscoveryCache,
@@ -27,11 +39,14 @@ import {
   readSkillResource,
   skillResourceUrisForPath,
 } from "./tools/skills.js";
+import { invalidateProjectFiles } from "./tools/walk.js";
 import type { CommandConfig } from "./types.js";
 
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
 const PROTOCOL_VERSION = "2026-07-28";
+const LEGACY_PROTOCOL_VERSION = "2025-11-25";
+const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION];
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
@@ -88,18 +103,70 @@ const searchMatchSchema = objectOutput(
     line: { type: "integer" },
     column: { type: "integer" },
     text: stringSchema,
+    before: arrayOutput(stringSchema),
+    after: arrayOutput(stringSchema),
   },
   ["path", "line", "column", "text"],
 );
-const commandResultSchema = objectOutput(
+const searchEnvelope = (item: Record<string, unknown>): Record<string, unknown> =>
+  objectOutput(
+    {
+      items: arrayOutput(item),
+      returned: { type: "integer" },
+      truncated: { type: "boolean" },
+      truncationReason: { type: "string", enum: ["maxResults", "maxBytes"] },
+      backend: { type: "string", enum: ["ripgrep", "builtin"] },
+      incomplete: { type: "boolean" },
+      notes: arrayOutput(stringSchema),
+    },
+    ["items", "returned", "truncated", "backend"],
+  );
+const batchItemSchema = objectOutput(
   {
-    command: stringSchema,
+    index: { type: "integer" },
+    command: { type: "string" },
+    status: { type: "string", enum: ["success", "failure", "skipped"] },
+    reason: { type: "string" },
+    ran: { type: "boolean" },
     exitCode: { type: "integer" },
-    stdout: stringSchema,
-    stderr: stringSchema,
+    durationMs: { type: "number" },
+    stdout: { type: "string" },
+    stderr: { type: "string" },
+    outputTruncated: { type: "boolean" },
   },
-  ["command", "exitCode", "stdout", "stderr"],
+  ["index", "command", "status", "ran"],
 );
+const batchResultSchema = objectOutput(
+  {
+    ok: { type: "boolean" },
+    onError: { type: "string", enum: ["continue", "stop"] },
+    summary: objectOutput(
+      {
+        total: { type: "integer" },
+        success: { type: "integer" },
+        failure: { type: "integer" },
+        skipped: { type: "integer" },
+      },
+      ["total", "success", "failure", "skipped"],
+    ),
+    items: arrayOutput(batchItemSchema),
+    truncated: { type: "boolean" },
+  },
+  ["ok", "onError", "summary", "items", "truncated"],
+);
+const timeoutMsSchema = {
+  type: "integer",
+  minimum: 1000,
+  maximum: 600000,
+  default: 120000,
+  description: "Timeout per item in milliseconds. A timed-out item fails with its partial output.",
+};
+const onErrorSchema = {
+  type: "string",
+  enum: ["continue", "stop"],
+  description:
+    "What to do after an item fails. Every item always reports status success, failure or skipped (with a reason), so you never have to guess whether it ran.",
+};
 
 const codeGraphTool: ToolDefinition = tool(
   "codegraph_explore",
@@ -182,22 +249,28 @@ const baseTools: ToolDefinition[] = [
         },
       },
     },
-    arrayOutput(
-      objectOutput(
-        {
-          kind: { type: "string", enum: ["write", "patch", "delete"] },
-          path: stringSchema,
-          changed: { type: "boolean" },
-          dryRun: { type: "boolean" },
-        },
-        ["kind", "path", "changed"],
-      ),
+    objectOutput(
+      {
+        items: arrayOutput(
+          objectOutput(
+            {
+              kind: { type: "string", enum: ["write", "patch", "delete"] },
+              path: stringSchema,
+              changed: { type: "boolean" },
+              dryRun: { type: "boolean" },
+            },
+            ["kind", "path", "changed"],
+          ),
+        ),
+        dryRun: { type: "boolean" },
+      },
+      ["items", "dryRun"],
     ),
     ["changes"],
   ),
   tool(
     "find_files",
-    "Find project paths by a simple glob pattern using * and ?. Returns {items, truncated}; use this for targeted filename discovery.",
+    "Find project paths by a glob pattern (`*`, `**`, `?`). A pattern without `/` matches file names at any depth (`mcp.ts` finds `src/mcp.ts`). Honors .gitignore inside git repositories. Returns {items, truncated}.",
     {
       pattern: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -211,25 +284,41 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search source files by text or regex within an 8 KB default budget. Binary files and files over 1 MB are skipped; start narrow and expand only when needed.",
+    "Search project text files (source, docs and configuration) by literal text or regex. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Returns {items, returned, truncated, truncationReason, backend}; always check truncated. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. Uses ripgrep when installed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
+      caseSensitive: { type: "boolean", default: false },
+      paths: {
+        type: "array",
+        items: stringSchema,
+        maxItems: 20,
+        description: "Project-relative files or directories to search.",
+      },
+      globs: {
+        type: "array",
+        items: stringSchema,
+        maxItems: 20,
+        description:
+          "Include globs such as *.ts, or exclude globs prefixed with ! such as !**/*.test.ts.",
+      },
+      context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
+      includeGenerated: { type: "boolean", default: false },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(searchMatchSchema),
+    searchEnvelope(searchMatchSchema),
     ["query"],
   ),
   tool(
     "find_symbol",
-    "Find symbol definitions and locations. Use read_range for source context and find_references to trace usage.",
+    "Find likely definitions of a symbol by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Heuristic and case-sensitive; prefer serena_find_symbol or ast_grep_search when available. Returns {items, returned, truncated, backend}. Use read_range for context and find_references to trace usage.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(
+    searchEnvelope(
       objectOutput(
         {
           ...(searchMatchSchema.properties as Record<string, unknown>),
@@ -243,13 +332,13 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_references",
-    "Find source-code references to a symbol. Use this instead of searching entire files when tracing usage of a known symbol.",
+    "Find whole-identifier occurrences of a symbol (case-sensitive text matching). This is lexical: it includes comments, strings and unrelated same-named identifiers; use serena_find_referencing_symbols for semantic references when available. Returns {items, returned, truncated, backend}.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(searchMatchSchema),
+    searchEnvelope(searchMatchSchema),
     ["symbol"],
   ),
   tool(
@@ -280,30 +369,43 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "run_package_scripts_batch",
-    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script; batch independent scripts in one call and avoid running full check/test when a targeted check answers the question.",
+    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
     {
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
+      onError: onErrorSchema,
+      timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(commandResultSchema),
+    batchResultSchema,
     ["scripts"],
   ),
   tool(
     "run_command_batch",
-    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead.",
+    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead. Default onError is continue, so independent inspection commands still run after one fails. Use okExitCodes (for example [0, 1] for rg or grep) when a non-zero exit is a normal outcome.",
     {
       commands: {
         type: "array",
         items: objectOutput(
-          { command: stringSchema, args: { type: "array", items: stringSchema } },
+          {
+            command: stringSchema,
+            args: { type: "array", items: stringSchema },
+            okExitCodes: {
+              type: "array",
+              items: { type: "integer", minimum: 0, maximum: 255 },
+              maxItems: 8,
+              description: "Exit codes that count as success. Default [0].",
+            },
+          },
           ["command"],
         ),
         minItems: 1,
         maxItems: 10,
       },
+      onError: onErrorSchema,
+      timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(commandResultSchema),
+    batchResultSchema,
     ["commands"],
   ),
 ];
@@ -351,16 +453,38 @@ export function createMcpHandler(
     ...(telemetry.configId ? { configId: telemetry.configId } : {}),
     sessionId: telemetry.sessionId ?? randomUUID(),
   });
+  if (telemetry.level !== "none" && telemetry.persist) usePersistentTelemetryKey();
   let sessionStartedAt: number | undefined;
   let sessionLastActivityAt: number | undefined;
   let sessionActiveRequestDurationMs = 0;
   let sessionRequestCount = 0;
   let sessionToolCallCount = 0;
   let sessionCommandCallCount = 0;
-  let sessionRecorded = false;
   let sessionOutputBytes = 0;
   let sessionEstimatedOutputTokens = 0;
   const seenOutputFingerprints = new Set<string>();
+  // Session summaries are snapshotted periodically (last one wins in aggregation) so a killed
+  // process still leaves a summary behind, and written again on graceful close.
+  const sessionSnapshotMs = telemetry.sessionSnapshotMs ?? 60_000;
+  let lastSessionSnapshotAt = Date.now();
+  const recordSessionSummary = (): void => {
+    if (sessionRequestCount === 0 || telemetry.level === "none") return;
+    const started = sessionStartedAt ?? performance.now();
+    const lastActivity = sessionLastActivityAt ?? performance.now();
+    telemetryRecorder.record({
+      event: "session",
+      wallClockDurationMs: Math.max(0, lastActivity - started),
+      activeRequestDurationMs: sessionActiveRequestDurationMs,
+      idleGapDurationMs: Math.max(0, lastActivity - started - sessionActiveRequestDurationMs),
+      requestCount: sessionRequestCount,
+      toolCallCount: sessionToolCallCount,
+      commandCallCount: sessionCommandCallCount,
+    });
+    lastSessionSnapshotAt = Date.now();
+  };
+  const maybeSnapshotSession = (): void => {
+    if (Date.now() - lastSessionSnapshotAt >= sessionSnapshotMs) recordSessionSummary();
+  };
   let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
   const getAvailableTools = async () => {
     if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
@@ -376,6 +500,8 @@ export function createMcpHandler(
   const packageManager = commandConfig.packageManager ?? "npm";
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
+  const commandPolicy = commandConfig.commandPolicy;
+  const pathProtection = commandConfig.protectedPaths;
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -422,6 +548,7 @@ export function createMcpHandler(
       });
     };
     if (sessionStartedAt === undefined) sessionStartedAt = requestStartedAt;
+    maybeSnapshotSession();
     sessionRequestCount += 1;
     const telemetryProject = telemetryProjectPromise ? await telemetryProjectPromise : undefined;
     let message: JsonRpcRequest | undefined;
@@ -481,7 +608,11 @@ export function createMcpHandler(
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
     }
     const params = message.params ?? {};
-    runtime = telemetryRuntime(params);
+    runtime = telemetryRuntime(
+      params,
+      telemetry.level,
+      request.headers.get("mcp-protocol-version"),
+    );
     const meta = isRecord(params._meta) ? params._meta : undefined;
     if (message.method === "initialize") {
       const requestedVersion = params.protocolVersion;
@@ -494,26 +625,20 @@ export function createMcpHandler(
         recordMcpRequest();
         return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
       }
-      const supportedVersions = ["2025-11-25", PROTOCOL_VERSION];
-      if (!supportedVersions.includes(requestedVersion)) {
-        telemetryRequestErrorCategory = "invalid_input";
-        recordMcpRequest();
-        return jsonRpcError(message.id ?? null, -32022, "Unsupported protocol version.", 400, {
-          supported: supportedVersions,
-          requested: requestedVersion,
-        });
-      }
+      const supportedVersions = SUPPORTED_PROTOCOL_VERSIONS;
+      // Lifecycle negotiation: answer with a version we support instead of failing,
+      // so older clients can decide whether to continue.
+      const negotiatedVersion = supportedVersions.includes(requestedVersion)
+        ? requestedVersion
+        : LEGACY_PROTOCOL_VERSION;
       mcpSuccess = true;
-      return trackedJson({
+      const initializeResponse = trackedJson({
         jsonrpc: "2.0",
         id: message.id,
         result: {
-          protocolVersion: requestedVersion,
-          capabilities: {
-            tools: { listChanged: true },
-            resources: { subscribe: true, listChanged: true },
-            prompts: { listChanged: true },
-          },
+          protocolVersion: negotiatedVersion,
+          // Only capabilities that are implemented for the legacy handshake.
+          capabilities: { tools: {}, resources: {} },
           serverInfo: SERVER_INFO,
           instructions: buildAgentInstructions(
             allowedScripts,
@@ -524,6 +649,8 @@ export function createMcpHandler(
           ),
         },
       });
+      recordMcpRequest();
+      return initializeResponse;
     }
     if (meta) {
       const clientCapabilities = meta["io.modelcontextprotocol/clientCapabilities"];
@@ -554,6 +681,9 @@ export function createMcpHandler(
     }
     try {
       switch (message.method) {
+        case "ping":
+          mcpSuccess = true;
+          return trackedJson({ jsonrpc: "2.0", id: message.id, result: {} });
         case "server/discover":
           mcpSuccess = true;
           return trackedJson({
@@ -561,7 +691,7 @@ export function createMcpHandler(
             id: message.id,
             result: {
               resultType: "complete",
-              supportedVersions: [PROTOCOL_VERSION],
+              supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
               capabilities: capabilities(),
               _meta: SERVER_INFO_META,
               instructions: buildDiscoveryInstructions(
@@ -601,10 +731,40 @@ export function createMcpHandler(
             );
           }
           const toolName = params.name;
+          const recordRejectedToolCall = (
+            tool: string,
+            category: string,
+            rejected?: unknown,
+          ): void => {
+            const serialized = JSON.stringify(rejected ?? {});
+            telemetryRecorder.record(
+              {
+                event: "tool_call",
+                tool,
+                requestIdHash: telemetryHash(String(message.id)),
+                success: false,
+                outcome: "error",
+                durationMs: 0,
+                inputBytes: Buffer.byteLength(serialized, "utf8"),
+                estimatedInputTokens: estimateTokens(serialized),
+                errorCategory: category,
+              },
+              telemetryRuntime(
+                params,
+                telemetry.level,
+                request.headers.get("mcp-protocol-version"),
+              ),
+              telemetryProject,
+            );
+          };
           const toolDefinition = (await getAvailableTools()).find((item) => item.name === toolName);
-          if (!toolDefinition) throw new Error(`Unknown tool: ${toolName}`);
+          if (!toolDefinition) {
+            recordRejectedToolCall("unknown", "unknown_tool", params.arguments);
+            throw new Error(`Unknown tool: ${toolName}`);
+          }
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
+            recordRejectedToolCall(toolName, "invalid_input", params.arguments);
             return jsonRpcError(
               message.id ?? null,
               -32602,
@@ -620,6 +780,7 @@ export function createMcpHandler(
           );
           if (headerError) {
             telemetryRequestErrorCategory = "invalid_input";
+            recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
             return jsonRpcError(message.id ?? null, -32020, headerError, 400);
           }
           sessionToolCallCount += 1;
@@ -633,6 +794,8 @@ export function createMcpHandler(
               packageManager,
               allowedCommands,
               blacklistedCommands,
+              commandPolicy,
+              pathProtection,
               notify,
               request.signal,
               codeGraph,
@@ -646,13 +809,20 @@ export function createMcpHandler(
             const estimatedOutputTokens = estimateTokens(serializedResult);
             sessionOutputBytes += outputBytes;
             sessionEstimatedOutputTokens += estimatedOutputTokens;
-            const runtime = telemetryRuntime(params);
+            const runtime = telemetryRuntime(
+              params,
+              telemetry.level,
+              request.headers.get("mcp-protocol-version"),
+            );
+            const metrics = toolTelemetryMetrics(toolName, result, seenOutputFingerprints);
+            const outcome = toolOutcome(result, count, metrics.truncated === true);
             telemetryRecorder.record(
               {
                 event: "tool_call",
                 tool: toolName,
                 requestIdHash: telemetryHash(String(message.id)),
-                success: true,
+                success: result.isError !== true,
+                outcome,
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 outputBytes,
@@ -660,9 +830,9 @@ export function createMcpHandler(
                 estimatedOutputTokens,
                 cumulativeOutputBytes: sessionOutputBytes,
                 cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
-                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...(count === undefined ? {} : { resultCount: count }),
-                ...toolTelemetryMetrics(toolName, result, seenOutputFingerprints),
+                ...metrics,
               },
               runtime,
               telemetryProject,
@@ -675,6 +845,7 @@ export function createMcpHandler(
                   event: "command_call",
                   commandFamily: command.family,
                   operation: command.operation,
+                  ...commandExecutables(toolName, argumentsValue),
                   success: true,
                   durationMs,
                   outputBytes,
@@ -691,7 +862,11 @@ export function createMcpHandler(
             });
           } catch (error) {
             const durationMs = performance.now() - startedAt;
-            const runtime = telemetryRuntime(params);
+            const runtime = telemetryRuntime(
+              params,
+              telemetry.level,
+              request.headers.get("mcp-protocol-version"),
+            );
             const errorCategory = classifyTelemetryError(error);
             telemetryRecorder.record(
               {
@@ -699,10 +874,11 @@ export function createMcpHandler(
                 tool: toolName,
                 requestIdHash: telemetryHash(String(message.id)),
                 success: false,
+                outcome: "error",
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
-                inputFingerprint: telemetryHash(JSON.stringify({ toolName, argumentsValue })),
+                inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 errorCategory,
               },
               runtime,
@@ -716,6 +892,7 @@ export function createMcpHandler(
                   event: "command_call",
                   commandFamily: command.family,
                   operation: command.operation,
+                  ...commandExecutables(toolName, argumentsValue),
                   success: false,
                   durationMs,
                   errorCategory,
@@ -959,26 +1136,7 @@ export function createMcpHandler(
   handler.telemetrySnapshot = () => telemetryRecorder.snapshot();
 
   handler.closeSubscriptions = () => {
-    if (!sessionRecorded && sessionRequestCount > 0 && telemetry.level !== "none") {
-      sessionRecorded = true;
-      telemetryRecorder.record({
-        event: "session",
-        wallClockDurationMs: Math.max(
-          0,
-          (sessionLastActivityAt ?? performance.now()) - (sessionStartedAt ?? performance.now()),
-        ),
-        activeRequestDurationMs: sessionActiveRequestDurationMs,
-        idleGapDurationMs: Math.max(
-          0,
-          (sessionLastActivityAt ?? performance.now()) -
-            (sessionStartedAt ?? performance.now()) -
-            sessionActiveRequestDurationMs,
-        ),
-        requestCount: sessionRequestCount,
-        toolCallCount: sessionToolCallCount,
-        commandCallCount: sessionCommandCallCount,
-      });
-    }
+    recordSessionSummary();
     for (const subscription of subscriptions) {
       writeSse(subscription.controller, {
         jsonrpc: "2.0",
@@ -1143,7 +1301,7 @@ function buildAgentCapabilities(
 
 function capabilities(): Record<string, unknown> {
   return {
-    tools: { listChanged: true },
+    tools: {},
     resources: { listChanged: true, subscribe: true },
     extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
   };
@@ -1157,6 +1315,8 @@ async function callTool(
   packageManager: "npm" | "pnpm" | "yarn" | "bun",
   allowedCommands: string[],
   blacklistedCommands: string[],
+  commandPolicy: CommandPolicyConfig | undefined,
+  pathProtection: PathProtectionConfig | undefined,
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1201,7 +1361,11 @@ async function callTool(
       typeof args.until === "string" ? Date.parse(args.until) : Number.POSITIVE_INFINITY;
     if (Number.isNaN(since) || Number.isNaN(until))
       throw new Error("since and until must be valid ISO timestamps.");
-    const all = readAllTelemetryEvents().filter(
+    const all = readTelemetryEvents({
+      ...(typeof args.profile === "string" && args.profile ? { profile: args.profile } : {}),
+      ...(typeof args.session === "string" && args.session ? { session: args.session } : {}),
+      ...(Number.isFinite(since) ? { sinceMs: since } : {}),
+    }).filter(
       (event) =>
         (!args.profile || event.configId === args.profile) &&
         (!args.session || event.sessionId === args.session) &&
@@ -1301,6 +1465,7 @@ async function callTool(
                 arch: item.runtime.arch,
                 mcpClientName: item.runtime.mcpClientName,
                 mcpClientVersion: item.runtime.mcpClientVersion,
+                mcpProtocolVersion: item.runtime.mcpProtocolVersion,
               }
             : undefined,
           project: item.project
@@ -1316,16 +1481,7 @@ async function callTool(
         })),
       };
     }
-    const maxBytes = outputBytesArg(args.maxBytes);
-    const serialized = JSON.stringify(result);
-    if (Buffer.byteLength(serialized, "utf8") <= maxBytes) return result;
-    return {
-      mode,
-      matchedEvents: all.length,
-      truncated: true,
-      preview: serialized.slice(0, Math.max(0, maxBytes - 200)),
-      note: "Reduce limit or filter by profile/session/time range to retrieve a smaller result.",
-    };
+    return completeToolResult(fitAnalyticsResult(result, outputBytesArg(args.maxBytes)));
   }
   switch (name) {
     case "ast_grep_search": {
@@ -1396,13 +1552,17 @@ async function callTool(
       const affected = [...new Set(changes.map((change) => change.path))];
       const before = new Map<string, string[]>();
       for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
-      const applied = await applyFileChanges(root, changes, dryRun);
-      structuredContent = applied.map((item) => {
-        if (!isRecord(item)) return item;
-        const { content: _content, previousContent: _previousContent, ...summary } = item;
-        return summary;
-      });
+      const applied = await applyFileChanges(root, changes, dryRun, pathProtection);
+      structuredContent = {
+        items: applied.map((item) => {
+          if (!isRecord(item)) return item;
+          const { content: _content, previousContent: _previousContent, ...summary } = item;
+          return summary;
+        }),
+        dryRun,
+      };
       if (!dryRun) {
+        invalidateProjectFiles(root);
         invalidateSkillDiscoveryCache(root);
         for (const p of affected) await notifyResourceChange(notify, root, p, before.get(p) ?? []);
       }
@@ -1410,38 +1570,40 @@ async function callTool(
     }
     case "find_files": {
       const maxResults = numberArg(args.maxResults, 200, 1000);
-      const results = await findFiles(root, String(args.pattern), maxResults);
-      const bounded = boundedItems(results, outputBytesArg(args.maxBytes));
+      const found = await findFiles(root, String(args.pattern), maxResults);
+      const bounded = boundedItems(found.files, outputBytesArg(args.maxBytes));
       structuredContent = {
         items: bounded.items,
-        truncated: bounded.truncated || results.length >= maxResults,
+        truncated: bounded.truncated || found.truncated,
       };
       break;
     }
-    case "search_code":
-      structuredContent = await searchCode(
-        root,
-        String(args.query),
-        Boolean(args.regex),
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
+    case "search_code": {
+      const paths = optionalStringArray(args.paths, "paths", 20);
+      const globs = optionalStringArray(args.globs, "globs", 20);
+      structuredContent = await searchCode(root, String(args.query), {
+        regex: args.regex === true,
+        caseSensitive: args.caseSensitive === true,
+        includeGenerated: args.includeGenerated === true,
+        context: intArg(args.context, 0, 0, 5, "context"),
+        maxResults: numberArg(args.maxResults, 200, 1000),
+        maxBytes: outputBytesArg(args.maxBytes),
+        ...(paths ? { paths } : {}),
+        ...(globs ? { globs } : {}),
+      });
       break;
+    }
     case "find_symbol":
-      structuredContent = await findSymbol(
-        root,
-        String(args.symbol),
-        numberArg(args.maxResults, 100, 500),
-        outputBytesArg(args.maxBytes),
-      );
+      structuredContent = await findSymbol(root, String(args.symbol), {
+        maxResults: numberArg(args.maxResults, 100, 500),
+        maxBytes: outputBytesArg(args.maxBytes),
+      });
       break;
     case "find_references":
-      structuredContent = await findReferences(
-        root,
-        String(args.symbol),
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
+      structuredContent = await findReferences(root, String(args.symbol), {
+        maxResults: numberArg(args.maxResults, 200, 1000),
+        maxBytes: outputBytesArg(args.maxBytes),
+      });
       break;
     case "project_context": {
       const overview = await projectOverview(root);
@@ -1560,72 +1722,59 @@ async function callTool(
       structuredContent = await fileInfo(root, String(args.path));
       break;
     case "run_package_scripts_batch": {
-      const output = [];
       const scripts = stringArray(args.scripts, "scripts");
+      const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (scripts.length > 10)
         throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
-      for (const script of scripts) {
-        const value = await runPackageScript(
-          root,
-          script,
-          120000,
-          allowedScripts,
-          signal,
-          packageManager,
-        );
-        output.push(value);
-        if (value.exitCode !== 0) break;
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const boundedOutput = [];
-      let remaining = maxBytes - 2;
-      for (const item of output) {
-        const separatorBytes = boundedOutput.length ? 1 : 0;
-        if (remaining <= separatorBytes) break;
-        const budget = remaining - separatorBytes;
-        const bounded = boundCommandResult(item, budget);
-        const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
-        if (boundedBytes > budget) break;
-        boundedOutput.push(bounded);
-        remaining -= separatorBytes + boundedBytes;
-        if (remaining <= 0) break;
-      }
-      structuredContent = boundedOutput;
+      structuredContent = await runBatch(
+        scripts.map((script) => ({
+          label: packageScriptLabel(packageManager, script),
+          preflight: () => packageScriptProblem(root, script, allowedScripts),
+          execute: () =>
+            packageScriptCapture(root, script, {
+              timeoutMs,
+              packageManager,
+              ...(signal ? { signal } : {}),
+            }),
+        })),
+        { onError: batchOnError(args.onError, "stop"), maxBytes: outputBytesArg(args.maxBytes) },
+      );
       break;
     }
     case "run_command_batch": {
-      const output = [];
       const commands = objectArray(args.commands, "commands");
+      const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (commands.length > 10)
         throw new Error("run_command_batch accepts at most 10 commands per call.");
-      for (const item of commands) {
-        const value = await runCommand(
-          root,
-          String(item.command),
-          Array.isArray(item.args) ? item.args.map(String) : [],
-          allowedCommands,
-          blacklistedCommands,
-          120000,
-          signal,
-        );
-        output.push(value);
-        if (value.exitCode !== 0) break;
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const boundedOutput = [];
-      let remaining = maxBytes - 2;
-      for (const item of output) {
-        const separatorBytes = boundedOutput.length ? 1 : 0;
-        if (remaining <= separatorBytes) break;
-        const budget = remaining - separatorBytes;
-        const bounded = boundCommandResult(item, budget);
-        const boundedBytes = Buffer.byteLength(JSON.stringify(bounded), "utf8");
-        if (boundedBytes > budget) break;
-        boundedOutput.push(bounded);
-        remaining -= separatorBytes + boundedBytes;
-        if (remaining <= 0) break;
-      }
-      structuredContent = boundedOutput;
+      structuredContent = await runBatch(
+        commands.map((item) => {
+          const command = typeof item.command === "string" ? item.command : "";
+          const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
+          const okExitCodes = okExitCodesArg(item.okExitCodes);
+          return {
+            label: [command, ...commandArgs.map(String)].join(" "),
+            ...(okExitCodes ? { okExitCodes } : {}),
+            preflight: () =>
+              typeof item.command !== "string"
+                ? "command must be a string."
+                : checkCommand(root, command, commandArgs, {
+                    allowedCommands,
+                    blacklistedCommands,
+                    allowedScripts,
+                    ...(commandPolicy ? { policy: commandPolicy } : {}),
+                  }),
+            execute: () =>
+              spawnCapture(root, command, commandArgs, {
+                timeoutMs,
+                ...(signal ? { signal } : {}),
+              }),
+          };
+        }),
+        {
+          onError: batchOnError(args.onError, "continue"),
+          maxBytes: outputBytesArg(args.maxBytes),
+        },
+      );
       break;
     }
     default:
@@ -1755,6 +1904,55 @@ function mcpHeaderValuesEqual(
   return bodyValue === headerValue;
 }
 
+const ANALYTICS_TRUNCATION_NOTE =
+  "Result exceeded maxBytes; narrow by profile/session/time range or lower limit.";
+
+/** Keeps analytics output valid structured data: trims arrays or detail keys, never cuts JSON text. */
+function fitAnalyticsResult(
+  result: Record<string, unknown>,
+  maxBytes: number,
+): Record<string, unknown> {
+  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  if (size(result) <= maxBytes) return { ...result, truncated: false };
+  for (const key of ["events", "sessions"] as const) {
+    const items = result[key];
+    if (!Array.isArray(items)) continue;
+    let kept: unknown[] = items;
+    const build = () => ({
+      ...result,
+      [key]: kept,
+      truncated: true,
+      returned: kept.length,
+      note: ANALYTICS_TRUNCATION_NOTE,
+    });
+    while (kept.length > 0 && size(build()) > maxBytes)
+      kept = kept.slice(Math.ceil(kept.length / 4));
+    return build();
+  }
+  const configs = isRecord(result.configs) ? result.configs : {};
+  const slim = Object.fromEntries(
+    Object.entries(configs).map(([configId, config]) => [
+      configId,
+      isRecord(config)
+        ? Object.fromEntries(
+            Object.entries(config).filter(
+              ([key]) => key !== "tools" && key !== "commands" && key !== "failuresByCategory",
+            ),
+          )
+        : config,
+    ]),
+  );
+  const reduced = { ...result, configs: slim, truncated: true, note: ANALYTICS_TRUNCATION_NOTE };
+  if (size(reduced) <= maxBytes) return reduced;
+  return {
+    mode: result.mode,
+    matchedEvents: result.matchedEvents,
+    configs: Object.keys(configs),
+    truncated: true,
+    note: ANALYTICS_TRUNCATION_NOTE,
+  };
+}
+
 function completeToolResult(structuredContent: unknown): Record<string, unknown> {
   return {
     resultType: "complete",
@@ -1763,11 +1961,12 @@ function completeToolResult(structuredContent: unknown): Record<string, unknown>
     _meta: SERVER_INFO_META,
   };
 }
-function telemetryRuntime(
-  params: Record<string, unknown>,
-): import("./telemetry/types.js").TelemetryRuntimeContext {
-  const clientInfo = isRecord(params.clientInfo) ? params.clientInfo : undefined;
-  return {
+type TelemetryRuntime = import("./telemetry/types.js").TelemetryRuntimeContext;
+let cachedStaticRuntime: TelemetryRuntime | undefined;
+
+/** Fields that never change during the process lifetime are collected once. */
+function staticTelemetryRuntime(): TelemetryRuntime {
+  cachedStaticRuntime ??= {
     agentDirVersion: packageVersion,
     nodeMajor: Number(process.versions.node.split(".")[0]),
     os:
@@ -1779,17 +1978,47 @@ function telemetryRuntime(
             ? "windows"
             : "other",
     arch: process.arch,
-    ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
-    ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
     nodeVersion: process.versions.node,
     ...linuxDistribution(),
     kernelVersion: release(),
     hostname: hostname(),
     username: userInfo().username,
-    processId: process.pid,
-    parentProcessId: process.ppid,
-    processUptimeMs: Math.round(process.uptime() * 1000),
-    memoryRssBytes: process.memoryUsage().rss,
+  };
+  return cachedStaticRuntime;
+}
+
+function telemetryRuntime(
+  params: Record<string, unknown>,
+  level: TelemetryLevel,
+  headerProtocolVersion?: string | null,
+): TelemetryRuntime {
+  const meta = isRecord(params._meta) ? params._meta : undefined;
+  const metaClient = meta?.["io.modelcontextprotocol/clientInfo"];
+  const clientInfo = isRecord(params.clientInfo)
+    ? params.clientInfo
+    : isRecord(metaClient)
+      ? metaClient
+      : undefined;
+  const metaVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
+  const protocolVersion =
+    typeof params.protocolVersion === "string"
+      ? params.protocolVersion
+      : typeof metaVersion === "string"
+        ? metaVersion
+        : (headerProtocolVersion ?? undefined);
+  return {
+    ...staticTelemetryRuntime(),
+    ...(typeof clientInfo?.name === "string" ? { mcpClientName: clientInfo.name } : {}),
+    ...(typeof clientInfo?.version === "string" ? { mcpClientVersion: clientInfo.version } : {}),
+    ...(protocolVersion ? { mcpProtocolVersion: protocolVersion } : {}),
+    ...(level === "none"
+      ? {}
+      : {
+          processId: process.pid,
+          parentProcessId: process.ppid,
+          processUptimeMs: Math.round(process.uptime() * 1000),
+          memoryRssBytes: process.memoryUsage().rss,
+        }),
   };
 }
 
@@ -1814,7 +2043,7 @@ function linuxDistribution(): { distroId?: string; distroName?: string; distroVe
 }
 
 function telemetryHash(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
+  return telemetryHmac(value);
 }
 
 // A rough byte-based proxy, not a model-tokenizer count or Claude billing measurement.
@@ -1837,7 +2066,19 @@ function toolTelemetryMetrics(
   files?: Array<{ pathHash: string; contentHash?: string; bytes: number }>;
 } {
   const structured = result.structuredContent;
-  if (!Array.isArray(structured) && !isRecord(structured)) return {};
+  if (!Array.isArray(structured) && !isRecord(structured)) {
+    // Integration results (CodeGraph, Serena) carry no structured content; still measure them.
+    const json = JSON.stringify(result);
+    const fingerprint = telemetryHash(json);
+    const bytes = Buffer.byteLength(json, "utf8");
+    const duplicate = seenOutputFingerprints.has(fingerprint) ? bytes : 0;
+    seenOutputFingerprints.add(fingerprint);
+    return {
+      outputFingerprint: fingerprint,
+      duplicateOutputBytes: duplicate,
+      ...(result.truncated === true ? { truncated: true } : {}),
+    };
+  }
   const paths = new Set<string>();
   const files = new Map<string, { pathHash: string; contentHash?: string; bytes: number }>();
   let truncated = false;
@@ -1867,6 +2108,7 @@ function toolTelemetryMetrics(
     for (const child of Object.values(value)) visit(child);
   };
   visit(structured);
+  if (result.truncated === true) truncated = true;
   const outputJson = JSON.stringify(result);
   const outputFingerprint = telemetryHash(outputJson);
   const outputBytes = Buffer.byteLength(outputJson, "utf8");
@@ -1884,6 +2126,26 @@ function toolTelemetryMetrics(
     uniqueFileCount: files.size,
     ...(files.size ? { files: [...files.values()].slice(0, 100) } : {}),
   };
+}
+
+function toolOutcome(
+  result: Record<string, unknown>,
+  count: number | undefined,
+  truncated: boolean,
+): "ok" | "empty" | "truncated" | "error" {
+  if (result.isError === true) return "error";
+  if (truncated) return "truncated";
+  if (count === 0) return "empty";
+  return "ok";
+}
+
+function commandExecutables(toolName: string, argumentsValue: unknown): { executables?: string[] } {
+  if (toolName !== "run_command_batch" || !isRecord(argumentsValue)) return {};
+  if (!Array.isArray(argumentsValue.commands)) return {};
+  const names = argumentsValue.commands.flatMap((item) =>
+    isRecord(item) && typeof item.command === "string" ? [item.command] : [],
+  );
+  return names.length > 0 ? { executables: names.slice(0, 10) } : {};
 }
 
 function commandTelemetryDescriptor(
@@ -1932,14 +2194,70 @@ async function buildTelemetryProjectContext(
   };
 }
 
+function optionalStringArray(value: unknown, name: string, max: number): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    throw new Error(`${name} must be an array of strings.`);
+  if (value.length > max) throw new Error(`${name} accepts at most ${max} items.`);
+  return value as string[];
+}
+
+function intArg(value: unknown, fallback: number, min: number, max: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
+    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
+  return value as number;
+}
+
+function timeoutMsArg(value: unknown): number {
+  if (value === undefined) return 120000;
+  if (!Number.isInteger(value) || (value as number) < 1000 || (value as number) > 600000)
+    throw new Error("timeoutMs must be an integer between 1000 and 600000.");
+  return value as number;
+}
+
+function batchOnError(value: unknown, fallback: BatchOnError): BatchOnError {
+  if (value === undefined) return fallback;
+  if (value === "continue" || value === "stop") return value;
+  throw new Error("onError must be 'continue' or 'stop'.");
+}
+
+function okExitCodesArg(value: unknown): number[] | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 8 ||
+    value.some((code) => !Number.isInteger(code) || code < 0 || code > 255)
+  )
+    throw new Error("okExitCodes must be 1 to 8 integers between 0 and 255.");
+  return value as number[];
+}
+
 function resultCount(result: Record<string, unknown>): number | undefined {
   const structured = result.structuredContent;
+  if (isRecord(structured) && Array.isArray(structured.items)) return structured.items.length;
   return Array.isArray(structured) ? structured.length : undefined;
 }
 
 function classifyTelemetryError(error: unknown): string {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (message.includes("not found")) return "not_found";
+  if (message.startsWith("unknown tool")) return "unknown_tool";
+  if (
+    message.includes("integration is unavailable") ||
+    message.includes("is not installed") ||
+    message.includes("process is not running") ||
+    message.includes("analytics is disabled") ||
+    message.includes("not indexed")
+  )
+    return "unavailable_integration";
+  if (
+    message.includes("not found") ||
+    message.includes("enoent") ||
+    message.includes("no such file") ||
+    message.includes("does not exist")
+  )
+    return "not_found";
   if (message.includes("invalid") || message.includes("must be")) return "invalid_input";
   if (message.includes("blocked") || message.includes("not allowed")) return "authorization";
   if (message.includes("timeout") || message.includes("timed out")) return "timeout";
@@ -2223,7 +2541,7 @@ function subscriptionResponse(
 }
 
 function writeSse(controller: ReadableStreamDefaultController<Uint8Array>, message: unknown): void {
-  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(message)}\\n\\n`));
+  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(message)}\n\n`));
 }
 
 function json(value: unknown, status = 200): Response {

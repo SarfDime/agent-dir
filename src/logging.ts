@@ -176,6 +176,10 @@ export function printHelp(): void {
   writeLine("      --scripts <scripts>    Comma-separated allowed package scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
+  writeLine("      --protect <paths>      Comma-separated extra paths agents may not edit (globs)");
+  writeLine(
+    "      --unprotect <paths>    Comma-separated paths that stay editable despite defaults",
+  );
   writeLine("      --token <token>        Explicit Bearer token");
   writeLine("      --analytics            Expose local telemetry analytics through MCP (opt-in)");
   writeLine("      --no-tunnel            Disable tunneling");
@@ -214,6 +218,7 @@ export function printBanner(options: {
   packageManager?: "npm" | "pnpm" | "yarn" | "bun";
   commands?: string[];
   blacklistedCommands?: string[];
+  protectedPaths?: string[];
   codeGraph?: boolean;
   astGrep?: boolean;
   serena?: string[];
@@ -261,6 +266,12 @@ export function printBanner(options: {
         BRIGHT_CYAN,
       ),
     );
+  writeLine(
+    boxContent(
+      `${color("PROTECT", BRIGHT_YELLOW)}  ${[".git", ".env*", ".npmrc", ...(options.protectedPaths ?? [])].join(", ")}`,
+      BRIGHT_CYAN,
+    ),
+  );
   writeLine(boxBottom(BRIGHT_CYAN));
   writeLine("");
   writeLine(boxTop("MCP ENDPOINT", BRIGHT_MAGENTA));

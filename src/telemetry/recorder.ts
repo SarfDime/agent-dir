@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { createTelemetryEnvelope } from "./privacy.js";
-import { telemetrySessionPath } from "./storage.js";
+import { pruneTelemetry, telemetrySessionPath } from "./storage.js";
 import type {
   AnonymousTelemetryEvent,
   TelemetryEnvelope,
@@ -12,6 +12,7 @@ import type {
 } from "./types.js";
 
 const DEFAULT_MAX_EVENTS = 500;
+const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export interface TelemetryRecorderOptions {
   level: TelemetryLevel;
@@ -34,6 +35,9 @@ export class TelemetryRecorder {
   private readonly persistPath: string;
   private readonly configId: string;
   private readonly sessionId: string;
+  private readonly defaultLocation: boolean;
+  private lastPrune = 0;
+  private fileReady = false;
 
   constructor(options: TelemetryRecorderOptions) {
     this.level = options.level;
@@ -44,7 +48,11 @@ export class TelemetryRecorder {
     this.configId = options.configId ?? "default";
     this.sessionId = options.sessionId ?? randomUUID();
     this.persistPath = options.persistPath ?? telemetrySessionPath(this.configId, this.sessionId);
-    if (this.persist && this.level !== "none") this.loadPersisted();
+    this.defaultLocation = options.persistPath === undefined;
+    if (this.persist && this.level !== "none") {
+      this.maybePrune();
+      this.loadPersisted();
+    }
   }
 
   record(
@@ -65,7 +73,10 @@ export class TelemetryRecorder {
 
     if (this.events.length >= this.maxEvents) this.events.shift();
     this.events.push(envelope);
-    if (this.persist) this.persistEvent(envelope);
+    if (this.persist) {
+      this.maybePrune();
+      this.persistEvent(envelope);
+    }
   }
 
   snapshot(): TelemetryEnvelope[] {
@@ -108,16 +119,36 @@ export class TelemetryRecorder {
     }
   }
 
-  private persistEvent(envelope: TelemetryEnvelope): void {
+  /** Enforces retention (30 days / 100 MB) for the shared store, at most every few hours. */
+  private maybePrune(): void {
+    if (!this.persist || this.level === "none" || !this.defaultLocation) return;
+    const now = Date.now();
+    if (now - this.lastPrune < PRUNE_INTERVAL_MS) return;
+    this.lastPrune = now;
     try {
-      mkdirSync(dirname(this.persistPath), { recursive: true, mode: 0o700 });
-      appendFileSync(this.persistPath, `${JSON.stringify(envelope)}\n`, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      chmodSync(this.persistPath, 0o600);
+      pruneTelemetry({ keep: [this.persistPath] });
     } catch {
-      // Telemetry persistence must never affect the MCP request path.
+      // Retention must never affect the MCP request path.
+    }
+  }
+
+  private persistEvent(envelope: TelemetryEnvelope): void {
+    const line = `${JSON.stringify(envelope)}\n`;
+    // Directory creation and chmod happen once; if the file disappears (for example after
+    // `telemetry reset`), retry once with full setup.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (!this.fileReady) mkdirSync(dirname(this.persistPath), { recursive: true, mode: 0o700 });
+        appendFileSync(this.persistPath, line, { encoding: "utf8", mode: 0o600 });
+        if (!this.fileReady) {
+          chmodSync(this.persistPath, 0o600);
+          this.fileReady = true;
+        }
+        return;
+      } catch {
+        // Telemetry persistence must never affect the MCP request path.
+        this.fileReady = false;
+      }
     }
   }
 }

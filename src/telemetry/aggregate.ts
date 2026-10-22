@@ -48,6 +48,7 @@ export interface TelemetrySummary {
         }
       >;
       legacySessionEvents: number;
+      efficiency: TelemetryEfficiency;
       sessions: Record<
         string,
         {
@@ -130,6 +131,196 @@ function collectFailures(
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
+}
+
+export interface TelemetryEfficiency {
+  estimatedOutputTokens: number;
+  /** Calls whose output was identical to an earlier output in the same process. */
+  duplicateOutputCalls: number;
+  duplicateOutputBytes: number;
+  /** Calls repeating an earlier call (same tool and canonical arguments) in the same session. */
+  duplicateInputCalls: number;
+  /** read_range calls on a file already read earlier in the same session. */
+  repeatedFileReadCalls: number;
+  searchThenReadTransitions: number;
+  /** Calls grouped into episodes separated by an idle gap; sessions are process lifetimes. */
+  episodes: { count: number; callsMedian: number; callsMax: number; idleGapMinutes: number };
+  tools: Record<
+    string,
+    {
+      calls: number;
+      estimatedOutputTokens: number;
+      tokenSharePercent: number;
+      avgOutputTokens: number;
+      outcomes: Record<string, number>;
+      truncatedRatePercent: number;
+      emptyRatePercent: number;
+      duplicateOutputCalls: number;
+    }
+  >;
+  topTransitions: Array<{ from: string; to: string; count: number }>;
+  clients: Record<string, number>;
+  protocolVersions: Record<string, number>;
+}
+
+const EPISODE_IDLE_GAP_MS = 10 * 60 * 1000;
+const SEARCH_TOOLS = new Set([
+  "search_code",
+  "find_symbol",
+  "find_references",
+  "ast_grep_search",
+  "codegraph_explore",
+  "serena_search_for_pattern",
+  "serena_find_symbol",
+  "serena_find_referencing_symbols",
+]);
+
+type ToolCallEvent = Extract<TelemetryEnvelope["event"], { event: "tool_call" }>;
+
+function outcomeOf(event: ToolCallEvent): string {
+  if (event.outcome) return event.outcome;
+  if (!event.success) return "error";
+  if (event.truncated) return "truncated";
+  if (event.resultCount === 0) return "empty";
+  return "ok";
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)] ?? 0;
+}
+
+/** Efficiency metrics derived only from recorded events; never invents unmeasured values. */
+function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
+  const calls = group
+    .flatMap((envelope) =>
+      envelope.event.event === "tool_call" ? [{ envelope, event: envelope.event }] : [],
+    )
+    .sort((a, b) => a.envelope.timestamp.localeCompare(b.envelope.timestamp));
+
+  const tools = new Map<
+    string,
+    {
+      calls: number;
+      tokens: number;
+      outcomes: Record<string, number>;
+      duplicates: number;
+    }
+  >();
+  const transitions = new Map<string, number>();
+  const lastBySession = new Map<string, { tool: string; time: number; episodeCalls: number }>();
+  const seenInputs = new Set<string>();
+  const readPaths = new Set<string>();
+  const episodeCalls: number[] = [];
+  let totalTokens = 0;
+  let duplicateOutputCalls = 0;
+  let duplicateOutputBytes = 0;
+  let duplicateInputCalls = 0;
+  let repeatedFileReadCalls = 0;
+  let searchThenReadTransitions = 0;
+
+  for (const { envelope, event } of calls) {
+    const tokens = event.estimatedOutputTokens ?? 0;
+    totalTokens += tokens;
+    const item = tools.get(event.tool) ?? { calls: 0, tokens: 0, outcomes: {}, duplicates: 0 };
+    item.calls += 1;
+    item.tokens += tokens;
+    const outcome = outcomeOf(event);
+    item.outcomes[outcome] = (item.outcomes[outcome] ?? 0) + 1;
+    if ((event.duplicateOutputBytes ?? 0) > 0) {
+      item.duplicates += 1;
+      duplicateOutputCalls += 1;
+      duplicateOutputBytes += event.duplicateOutputBytes ?? 0;
+    }
+    tools.set(event.tool, item);
+
+    const sessionKey = envelope.sessionId;
+    if (event.inputFingerprint) {
+      const key = `${sessionKey}|${event.inputFingerprint}`;
+      if (seenInputs.has(key)) duplicateInputCalls += 1;
+      seenInputs.add(key);
+    }
+    if (event.tool === "read_range" && event.files?.[0]) {
+      const key = `${sessionKey}|${event.files[0].pathHash}`;
+      if (readPaths.has(key)) repeatedFileReadCalls += 1;
+      readPaths.add(key);
+    }
+
+    const time = Date.parse(envelope.timestamp);
+    const previous = lastBySession.get(sessionKey);
+    if (previous && time - previous.time <= EPISODE_IDLE_GAP_MS) {
+      const key = `${previous.tool}>${event.tool}`;
+      transitions.set(key, (transitions.get(key) ?? 0) + 1);
+      if (SEARCH_TOOLS.has(previous.tool) && event.tool === "read_range")
+        searchThenReadTransitions += 1;
+    }
+    if (previous && time - previous.time <= EPISODE_IDLE_GAP_MS) {
+      lastBySession.set(sessionKey, {
+        tool: event.tool,
+        time,
+        episodeCalls: previous.episodeCalls + 1,
+      });
+    } else {
+      if (previous) episodeCalls.push(previous.episodeCalls);
+      lastBySession.set(sessionKey, { tool: event.tool, time, episodeCalls: 1 });
+    }
+  }
+  for (const last of lastBySession.values()) episodeCalls.push(last.episodeCalls);
+
+  const clients: Record<string, number> = {};
+  const protocolVersions: Record<string, number> = {};
+  for (const envelope of group) {
+    if (envelope.event.event !== "mcp_request" || !envelope.runtime) continue;
+    const name = envelope.runtime.mcpClientName;
+    if (name) {
+      const label = `${name}@${envelope.runtime.mcpClientVersion ?? "?"}`;
+      clients[label] = (clients[label] ?? 0) + 1;
+    }
+    const version = envelope.runtime.mcpProtocolVersion;
+    if (version) protocolVersions[version] = (protocolVersions[version] ?? 0) + 1;
+  }
+
+  return {
+    estimatedOutputTokens: totalTokens,
+    duplicateOutputCalls,
+    duplicateOutputBytes,
+    duplicateInputCalls,
+    repeatedFileReadCalls,
+    searchThenReadTransitions,
+    episodes: {
+      count: episodeCalls.length,
+      callsMedian: median(episodeCalls),
+      callsMax: episodeCalls.length ? Math.max(...episodeCalls) : 0,
+      idleGapMinutes: EPISODE_IDLE_GAP_MS / 60000,
+    },
+    tools: Object.fromEntries(
+      [...tools.entries()]
+        .sort((a, b) => b[1].tokens - a[1].tokens)
+        .map(([name, item]) => [
+          name,
+          {
+            calls: item.calls,
+            estimatedOutputTokens: item.tokens,
+            tokenSharePercent: rate(item.tokens, totalTokens),
+            avgOutputTokens: Math.round(item.tokens / (item.calls || 1)),
+            outcomes: item.outcomes,
+            truncatedRatePercent: rate(item.outcomes.truncated ?? 0, item.calls),
+            emptyRatePercent: rate(item.outcomes.empty ?? 0, item.calls),
+            duplicateOutputCalls: item.duplicates,
+          },
+        ]),
+    ),
+    topTransitions: [...transitions.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([key, count]) => {
+        const [from = "", to = ""] = key.split(">");
+        return { from, to, count };
+      }),
+    clients,
+    protocolVersions,
+  };
 }
 
 export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummary {
@@ -307,6 +498,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
         [...commands.entries()].map(([name, item]) => [name, mapBucket(item)]),
       ),
       legacySessionEvents,
+      efficiency: summarizeEfficiency(group),
       sessions: Object.fromEntries(
         [...sessions.entries()].map(([sessionId, session]) => [
           sessionId,

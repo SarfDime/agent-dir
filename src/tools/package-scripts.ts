@@ -1,20 +1,55 @@
-import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { PackageManager } from "../types.js";
-import type { CommandResult } from "./commands.js";
-import {
-  appendBoundedOutput,
-  commandEnvironment,
-  processTreeSpawnOptions,
-  terminateProcessTree,
-} from "./commands.js";
+import type { CaptureResult, CommandResult } from "./commands.js";
+import { spawnCapture } from "./commands.js";
 
 interface PackageJson {
   scripts?: Record<string, string>;
 }
 
-export function runPackageScript(
+/** Validates a script request; returns a problem description or undefined when it can run. */
+export async function packageScriptProblem(
+  root: string,
+  script: string,
+  allowedScripts: string[] = [],
+): Promise<string | undefined> {
+  if (typeof script !== "string" || !/^[A-Za-z0-9:_-]+$/.test(script))
+    return "Invalid package script name.";
+  let packageJson: PackageJson;
+  try {
+    packageJson = JSON.parse(
+      await fs.readFile(path.join(root, "package.json"), "utf8"),
+    ) as PackageJson;
+  } catch {
+    return "No valid package.json found.";
+  }
+  if (!packageJson.scripts?.[script])
+    return `Package script '${script}' does not exist in package.json.`;
+  if (!allowedScripts.includes(script))
+    return `Package script '${script}' is not allowed by this profile.`;
+  return undefined;
+}
+
+export function packageScriptLabel(packageManager: PackageManager, script: string): string {
+  return `${packageManager} run ${script}`;
+}
+
+/** Runs an already validated script with the shared process runner. */
+export function packageScriptCapture(
+  root: string,
+  script: string,
+  options: { timeoutMs?: number; signal?: AbortSignal; packageManager?: PackageManager } = {},
+): Promise<CaptureResult> {
+  const packageManager = options.packageManager ?? "npm";
+  const executable = process.platform === "win32" ? `${packageManager}.cmd` : packageManager;
+  return spawnCapture(root, executable, ["run", script], {
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+}
+
+export async function runPackageScript(
   root: string,
   script: string,
   timeoutMs = 120000,
@@ -22,78 +57,21 @@ export function runPackageScript(
   signal?: AbortSignal,
   packageManager: PackageManager = "npm",
 ): Promise<CommandResult> {
-  if (!/^[A-Za-z0-9:_-]+$/.test(script)) throw new Error("Invalid package script name.");
-  return (async () => {
-    let packageJson: PackageJson;
-    try {
-      packageJson = JSON.parse(
-        await fs.readFile(path.join(root, "package.json"), "utf8"),
-      ) as PackageJson;
-    } catch {
-      throw new Error("No valid package.json found.");
-    }
-    if (!packageJson.scripts?.[script])
-      throw new Error(`Package script '${script}' does not exist in package.json.`);
-    if (!allowedScripts.includes(script))
-      throw new Error(`Package script '${script}' is not allowed by this profile.`);
-    return new Promise<CommandResult>((resolve, reject) => {
-      const executable = process.platform === "win32" ? `${packageManager}.cmd` : packageManager;
-      const child = spawn(executable, ["run", script], {
-        cwd: root,
-        shell: false,
-        env: commandEnvironment(),
-        ...processTreeSpawnOptions(),
-      });
-      let stdout = "";
-      let stderr = "";
-      let finished = false;
-      let timer: ReturnType<typeof setTimeout>;
-      const abort = () => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        terminateProcessTree(child);
-        reject(new Error(`${packageManager} run ${script} was aborted.`));
-      };
-      timer = setTimeout(() => {
-        if (finished) return;
-        finished = true;
-        terminateProcessTree(child);
-        signal?.removeEventListener("abort", abort);
-        reject(new Error(`${packageManager} run ${script} timed out after ${timeoutMs}ms.`));
-      }, timeoutMs);
-      if (signal?.aborted) {
-        abort();
-        return;
-      }
-      signal?.addEventListener("abort", abort, { once: true });
-      child.stdout.on("data", (chunk: Buffer | string) => {
-        stdout = appendBoundedOutput(stdout, chunk);
-      });
-      child.stderr.on("data", (chunk: Buffer | string) => {
-        stderr = appendBoundedOutput(stderr, chunk);
-      });
-      child.on("error", (error: Error) => {
-        if (!finished) {
-          finished = true;
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", abort);
-          reject(error);
-        }
-      });
-      child.on("close", (code: number | null) => {
-        if (!finished) {
-          finished = true;
-          clearTimeout(timer);
-          signal?.removeEventListener("abort", abort);
-          resolve({
-            command: `${packageManager} run ${script}`,
-            exitCode: code ?? 1,
-            stdout,
-            stderr,
-          });
-        }
-      });
-    });
-  })();
+  const problem = await packageScriptProblem(root, script, allowedScripts);
+  if (problem) throw new Error(problem);
+  const label = packageScriptLabel(packageManager, script);
+  const capture = await packageScriptCapture(root, script, {
+    timeoutMs,
+    packageManager,
+    ...(signal ? { signal } : {}),
+  });
+  if (capture.aborted) throw new Error(`${label} was aborted.`);
+  if (capture.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms.`);
+  if (capture.error) throw new Error(capture.error);
+  return {
+    command: label,
+    exitCode: capture.exitCode ?? 1,
+    stdout: capture.stdout,
+    stderr: capture.stderr,
+  };
 }

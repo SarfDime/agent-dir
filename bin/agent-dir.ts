@@ -18,11 +18,15 @@ import { formatTelemetrySummary } from "../src/telemetry/format.js";
 import {
   ensureTelemetryDirectory,
   migrateLegacyTelemetry,
+  pruneTelemetry,
   readAllTelemetryEvents,
   resetTelemetry,
   TELEMETRY_DIRECTORY,
+  TELEMETRY_RETENTION_BYTES,
+  TELEMETRY_RETENTION_DAYS,
 } from "../src/telemetry/storage.js";
 import { isAstGrepAvailable } from "../src/tools/astgrep.js";
+import { mutatingScriptsWarning } from "../src/tools/policy.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
 
@@ -65,6 +69,8 @@ const { values, positionals } = parseArgs({
     scripts: { type: "string" },
     command: { type: "string" },
     blacklist: { type: "string" },
+    protect: { type: "string" },
+    unprotect: { type: "string" },
     token: { type: "string" },
     rotate: { type: "boolean" },
     "no-tunnel": { type: "boolean" },
@@ -125,6 +131,9 @@ if (command === "telemetry") {
     console.log(`Telemetry: ${currentLevel === "none" ? "disabled" : "enabled"}`);
     console.log(`Level: ${currentLevel}`);
     console.log(`Config: ${configPath()}`);
+    console.log(
+      `Retention: ${TELEMETRY_RETENTION_DAYS} days or ${TELEMETRY_RETENTION_BYTES / 1024 / 1024} MB, whichever is reached first`,
+    );
     process.exit(0);
   }
   if (action === "enable") {
@@ -134,6 +143,11 @@ if (command === "telemetry") {
     config.telemetry = { level };
     await saveConfig(config);
     console.log(`✓ Telemetry enabled at ${level} level.`);
+    if (level === "diagnostic") {
+      console.log(
+        "⚠ The diagnostic level is for debugging only. It records the host name, user name and project paths locally and may expose sensitive details. Use it temporarily.",
+      );
+    }
     process.exit(0);
   }
   if (action === "disable") {
@@ -246,6 +260,13 @@ if (command === "telemetry") {
     }
     process.exit(0);
   }
+  if (action === "prune") {
+    const result = pruneTelemetry();
+    console.log(
+      `✓ Telemetry pruned (limits: ${TELEMETRY_RETENTION_DAYS} days, ${TELEMETRY_RETENTION_BYTES / 1024 / 1024} MB): removed ${result.deletedFiles} session file(s) (${result.deletedBytes} bytes), scrubbed legacy raw details from ${result.scrubbedEvents} event(s); ${result.remainingFiles} file(s) / ${result.remainingBytes} bytes remain.`,
+    );
+    process.exit(0);
+  }
   if (action === "reset") {
     if (values.all && telemetryProfile) fail("Use either a profile name or --all, not both.");
     if (!values.all && !telemetryProfile)
@@ -262,7 +283,7 @@ if (command === "telemetry") {
     }
     process.exit(0);
   }
-  fail("Usage: agent-dir telemetry {status|enable|disable|schema|show|summary|reset}");
+  fail("Usage: agent-dir telemetry {status|enable|disable|schema|show|summary|prune|reset}");
 }
 
 if (command === "config") {
@@ -395,6 +416,13 @@ if (command === "config") {
     if (commands !== undefined) profile.commands = commands;
     const blacklist = parseList(values.blacklist);
     if (blacklist !== undefined) profile.blacklistedCommands = blacklist;
+    const protect = parseList(values.protect);
+    const unprotect = parseList(values.unprotect);
+    if (protect !== undefined || unprotect !== undefined)
+      profile.protectedPaths = {
+        ...(protect ? { extra: protect } : {}),
+        ...(unprotect ? { allow: unprotect } : {}),
+      };
 
     if (profile.tunnel === "wormhole" && !profile.subdomain && !values.random) {
       fail("Wormhole profiles require --subdomain <name>, or use --random.");
@@ -465,10 +493,17 @@ const token = values.token ?? profile?.token ?? randomBytes(24).toString("hex");
 const scripts = parseList(values.scripts);
 const commands = parseList(values.command);
 const blacklist = parseList(values.blacklist);
+const protect = parseList(values.protect);
+const unprotect = parseList(values.unprotect);
 const overrides: CommandConfig = {};
 if (scripts !== undefined) overrides.scripts = { allowedScripts: scripts };
 if (commands !== undefined) overrides.commands = commands;
 if (blacklist !== undefined) overrides.blacklistedCommands = blacklist;
+if (protect !== undefined || unprotect !== undefined)
+  overrides.protectedPaths = {
+    ...(protect ? { extra: protect } : {}),
+    ...(unprotect ? { allow: unprotect } : {}),
+  };
 const commandConfig = mergeProfile(profile ?? { directory, port, tunnel }, overrides);
 const telemetryConfigId = profile
   ? command
@@ -503,6 +538,12 @@ if (profile && command) bannerOptions.profileName = command;
 if (subdomain) bannerOptions.subdomain = subdomain;
 if (hostname) bannerOptions.hostname = hostname;
 if (allowedScripts) bannerOptions.allowedScripts = allowedScripts;
+if (allowedScripts) {
+  const warning = mutatingScriptsWarning(allowedScripts);
+  if (warning) console.error(`\u26a0 ${warning}`);
+}
+if (commandConfig.protectedPaths?.extra?.length)
+  bannerOptions.protectedPaths = commandConfig.protectedPaths.extra;
 if (allowedCommands) bannerOptions.commands = allowedCommands;
 if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;

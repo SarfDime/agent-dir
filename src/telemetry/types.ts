@@ -7,6 +7,8 @@ export interface TelemetryConfig {
   configId?: string;
   persist?: boolean;
   sessionId?: string;
+  /** Minimum time between periodic session summaries (default 60 s); the last one wins. */
+  sessionSnapshotMs?: number;
 }
 
 export interface TelemetryHttpRequestEvent {
@@ -57,12 +59,16 @@ export interface TelemetryToolEvent {
   affectedFiles?: number;
   truncated?: boolean;
   paginated?: boolean;
+  /** Normalized result classification: ok, empty, truncated or error. */
+  outcome?: "ok" | "empty" | "truncated" | "error";
   errorCategory?: string;
 }
 
 export interface TelemetryCommandEvent {
   event: "command_call";
   commandFamily: string;
+  /** Allowlisted executable names only; never arguments. */
+  executables?: string[];
   operation?: string;
   success: boolean;
   durationMs: number;
@@ -105,6 +111,7 @@ export interface TelemetryRuntimeContext {
   arch: string;
   mcpClientName?: string;
   mcpClientVersion?: string;
+  mcpProtocolVersion?: string;
   nodeVersion?: string;
   distroId?: string;
   distroName?: string;

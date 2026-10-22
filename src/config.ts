@@ -2,6 +2,8 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { isTelemetryLevel } from "./telemetry/config.js";
+import { isCommandPolicy } from "./tools/policy.js";
+import { isPathProtectionConfig } from "./tools/protected-paths.js";
 import type { AgentConfig, CommandConfig, Profile } from "./types.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "agent-dir");
@@ -16,11 +18,35 @@ export async function loadConfig(): Promise<AgentConfig> {
   try {
     const parsed: unknown = JSON.parse(await readFile(CONFIG_FILE, "utf8"));
     if (!isAgentConfig(parsed)) throw new Error("Invalid configuration format.");
-    return parsed;
+    return migrateLegacyProfiles(parsed);
   } catch (error) {
     if ((error as FileSystemError).code === "ENOENT") return structuredClone(DEFAULT_CONFIG);
     throw new Error(`Unable to read config ${CONFIG_FILE}: ${(error as Error).message}`);
   }
+}
+
+/**
+ * Profiles written before the package-script refactor use `npm.allowedScripts`. Without this,
+ * the key would be ignored silently and every package script would become disallowed.
+ */
+export function migrateLegacyProfiles(
+  config: AgentConfig,
+  warn: (message: string) => void = (message) => console.error(message),
+): AgentConfig {
+  for (const [name, profile] of Object.entries(config.profiles)) {
+    const legacy = (profile as { npm?: { allowedScripts?: unknown } }).npm;
+    if (!legacy || profile.scripts) continue;
+    if (
+      Array.isArray(legacy.allowedScripts) &&
+      legacy.allowedScripts.every((item) => typeof item === "string")
+    ) {
+      profile.scripts = { allowedScripts: legacy.allowedScripts as string[] };
+      warn(
+        `\u26a0 Profile '${name}' uses the old 'npm.allowedScripts' key; treating it as 'scripts.allowedScripts'. Update the profile to remove this warning.`,
+      );
+    }
+  }
+  return config;
 }
 
 export async function saveConfig(config: AgentConfig): Promise<void> {
@@ -128,5 +154,8 @@ function isProfile(value: unknown): value is Profile {
     )
       return false;
   }
+  if (profile.commandPolicy !== undefined && !isCommandPolicy(profile.commandPolicy)) return false;
+  if (profile.protectedPaths !== undefined && !isPathProtectionConfig(profile.protectedPaths))
+    return false;
   return true;
 }

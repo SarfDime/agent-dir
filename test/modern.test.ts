@@ -911,11 +911,18 @@ test("low-level read and command outputs honor maxBytes", async () => {
       }),
     );
     const commandBody = (await command.json()) as {
-      result: { structuredContent: Array<{ stdout: string; stderr: string }> };
+      result: {
+        structuredContent: {
+          items: Array<{ stdout?: string; stderr?: string; status: string }>;
+          truncated: boolean;
+        };
+      };
     };
-    const commandResult = commandBody.result.structuredContent[0];
+    const commandResult = commandBody.result.structuredContent.items[0];
     assert.ok(commandResult);
-    assert.ok(Buffer.byteLength(JSON.stringify(commandResult), "utf8") <= 1024);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(commandBody.result.structuredContent), "utf8") <= 1024,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1693,10 +1700,19 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
       }),
     );
     const command = (await commandResponse.json()) as {
-      result: { structuredContent: Array<{ command: string; exitCode: number; stdout: string }> };
+      result: {
+        structuredContent: {
+          ok: boolean;
+          items: Array<{ command: string; status: string; exitCode: number; ran: boolean }>;
+        };
+      };
     };
-    assert.equal(command.result.structuredContent[0]?.command, "git --version");
-    assert.equal(command.result.structuredContent[0]?.exitCode, 0);
+    const item = command.result.structuredContent.items[0];
+    assert.equal(item?.command, "git --version");
+    assert.equal(item?.exitCode, 0);
+    assert.equal(item?.status, "success");
+    assert.equal(item?.ran, true);
+    assert.equal(command.result.structuredContent.ok, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
