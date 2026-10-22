@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -7,7 +8,7 @@ import { migrateLegacyProfiles } from "../src/config.js";
 import { createMcpHandler } from "../src/mcp.js";
 import { type BatchTask, runBatch } from "../src/tools/batch.js";
 import { checkCommand, isCommandBlacklisted, spawnCapture } from "../src/tools/commands.js";
-import { evaluateCommandPolicy, isCommandPolicy } from "../src/tools/policy.js";
+import { evaluateCommandPolicy, isCommandPolicy, mutatingScripts } from "../src/tools/policy.js";
 import type { AgentConfig } from "../src/types.js";
 
 const ROOT = process.cwd();
@@ -403,5 +404,87 @@ test("run_package_scripts_batch stops by default and can continue", async () => 
     assert.match(rejected.items[1]?.reason ?? "", /does not exist/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("batch tools accept a per-call timeout and reject out-of-range values", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-timeout-"));
+  try {
+    const handler = createMcpHandler(root, { commands: ["node"] }, { level: "none" });
+    const started = Date.now();
+    const result = await callBatch(handler, "run_command_batch", {
+      commands: [
+        { command: "node", args: ["-e", "console.log('x'); setTimeout(() => {}, 20000)"] },
+      ],
+      timeoutMs: 1000,
+    });
+    assert.equal(result.items[0]?.status, "failure");
+    assert.match(result.items[0]?.reason ?? "", /Timed out/);
+    assert.ok(Date.now() - started < 10_000);
+
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "run_command_batch",
+            arguments: { commands: [{ command: "node" }], timeoutMs: 5 },
+            _meta: META,
+          },
+        }),
+      }),
+    );
+    const body = (await response.json()) as {
+      result: { isError?: boolean; content: Array<{ text: string }> };
+    };
+    assert.equal(body.result.isError, true);
+    assert.match(body.result.content[0]?.text ?? "", /timeoutMs must be/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("scripts that rewrite files are identified for warnings", () => {
+  assert.deepEqual(
+    mutatingScripts(["check", "format", "check:write", "lint:fix", "test", "prefix", "build"]),
+    ["format", "check:write", "lint:fix"],
+  );
+});
+
+test("CLI profiles store protected path options", async () => {
+  const home = await mkdtemp(path.join(tmpdir(), "agent-dir-config-protect-"));
+  try {
+    const configDir = path.join(home, ".config", "agent-dir");
+    await mkdir(configDir, { recursive: true });
+    const output = execFileSync(
+      process.execPath,
+      [
+        "dist/bin/agent-dir.js",
+        "config",
+        "add",
+        "demo",
+        "--directory",
+        home,
+        "--protect",
+        ".github/workflows/**,scripts/release/**",
+        "--unprotect",
+        ".env.test",
+      ],
+      { encoding: "utf8", env: { ...process.env, HOME: home } },
+    );
+    assert.match(output, /Saved profile 'demo'/);
+    const saved = JSON.parse(await readFile(path.join(configDir, "config.json"), "utf8")) as {
+      profiles: Record<string, { protectedPaths?: { extra?: string[]; allow?: string[] } }>;
+    };
+    assert.deepEqual(saved.profiles.demo?.protectedPaths, {
+      extra: [".github/workflows/**", "scripts/release/**"],
+      allow: [".env.test"],
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
   }
 });

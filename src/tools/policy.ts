@@ -53,6 +53,17 @@ export function isCommandPolicy(value: unknown): value is CommandPolicyConfig {
   });
 }
 
+/** Scripts whose names suggest they rewrite files (formatters and fixers). */
+export function mutatingScripts(scripts: string[]): string[] {
+  return scripts.filter((script) => /(^|[:_-])(fix|write|format|fmt)($|[:_-])/i.test(script));
+}
+
+export function mutatingScriptsWarning(scripts: string[]): string | undefined {
+  const names = mutatingScripts(scripts);
+  if (names.length === 0) return undefined;
+  return `These allowed scripts appear to modify files: ${names.join(", ")}. They run outside apply_changes, so protected-path checks do not apply to what they write.`;
+}
+
 const GLOBAL_VALUE_OPTIONS: Record<string, string[]> = {
   git: [
     "-C",

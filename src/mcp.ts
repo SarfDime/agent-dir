@@ -139,6 +139,13 @@ const batchResultSchema = objectOutput(
   },
   ["ok", "onError", "summary", "items", "truncated"],
 );
+const timeoutMsSchema = {
+  type: "integer",
+  minimum: 1000,
+  maximum: 600000,
+  default: 120000,
+  description: "Timeout per item in milliseconds. A timed-out item fails with its partial output.",
+};
 const onErrorSchema = {
   type: "string",
   enum: ["continue", "stop"],
@@ -329,6 +336,7 @@ const baseTools: ToolDefinition[] = [
     {
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
       onError: onErrorSchema,
+      timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     batchResultSchema,
@@ -357,6 +365,7 @@ const baseTools: ToolDefinition[] = [
         maxItems: 10,
       },
       onError: onErrorSchema,
+      timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
     batchResultSchema,
@@ -1671,6 +1680,7 @@ async function callTool(
       break;
     case "run_package_scripts_batch": {
       const scripts = stringArray(args.scripts, "scripts");
+      const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (scripts.length > 10)
         throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
       structuredContent = await runBatch(
@@ -1679,7 +1689,7 @@ async function callTool(
           preflight: () => packageScriptProblem(root, script, allowedScripts),
           execute: () =>
             packageScriptCapture(root, script, {
-              timeoutMs: 120000,
+              timeoutMs,
               packageManager,
               ...(signal ? { signal } : {}),
             }),
@@ -1690,6 +1700,7 @@ async function callTool(
     }
     case "run_command_batch": {
       const commands = objectArray(args.commands, "commands");
+      const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (commands.length > 10)
         throw new Error("run_command_batch accepts at most 10 commands per call.");
       structuredContent = await runBatch(
@@ -1711,7 +1722,7 @@ async function callTool(
                   }),
             execute: () =>
               spawnCapture(root, command, commandArgs, {
-                timeoutMs: 120000,
+                timeoutMs,
                 ...(signal ? { signal } : {}),
               }),
           };
@@ -2138,6 +2149,13 @@ async function buildTelemetryProjectContext(
     hasCodegraph: capability.installed && capability.indexed,
     projectSize,
   };
+}
+
+function timeoutMsArg(value: unknown): number {
+  if (value === undefined) return 120000;
+  if (!Number.isInteger(value) || (value as number) < 1000 || (value as number) > 600000)
+    throw new Error("timeoutMs must be an integer between 1000 and 600000.");
+  return value as number;
 }
 
 function batchOnError(value: unknown, fallback: BatchOnError): BatchOnError {

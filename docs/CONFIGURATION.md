@@ -187,4 +187,18 @@ Built-in argument-aware guardrails are on by default; see `SECURITY.md` for what
 
 Patterns are project-relative and support `*`, `**` and `?`.
 
+The same settings can be given on the command line or in first-time setup:
+
+```bash
+agent-dir config add myproject --directory . \
+  --protect ".github/workflows/**,scripts/release/**" \
+  --unprotect ".env.test"
+```
+
+`--protect` adds patterns, `--unprotect` keeps matching paths editable, and both can also be passed when launching with `agent-dir --directory .` to override a profile for that run. The setup wizard asks for extra protected paths. The startup banner lists the active protected paths.
+
+### Scripts that rewrite files
+
+Scripts such as `format`, `check:write` or `lint:fix` change files without going through `apply_changes`, so protected-path checks do not apply to what they write. Agent Dir warns at startup and in the setup wizard when an allowed script name suggests it rewrites files.
+
 Avoid allowing `sh`, `bash`, `zsh`, `cmd`, `node`, or `python` unless you intentionally want to grant much broader execution capability.
