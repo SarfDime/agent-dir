@@ -1,3 +1,5 @@
+import { globToRegExp } from "./glob.js";
+
 /**
  * Paths that agents may not modify through Agent Dir's edit tools by default: version-control
  * internals (hooks and config can run programs), environment files with secrets, and registry
@@ -37,31 +39,6 @@ export function isPathProtectionConfig(value: unknown): value is PathProtectionC
   const strings = (item: unknown): boolean =>
     item === undefined || (Array.isArray(item) && item.every((entry) => typeof entry === "string"));
   return strings(config.extra) && strings(config.allow);
-}
-
-function globToRegExp(pattern: string): RegExp {
-  let source = "";
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index] as string;
-    if (char === "*") {
-      if (pattern[index + 1] === "*") {
-        index += 1;
-        if (pattern[index + 1] === "/") {
-          index += 1;
-          source += "(?:.*/)?";
-        } else {
-          source += ".*";
-        }
-      } else {
-        source += "[^/]*";
-      }
-    } else if (char === "?") {
-      source += "[^/]";
-    } else {
-      source += char.replace(/[.+^${}()|[\]\\]/g, "\\$&");
-    }
-  }
-  return new RegExp(`^${source}$`, "i");
 }
 
 function matchesAny(relativePath: string, patterns: string[]): string | undefined {

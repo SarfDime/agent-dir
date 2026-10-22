@@ -30,7 +30,6 @@ import {
 } from "./tools/package-scripts.js";
 import type { CommandPolicyConfig } from "./tools/policy.js";
 import type { PathProtectionConfig } from "./tools/protected-paths.js";
-
 import {
   getSkill,
   invalidateSkillDiscoveryCache,
@@ -40,6 +39,7 @@ import {
   readSkillResource,
   skillResourceUrisForPath,
 } from "./tools/skills.js";
+import { invalidateProjectFiles } from "./tools/walk.js";
 import type { CommandConfig } from "./types.js";
 
 const require = createRequire(import.meta.url);
@@ -103,9 +103,24 @@ const searchMatchSchema = objectOutput(
     line: { type: "integer" },
     column: { type: "integer" },
     text: stringSchema,
+    before: arrayOutput(stringSchema),
+    after: arrayOutput(stringSchema),
   },
   ["path", "line", "column", "text"],
 );
+const searchEnvelope = (item: Record<string, unknown>): Record<string, unknown> =>
+  objectOutput(
+    {
+      items: arrayOutput(item),
+      returned: { type: "integer" },
+      truncated: { type: "boolean" },
+      truncationReason: { type: "string", enum: ["maxResults", "maxBytes"] },
+      backend: { type: "string", enum: ["ripgrep", "builtin"] },
+      incomplete: { type: "boolean" },
+      notes: arrayOutput(stringSchema),
+    },
+    ["items", "returned", "truncated", "backend"],
+  );
 const batchItemSchema = objectOutput(
   {
     index: { type: "integer" },
@@ -234,22 +249,28 @@ const baseTools: ToolDefinition[] = [
         },
       },
     },
-    arrayOutput(
-      objectOutput(
-        {
-          kind: { type: "string", enum: ["write", "patch", "delete"] },
-          path: stringSchema,
-          changed: { type: "boolean" },
-          dryRun: { type: "boolean" },
-        },
-        ["kind", "path", "changed"],
-      ),
+    objectOutput(
+      {
+        items: arrayOutput(
+          objectOutput(
+            {
+              kind: { type: "string", enum: ["write", "patch", "delete"] },
+              path: stringSchema,
+              changed: { type: "boolean" },
+              dryRun: { type: "boolean" },
+            },
+            ["kind", "path", "changed"],
+          ),
+        ),
+        dryRun: { type: "boolean" },
+      },
+      ["items", "dryRun"],
     ),
     ["changes"],
   ),
   tool(
     "find_files",
-    "Find project paths by a simple glob pattern using * and ?. Returns {items, truncated}; use this for targeted filename discovery.",
+    "Find project paths by a glob pattern (`*`, `**`, `?`). A pattern without `/` matches file names at any depth (`mcp.ts` finds `src/mcp.ts`). Honors .gitignore inside git repositories. Returns {items, truncated}.",
     {
       pattern: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -263,25 +284,41 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search source files by text or regex within an 8 KB default budget. Binary files and files over 1 MB are skipped; start narrow and expand only when needed.",
+    "Search project text files (source, docs and configuration) by literal text or regex. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Returns {items, returned, truncated, truncationReason, backend}; always check truncated. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. Uses ripgrep when installed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
+      caseSensitive: { type: "boolean", default: false },
+      paths: {
+        type: "array",
+        items: stringSchema,
+        maxItems: 20,
+        description: "Project-relative files or directories to search.",
+      },
+      globs: {
+        type: "array",
+        items: stringSchema,
+        maxItems: 20,
+        description:
+          "Include globs such as *.ts, or exclude globs prefixed with ! such as !**/*.test.ts.",
+      },
+      context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
+      includeGenerated: { type: "boolean", default: false },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(searchMatchSchema),
+    searchEnvelope(searchMatchSchema),
     ["query"],
   ),
   tool(
     "find_symbol",
-    "Find symbol definitions and locations. Use read_range for source context and find_references to trace usage.",
+    "Find likely definitions of a symbol by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Heuristic and case-sensitive; prefer serena_find_symbol or ast_grep_search when available. Returns {items, returned, truncated, backend}. Use read_range for context and find_references to trace usage.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(
+    searchEnvelope(
       objectOutput(
         {
           ...(searchMatchSchema.properties as Record<string, unknown>),
@@ -295,13 +332,13 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_references",
-    "Find source-code references to a symbol. Use this instead of searching entire files when tracing usage of a known symbol.",
+    "Find whole-identifier occurrences of a symbol (case-sensitive text matching). This is lexical: it includes comments, strings and unrelated same-named identifiers; use serena_find_referencing_symbols for semantic references when available. Returns {items, returned, truncated, backend}.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    arrayOutput(searchMatchSchema),
+    searchEnvelope(searchMatchSchema),
     ["symbol"],
   ),
   tool(
@@ -1516,12 +1553,16 @@ async function callTool(
       const before = new Map<string, string[]>();
       for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
       const applied = await applyFileChanges(root, changes, dryRun, pathProtection);
-      structuredContent = applied.map((item) => {
-        if (!isRecord(item)) return item;
-        const { content: _content, previousContent: _previousContent, ...summary } = item;
-        return summary;
-      });
+      structuredContent = {
+        items: applied.map((item) => {
+          if (!isRecord(item)) return item;
+          const { content: _content, previousContent: _previousContent, ...summary } = item;
+          return summary;
+        }),
+        dryRun,
+      };
       if (!dryRun) {
+        invalidateProjectFiles(root);
         invalidateSkillDiscoveryCache(root);
         for (const p of affected) await notifyResourceChange(notify, root, p, before.get(p) ?? []);
       }
@@ -1529,38 +1570,40 @@ async function callTool(
     }
     case "find_files": {
       const maxResults = numberArg(args.maxResults, 200, 1000);
-      const results = await findFiles(root, String(args.pattern), maxResults);
-      const bounded = boundedItems(results, outputBytesArg(args.maxBytes));
+      const found = await findFiles(root, String(args.pattern), maxResults);
+      const bounded = boundedItems(found.files, outputBytesArg(args.maxBytes));
       structuredContent = {
         items: bounded.items,
-        truncated: bounded.truncated || results.length >= maxResults,
+        truncated: bounded.truncated || found.truncated,
       };
       break;
     }
-    case "search_code":
-      structuredContent = await searchCode(
-        root,
-        String(args.query),
-        Boolean(args.regex),
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
+    case "search_code": {
+      const paths = optionalStringArray(args.paths, "paths", 20);
+      const globs = optionalStringArray(args.globs, "globs", 20);
+      structuredContent = await searchCode(root, String(args.query), {
+        regex: args.regex === true,
+        caseSensitive: args.caseSensitive === true,
+        includeGenerated: args.includeGenerated === true,
+        context: intArg(args.context, 0, 0, 5, "context"),
+        maxResults: numberArg(args.maxResults, 200, 1000),
+        maxBytes: outputBytesArg(args.maxBytes),
+        ...(paths ? { paths } : {}),
+        ...(globs ? { globs } : {}),
+      });
       break;
+    }
     case "find_symbol":
-      structuredContent = await findSymbol(
-        root,
-        String(args.symbol),
-        numberArg(args.maxResults, 100, 500),
-        outputBytesArg(args.maxBytes),
-      );
+      structuredContent = await findSymbol(root, String(args.symbol), {
+        maxResults: numberArg(args.maxResults, 100, 500),
+        maxBytes: outputBytesArg(args.maxBytes),
+      });
       break;
     case "find_references":
-      structuredContent = await findReferences(
-        root,
-        String(args.symbol),
-        numberArg(args.maxResults, 200, 1000),
-        outputBytesArg(args.maxBytes),
-      );
+      structuredContent = await findReferences(root, String(args.symbol), {
+        maxResults: numberArg(args.maxResults, 200, 1000),
+        maxBytes: outputBytesArg(args.maxBytes),
+      });
       break;
     case "project_context": {
       const overview = await projectOverview(root);
@@ -2149,6 +2192,21 @@ async function buildTelemetryProjectContext(
     hasCodegraph: capability.installed && capability.indexed,
     projectSize,
   };
+}
+
+function optionalStringArray(value: unknown, name: string, max: number): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    throw new Error(`${name} must be an array of strings.`);
+  if (value.length > max) throw new Error(`${name} accepts at most ${max} items.`);
+  return value as string[];
+}
+
+function intArg(value: unknown, fallback: number, min: number, max: number, name: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
+    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
+  return value as number;
 }
 
 function timeoutMsArg(value: unknown): number {

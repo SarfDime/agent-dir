@@ -2,8 +2,7 @@ import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { type PathProtectionConfig, protectedPathProblem } from "./protected-paths.js";
-
-const IGNORED = new Set([".git", "node_modules", ".next", "dist", "build", "coverage"]);
+import { listProjectFiles } from "./walk.js";
 
 export async function safePath(
   root: string,
@@ -52,22 +51,20 @@ export interface FilePatch {
 }
 
 export async function listFiles(root: string): Promise<FileEntry[]> {
-  const resolvedRoot = await fs.realpath(root);
-  const walk = async (dir: string, depth = 0): Promise<FileEntry[]> => {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const result: FileEntry[] = [];
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (IGNORED.has(entry.name)) continue;
-      const full = path.join(dir, entry.name);
-      const relative = path.relative(resolvedRoot, full) || entry.name;
-      if (entry.isDirectory()) {
-        result.push({ path: relative, type: "directory" });
-        if (depth < 5) result.push(...(await walk(full, depth + 1)));
-      } else result.push({ path: relative, type: "file" });
+  const { files } = await listProjectFiles(root);
+  const directories = new Set<string>();
+  for (const file of files) {
+    let slash = file.lastIndexOf("/");
+    while (slash > 0) {
+      directories.add(file.slice(0, slash));
+      slash = file.lastIndexOf("/", slash - 1);
     }
-    return result;
-  };
-  return walk(resolvedRoot);
+  }
+  const entries: FileEntry[] = [
+    ...[...directories].map((entryPath): FileEntry => ({ path: entryPath, type: "directory" })),
+    ...files.map((entryPath): FileEntry => ({ path: entryPath, type: "file" })),
+  ];
+  return entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
 
 export function readFile(root: string, relativePath: string): Promise<string> {
