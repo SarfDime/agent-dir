@@ -219,6 +219,7 @@ export function printBanner(options: {
   commands?: string[];
   blacklistedCommands?: string[];
   protectedPaths?: string[];
+  search?: string;
   codeGraph?: boolean;
   astGrep?: boolean;
   serena?: string[];
@@ -266,6 +267,9 @@ export function printBanner(options: {
         BRIGHT_CYAN,
       ),
     );
+  writeLine(
+    boxContent(`${color("SEARCH", BRIGHT_YELLOW)}   ${options.search ?? "built-in"}`, BRIGHT_CYAN),
+  );
   writeLine(
     boxContent(
       `${color("PROTECT", BRIGHT_YELLOW)}  ${[".git", ".env*", ".npmrc", ...(options.protectedPaths ?? [])].join(", ")}`,

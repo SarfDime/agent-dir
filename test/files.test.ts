@@ -57,7 +57,7 @@ test("filesystem access and code search stay inside project root", async () => {
 
     assert.equal(await readFile(root, "hello.txt"), "hello");
     assert.ok((await listFiles(root)).some((item) => item.path === "nested/deep/new.txt"));
-    assert.deepEqual(await searchCode(root, "insideSecret"), [
+    assert.deepEqual((await searchCode(root, "insideSecret")).items, [
       { path: "sample.ts", line: 1, column: 14, text: "export const insideSecret = true;" },
     ]);
     await assert.rejects(
@@ -80,7 +80,7 @@ test("filesystem access and code search stay inside project root", async () => {
           applyFileChanges(root, [{ kind: "write", path: "escape/new.txt", content: "blocked" }]),
         /Path escapes the exposed project directory\./,
       );
-      assert.deepEqual(await searchCode(root, "outsideSecret"), []);
+      assert.deepEqual((await searchCode(root, "outsideSecret")).items, []);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }

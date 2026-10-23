@@ -30,6 +30,7 @@ import {
 } from "./tools/package-scripts.js";
 import type { CommandPolicyConfig } from "./tools/policy.js";
 import type { PathProtectionConfig } from "./tools/protected-paths.js";
+import { detectSearchBackend } from "./tools/search.js";
 import {
   getSkill,
   invalidateSkillDiscoveryCache,
@@ -1632,7 +1633,9 @@ async function callTool(
           execution: {
             allowedScripts: [...allowedScripts],
             commands: [...allowedCommands],
+            blacklistedCommands: [...blacklistedCommands],
           },
+          search: detectSearchBackend(),
         }),
         Math.max(1, maxBytes - 128),
       );

@@ -171,7 +171,7 @@ test("tools/list is valid at both protocol versions", async () => {
 });
 
 test("tools/list output schemas are objects (required by 2025-11-25)", {
-  todo: "pending object result envelopes (progress task 4.01)",
+  skip: false,
 }, async () => {
   await withServer(async (port) => {
     const { body } = await rpc(port, LEGACY, "tools/list");

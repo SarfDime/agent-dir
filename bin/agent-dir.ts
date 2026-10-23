@@ -27,6 +27,7 @@ import {
 } from "../src/telemetry/storage.js";
 import { isAstGrepAvailable } from "../src/tools/astgrep.js";
 import { mutatingScriptsWarning } from "../src/tools/policy.js";
+import { describeSearchBackend, detectSearchBackend } from "../src/tools/search.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
 
@@ -544,6 +545,11 @@ if (allowedScripts) {
 }
 if (commandConfig.protectedPaths?.extra?.length)
   bannerOptions.protectedPaths = commandConfig.protectedPaths.extra;
+bannerOptions.search = describeSearchBackend();
+if (detectSearchBackend().backend === "builtin")
+  console.error(
+    "\u2139 ripgrep not found: using the built-in search. Install ripgrep (https://github.com/BurntSushi/ripgrep#installation) for faster search and linear-time regex.",
+  );
 if (allowedCommands) bannerOptions.commands = allowedCommands;
 if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;

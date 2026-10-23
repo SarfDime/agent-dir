@@ -46,10 +46,10 @@ The core public tool set is intentionally small:
 | Tool | Purpose |
 | --- | --- |
 | `project_context` | Compact project overview and active execution policy |
-| `find_files` | Find paths by glob |
-| `search_code` | Search source-like files with bounded output |
-| `find_symbol` | Locate likely symbol definitions |
-| `find_references` | Locate symbol references |
+| `find_files` | Find paths by glob; a pattern without `/` matches file names at any depth |
+| `search_code` | Search project text (source, docs, config) with scoping, context lines and bounded output; reports `truncated` |
+| `find_symbol` | Locate likely symbol definitions (heuristic; JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP) |
+| `find_references` | Locate whole-identifier occurrences of a symbol (lexical, case-sensitive) |
 | `read_range` | Read a bounded line range from a UTF-8 file |
 | `apply_changes` | Create, patch, or delete files |
 | `file_info` | Inspect filesystem metadata |
@@ -60,7 +60,17 @@ The core public tool set is intentionally small:
 | `codegraph_explore` | Optional structural code intelligence when CodeGraph is available |
 | `serena_*` | Optional Serena semantic navigation and allowlisted symbol-aware edits when installed and configured |
 
-`ast_grep_search` is only advertised when the `ast-grep` or `sg` CLI is available on `PATH`. It runs read-only `ast-grep run` searches with an explicit argument array (no shell), supports pattern, language, include/exclude globs, and bounded context/results/output. Searches have a 30-second timeout and a 64 KB raw-output ceiling. Rewrites are not exposed. The result is compact JSON; use this tool for syntax-aware matching, `search_code` for exact text/regex, and CodeGraph for call/data-flow and impact analysis.
+### Search
+
+`search_code`, `find_symbol`, `find_references` and `find_files` share one file list and one search implementation:
+
+- **File list:** inside a git work tree it is `git ls-files --cached --others --exclude-standard`, so `.gitignore` (nested and global) is honored. Elsewhere a bounded walk skips `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs and tool caches. There is no depth limit; if the file cap is hit the result says `incomplete`.
+- **What is searched:** any text file, including docs and configuration. Binary files and files over 1 MB are skipped; lockfiles and minified files are skipped unless `includeGenerated` is true. Results are ordered by path and line, one result per line.
+- **`search_code` parameters:** `query`, `regex`, `caseSensitive` (default false), `paths` (files or directories), `globs` (includes, or excludes prefixed with `!`), `context` (0-5 surrounding lines in `before`/`after`), `includeGenerated`, `maxResults`, `maxBytes`.
+- **Results are objects:** `{ items, returned, truncated, truncationReason, backend, incomplete?, notes? }`. `truncationReason` is `maxResults` or `maxBytes`; `notes` explains things like a path that matched no files.
+- **Backends:** ripgrep is used when it is installed (recommended: faster and its regex engine cannot backtrack catastrophically); otherwise a built-in scanner runs. Both search the same candidate files and return the same shape and limits, and `backend` reports which one ran. The built-in backend rejects regexes with nested quantifiers. The startup banner and `project_context` say which backend is active. Set `AGENT_DIR_SEARCH_BACKEND=builtin` to force the built-in search. A pattern ripgrep cannot parse (for example lookahead) falls back to the built-in search with a note.
+
+`apply_changes` returns `{ items, dryRun }`. the `ast-grep` or `sg` CLI is available on `PATH`. It runs read-only `ast-grep run` searches with an explicit argument array (no shell), supports pattern, language, include/exclude globs, and bounded context/results/output. Searches have a 30-second timeout and a 64 KB raw-output ceiling. Rewrites are not exposed. The result is compact JSON; use this tool for syntax-aware matching, `search_code` for exact text/regex, and CodeGraph for call/data-flow and impact analysis.
 
 `codegraph_explore` is only advertised when CodeGraph is installed and the current project has a readable `.codegraph/codegraph.db` index. Other CodeGraph tools are not forwarded.
 
