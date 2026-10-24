@@ -1,6 +1,5 @@
-import { createReadStream, promises as fs } from "node:fs";
+import { promises as fs } from "node:fs";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { type PathProtectionConfig, protectedPathProblem } from "./protected-paths.js";
 import { listProjectFiles } from "./walk.js";
 
@@ -69,107 +68,6 @@ export async function listFiles(root: string): Promise<FileEntry[]> {
 
 export function readFile(root: string, relativePath: string): Promise<string> {
   return safePath(root, relativePath).then((target) => fs.readFile(target, "utf8"));
-}
-
-export async function readRange(
-  root: string,
-  relativePath: string,
-  startLine: number,
-  endLine: number,
-  maxBytes = 8_000,
-): Promise<{
-  path: string;
-  startLine: number;
-  endLine: number;
-  content: string;
-  truncated: boolean;
-}> {
-  if (
-    !Number.isInteger(startLine) ||
-    !Number.isInteger(endLine) ||
-    startLine < 1 ||
-    endLine < startLine
-  )
-    throw new Error("Line range must use positive integers with endLine >= startLine.");
-  if (endLine - startLine > 2000) throw new Error("A read range may contain at most 2000 lines.");
-  if (!Number.isInteger(maxBytes) || maxBytes < 1)
-    throw new Error("maxBytes must be a positive integer.");
-  const target = await safePath(root, relativePath);
-  const decoder = new StringDecoder("utf8");
-  const stream = createReadStream(target, { highWaterMark: 64 * 1024 });
-  const output: string[] = [];
-  let line = "";
-  let lineNumber = 1;
-  let outputBytes = 0;
-  let truncated = false;
-  const marker = "…[truncated]";
-  const finishLine = () => {
-    if (lineNumber >= startLine && lineNumber <= endLine) {
-      if (truncated && line.endsWith(marker)) {
-        output.push(line);
-        outputBytes = maxBytes;
-        lineNumber++;
-        line = "";
-        return;
-      }
-      const value = line.endsWith("\r") ? line.slice(0, -1) : line;
-      const separatorBytes = output.length ? 1 : 0;
-      const remaining = maxBytes - outputBytes - separatorBytes;
-      if (Buffer.byteLength(value, "utf8") > remaining) {
-        const allowance = Math.max(0, remaining - Buffer.byteLength(marker, "utf8") - 1);
-        let clipped = Buffer.from(value, "utf8").subarray(0, allowance).toString("utf8");
-        while (clipped.endsWith("\uFFFD")) clipped = clipped.slice(0, -1);
-        output.push(`${clipped}\n${marker}`);
-        outputBytes = maxBytes;
-        truncated = true;
-      } else {
-        output.push(value);
-        outputBytes += separatorBytes + Buffer.byteLength(value, "utf8");
-      }
-    }
-    lineNumber++;
-    line = "";
-  };
-  for await (const chunk of stream) {
-    const text = decoder.write(chunk as Buffer);
-    let offset = 0;
-    while (offset < text.length) {
-      const newline = text.indexOf("\n", offset);
-      const end = newline === -1 ? text.length : newline;
-      if (lineNumber >= startLine && lineNumber <= endLine && !truncated) {
-        const piece = text.slice(offset, end);
-        const remaining = maxBytes - outputBytes - Buffer.byteLength(line, "utf8");
-        if (remaining <= 0) {
-          line = "";
-          truncated = true;
-          break;
-        }
-        if (Buffer.byteLength(piece, "utf8") > remaining) {
-          const allowance = Math.max(0, remaining - Buffer.byteLength(marker, "utf8") - 1);
-          let clipped = Buffer.from(piece, "utf8").subarray(0, allowance).toString("utf8");
-          while (clipped.endsWith("\uFFFD")) clipped = clipped.slice(0, -1);
-          line += `${clipped}\n${marker}`;
-          truncated = true;
-        } else line += piece;
-      }
-      if (newline === -1) break;
-      finishLine();
-      offset = newline + 1;
-    }
-    if (lineNumber > endLine || truncated) break;
-  }
-  stream.destroy();
-  const tail = decoder.end();
-  if (tail && lineNumber >= startLine && lineNumber <= endLine && !truncated) line += tail;
-  if (lineNumber >= startLine && lineNumber <= endLine && !(truncated && line.length === 0))
-    finishLine();
-  return {
-    path: relativePath,
-    startLine,
-    endLine: Math.min(endLine, lineNumber - 1),
-    content: output.join("\n"),
-    truncated,
-  };
 }
 
 export type FileChange =

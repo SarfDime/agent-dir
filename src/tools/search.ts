@@ -236,6 +236,7 @@ async function searchBuiltin(
     }
     if (content.includes("\0")) continue;
     const lines = content.split(/\r?\n/);
+    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index] ?? "";
       const column = firstAcceptedHit(line, request, matcher, needle);

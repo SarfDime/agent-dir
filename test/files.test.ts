@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
 import { searchCode } from "../src/tools/code.js";
-import { applyFileChanges, listFiles, readFile, readRange } from "../src/tools/files.js";
+import { applyFileChanges, listFiles, readFile } from "../src/tools/files.js";
+import { readRange } from "../src/tools/read.js";
 
 test("MCP authentication accepts Bearer and query-string tokens", () => {
   const bearer = new Request("https://example.test/mcp", {

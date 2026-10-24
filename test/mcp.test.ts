@@ -329,6 +329,8 @@ test("modern tools expose output schemas and structured content", async () => {
       endLine: 1,
       content: "hello",
       truncated: false,
+      eof: true,
+      totalLines: 1,
     });
   } finally {
     await rm(root, { recursive: true, force: true });

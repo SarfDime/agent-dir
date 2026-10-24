@@ -20,7 +20,7 @@ import { type BatchOnError, runBatch } from "./tools/batch.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
-import { applyFileChanges, readFile, readRange } from "./tools/files.js";
+import { applyFileChanges, readFile } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
 import {
   packageScriptCapture,
@@ -30,6 +30,7 @@ import {
 } from "./tools/package-scripts.js";
 import type { CommandPolicyConfig } from "./tools/policy.js";
 import type { PathProtectionConfig } from "./tools/protected-paths.js";
+import { formatRangeText, type ReadRangeResult, readRange } from "./tools/read.js";
 import { detectSearchBackend } from "./tools/search.js";
 import {
   getSkill,
@@ -54,6 +55,8 @@ const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
 const PAGE_SIZE = 50;
 const DISCOVERY_CACHE_TTL_MS = 300_000;
 const DEFAULT_OUTPUT_BYTES = 8_000;
+/** Reads are the largest token cost and are usually followed by more reads; allow bigger windows. */
+const READ_RANGE_DEFAULT_BYTES = 16_000;
 const INSTRUCTIONS_URI = "agent-dir://instructions";
 const CAPABILITIES_URI = "agent-dir://capabilities";
 const SUBSCRIPTION_ID_META = "io.modelcontextprotocol/subscriptionId";
@@ -199,12 +202,26 @@ const astGrepTool: ToolDefinition = tool(
 const baseTools: ToolDefinition[] = [
   tool(
     "read_range",
-    "Read a bounded line range from one UTF-8 project file.",
+    "Read a line range from one UTF-8 project file. Returns the text with a header, plus {path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine}. When truncated or not at the end, continue with nextStartLine. Pass ranges to read several ranges of the same file in one call. Prefer search_code with context when you only need lines around a match.",
     {
       path: pathSchema,
       startLine: { type: "integer", minimum: 1 },
       endLine: { type: "integer", minimum: 1 },
-      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
+      ranges: {
+        type: "array",
+        maxItems: 10,
+        items: objectOutput(
+          { startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } },
+          ["startLine", "endLine"],
+        ),
+        description: "Several ranges of the same file; replaces startLine/endLine.",
+      },
+      maxBytes: {
+        type: "integer",
+        minimum: 1024,
+        maximum: 64000,
+        default: READ_RANGE_DEFAULT_BYTES,
+      },
     },
     objectOutput(
       {
@@ -213,10 +230,14 @@ const baseTools: ToolDefinition[] = [
         endLine: { type: "integer" },
         content: stringSchema,
         truncated: { type: "boolean" },
+        eof: { type: "boolean" },
+        totalLines: { type: "integer" },
+        nextStartLine: { type: "integer" },
+        items: arrayOutput({ type: "object" }),
       },
-      ["path", "startLine", "endLine", "content"],
+      [],
     ),
-    ["path", "startLine", "endLine"],
+    ["path"],
   ),
   tool(
     "apply_changes",
@@ -1325,6 +1346,7 @@ async function callTool(
   analyticsEnabled = false,
 ): Promise<Record<string, unknown>> {
   let structuredContent: unknown;
+  let contentText: string | undefined;
   if (name.startsWith("serena_")) {
     if (!serena) throw new Error("Serena integration is unavailable.");
     const result = await serena.call(name.slice("serena_".length), args);
@@ -1502,20 +1524,41 @@ async function callTool(
       break;
     }
     case "read_range": {
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const result = await readRange(
-        root,
-        String(args.path),
-        Number(args.startLine),
-        Number(args.endLine),
-        Math.max(1, maxBytes - 256),
-      );
-      const bounded = truncateText(result.content, Math.max(1, maxBytes - 256));
-      structuredContent = {
-        ...result,
-        content: bounded.text,
-        truncated: result.truncated || bounded.truncated,
-      };
+      const maxBytes = outputBytesArg(args.maxBytes, READ_RANGE_DEFAULT_BYTES);
+      const filePath = String(args.path);
+      if (args.ranges !== undefined) {
+        const ranges = objectArray(args.ranges, "ranges");
+        if (ranges.length === 0 || ranges.length > 10)
+          throw new Error("ranges must contain 1 to 10 items.");
+        const results: ReadRangeResult[] = [];
+        let remaining = maxBytes - 256;
+        for (const [index, range] of ranges.entries()) {
+          const share = Math.max(256, Math.floor(remaining / (ranges.length - index)));
+          const result = await readRange(
+            root,
+            filePath,
+            Number(range.startLine),
+            Number(range.endLine),
+            share,
+          );
+          results.push(result);
+          remaining -= Buffer.byteLength(result.content, "utf8") + 200;
+        }
+        structuredContent = { items: results, truncated: results.some((item) => item.truncated) };
+        contentText = results.map(formatRangeText).join("\n\n");
+      } else {
+        if (args.startLine === undefined || args.endLine === undefined)
+          throw new Error("startLine and endLine are required unless ranges is provided.");
+        const result = await readRange(
+          root,
+          filePath,
+          Number(args.startLine),
+          Number(args.endLine),
+          Math.max(1, maxBytes - 256),
+        );
+        structuredContent = result;
+        contentText = formatRangeText(result);
+      }
       break;
     }
     case "apply_changes": {
@@ -1783,7 +1826,7 @@ async function callTool(
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
-  return completeToolResult(structuredContent);
+  return completeToolResult(structuredContent, contentText);
 }
 
 const MCP_PARAM_PREFIX = "Mcp-Param-";
@@ -1956,10 +1999,10 @@ function fitAnalyticsResult(
   };
 }
 
-function completeToolResult(structuredContent: unknown): Record<string, unknown> {
+function completeToolResult(structuredContent: unknown, text?: string): Record<string, unknown> {
   return {
     resultType: "complete",
-    content: [{ type: "text", text: JSON.stringify(structuredContent, null, 2) }],
+    content: [{ type: "text", text: text ?? JSON.stringify(structuredContent) }],
     structuredContent,
     _meta: SERVER_INFO_META,
   };
@@ -2285,8 +2328,8 @@ function objectArray(value: unknown, name: string): Record<string, unknown>[] {
     throw new Error(`${name} must be an array of objects.`);
   return value as Record<string, unknown>[];
 }
-function outputBytesArg(value: unknown): number {
-  const result = value === undefined ? DEFAULT_OUTPUT_BYTES : Number(value);
+function outputBytesArg(value: unknown, fallback = DEFAULT_OUTPUT_BYTES): number {
+  const result = value === undefined ? fallback : Number(value);
   if (!Number.isInteger(result) || result < 1024 || result > 64_000)
     throw new Error("maxBytes must be an integer between 1024 and 64000.");
   return result;
