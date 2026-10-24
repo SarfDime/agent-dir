@@ -26,7 +26,6 @@ import {
   packageScriptCapture,
   packageScriptLabel,
   packageScriptProblem,
-  runPackageScript,
 } from "./tools/package-scripts.js";
 import type { CommandPolicyConfig } from "./tools/policy.js";
 import type { PathProtectionConfig } from "./tools/protected-paths.js";
@@ -373,9 +372,10 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "validate",
-    "Run a unified project validation pass: lightweight diagnostics first, then explicitly requested allowed package scripts. Use level=diagnostics for cheap checks and request scripts only when executable validation is needed.",
+    "Validate the project. Diagnostics cover broken symlinks, invalid JSON and merge-conflict markers only; they do NOT include type checking or linting, so ok from level=diagnostics is not proof the code compiles. Use level=scripts or full to also run allowed package scripts (default: check, or typecheck and lint; full runs check and test). Scripts stop at the first failure and report status success, failure or skipped like run_package_scripts_batch.",
     {
       level: { type: "string", enum: ["diagnostics", "scripts", "full"], default: "diagnostics" },
+      timeoutMs: timeoutMsSchema,
       scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
@@ -1688,80 +1688,66 @@ async function callTool(
       break;
     }
     case "validate": {
-      const level = typeof args.level === "string" ? args.level : "diagnostics";
+      const level = args.level === undefined ? "diagnostics" : args.level;
+      if (level !== "diagnostics" && level !== "scripts" && level !== "full")
+        throw new Error("level must be 'diagnostics', 'scripts' or 'full'.");
       const maxResults = numberArg(args.maxResults, 200, 1000);
       const maxBytes = outputBytesArg(args.maxBytes);
+      const timeoutMs = timeoutMsArg(args.timeoutMs);
       const diagnosticItems = await diagnostics(root, maxResults);
-      const scripts =
-        level === "diagnostics"
-          ? []
-          : args.scripts !== undefined
-            ? stringArray(args.scripts, "scripts")
-            : level === "full"
-              ? ["check", "test"].filter((script) => allowedScripts.includes(script))
-              : [];
-      if (scripts.length > 10) throw new Error("validate accepts at most 10 scripts per call.");
-      const checks: Array<Record<string, unknown>> = [
-        {
-          kind: "diagnostics",
-          ok: !diagnosticItems.some((item) => item.severity === "error"),
-          count: diagnosticItems.length,
-          issues: boundedItems(diagnosticItems, maxBytes).items,
-        },
-      ];
-      for (const script of scripts) {
-        const result = await runPackageScript(
-          root,
-          script,
-          120000,
-          allowedScripts,
-          signal,
-          packageManager,
-        );
-        checks.push({
-          kind: "package-script",
-          script,
-          ok: result.exitCode === 0,
-          result,
-        });
-        if (result.exitCode !== 0) break;
-      }
-      const validation = {
-        level,
-        ok: checks.every((check) => check.ok === true),
-        checks,
-        scriptsRequested: scripts,
-      };
-      const serialized = JSON.stringify(validation);
-      if (Buffer.byteLength(serialized, "utf8") <= maxBytes) {
-        structuredContent = validation;
+      let scripts: string[] = [];
+      let note: string | undefined;
+      if (level === "diagnostics") {
+        if (args.scripts !== undefined)
+          note =
+            "scripts were ignored because level is diagnostics; use level scripts or full to run them.";
+      } else if (args.scripts !== undefined) {
+        scripts = stringArray(args.scripts, "scripts");
       } else {
-        const perCheckBudget = Math.max(256, Math.floor((maxBytes - 256) / checks.length));
-        const compactChecks = checks.map((check) => {
-          if (check.kind === "package-script" && isRecord(check.result))
-            return { ...check, result: boundCommandResult(check.result, perCheckBudget) };
-          if (check.kind === "diagnostics" && Array.isArray(check.issues))
-            return { ...check, issues: boundedItems(check.issues, perCheckBudget).items };
-          return check;
-        });
-        const compact = { ...validation, checks: compactChecks, truncated: true };
-        const compactJson = JSON.stringify(compact);
-        if (Buffer.byteLength(compactJson, "utf8") <= maxBytes) {
-          structuredContent = compact;
-        } else {
-          structuredContent = {
-            level,
-            ok: validation.ok,
-            truncated: true,
-            checks: checks.map((check) => ({
-              kind: check.kind,
-              ...(typeof check.script === "string" ? { script: check.script } : {}),
-              ok: check.ok,
-              ...(typeof check.count === "number" ? { count: check.count } : {}),
-            })),
-          };
-        }
+        scripts = defaultValidationScripts(level, allowedScripts);
+        if (scripts.length === 0)
+          throw new Error(
+            `level '${level}' needs scripts, and none of check, typecheck or lint is allowed. Allowed scripts: ${allowedScripts.join(", ") || "(none)"}.`,
+          );
+        note = `No scripts were given; ran ${scripts.join(", ")}.`;
       }
+      if (scripts.length > 10) throw new Error("validate accepts at most 10 scripts per call.");
+      const diagnosticsBudget = scripts.length > 0 ? Math.floor(maxBytes * 0.25) : maxBytes - 400;
+      const boundedDiagnostics = boundedItems(diagnosticItems, Math.max(256, diagnosticsBudget));
+      const diagnosticsOk = !diagnosticItems.some((item) => item.severity === "error");
+      const batch =
+        scripts.length > 0
+          ? await runBatch(
+              scripts.map((script) => ({
+                label: packageScriptLabel(packageManager, script),
+                preflight: () => packageScriptProblem(root, script, allowedScripts),
+                execute: () =>
+                  packageScriptCapture(root, script, {
+                    timeoutMs,
+                    packageManager,
+                    ...(signal ? { signal } : {}),
+                  }),
+              })),
+              {
+                onError: "stop",
+                maxBytes: Math.max(1024, maxBytes - Math.max(256, diagnosticsBudget) - 300),
+              },
+            )
+          : undefined;
+      structuredContent = {
+        level,
+        ok: diagnosticsOk && (batch?.ok ?? true),
+        diagnostics: {
+          ok: diagnosticsOk,
+          count: diagnosticItems.length,
+          issues: boundedDiagnostics.items,
+          truncated: boundedDiagnostics.truncated,
+        },
+        ...(batch ? { scripts: batch } : {}),
+        scriptsRequested: scripts,
+        truncated: boundedDiagnostics.truncated || (batch?.truncated ?? false),
+        ...(note ? { note } : {}),
+      };
       break;
     }
     case "file_info":
@@ -2255,6 +2241,12 @@ function intArg(value: unknown, fallback: number, min: number, max: number, name
   return value as number;
 }
 
+function defaultValidationScripts(level: string, allowedScripts: string[]): string[] {
+  const allowed = (names: string[]) => names.filter((name) => allowedScripts.includes(name));
+  if (level === "full") return allowed(["check", "test"]);
+  return allowedScripts.includes("check") ? ["check"] : allowed(["typecheck", "lint"]);
+}
+
 function timeoutMsArg(value: unknown): number {
   if (value === undefined) return 120000;
   if (!Number.isInteger(value) || (value as number) < 1000 || (value as number) > 600000)
@@ -2405,36 +2397,6 @@ function boundCodeGraphResult(
     budgetBytes: maxBytes,
     message: "CodeGraph output exceeded maxBytes. Narrow the query or lower maxFiles.",
   };
-}
-
-function boundCommandResult(value: unknown, maxBytes: number): unknown {
-  if (!isRecord(value)) return value;
-  const command = typeof value.command === "string" ? value.command : "";
-  const stdout = typeof value.stdout === "string" ? value.stdout : "";
-  const stderr = typeof value.stderr === "string" ? value.stderr : "";
-  let commandBudget = Buffer.byteLength(command, "utf8");
-  let stdoutBudget = Buffer.byteLength(stdout, "utf8");
-  let stderrBudget = Buffer.byteLength(stderr, "utf8");
-  const candidate = () => ({
-    ...value,
-    command: truncateText(command, commandBudget).text,
-    stdout: truncateText(stdout, stdoutBudget).text,
-    stderr: truncateText(stderr, stderrBudget).text,
-  });
-  let result = candidate();
-  while (
-    Buffer.byteLength(JSON.stringify(result), "utf8") > maxBytes &&
-    (commandBudget > 0 || stdoutBudget > 0 || stderrBudget > 0)
-  ) {
-    const excess = Buffer.byteLength(JSON.stringify(result), "utf8") - maxBytes;
-    if (stdoutBudget >= stderrBudget && stdoutBudget > 0)
-      stdoutBudget = Math.max(0, stdoutBudget - excess);
-    else if (stderrBudget > 0) stderrBudget = Math.max(0, stderrBudget - excess);
-    else commandBudget = Math.max(0, commandBudget - excess);
-    result = candidate();
-  }
-  if (Buffer.byteLength(JSON.stringify(result), "utf8") <= maxBytes) return result;
-  return { ...value, command: truncateText(command, commandBudget).text, stdout: "", stderr: "" };
 }
 
 function boundedItems<T>(items: T[], maxBytes: number): { items: T[]; truncated: boolean } {

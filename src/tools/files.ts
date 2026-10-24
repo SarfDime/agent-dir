@@ -85,8 +85,90 @@ export interface AppliedFileChange {
 interface PreparedFileChange extends AppliedFileChange {
   target: string;
   content?: string;
+  /** Exact previous bytes, so rollback restores binary files unchanged. */
+  previous?: Buffer;
   previousContent?: string;
   existed: boolean;
+  mode?: number;
+}
+
+function occurrenceLines(content: string, search: string, limit = 5): number[] {
+  const lines: number[] = [];
+  for (let from = 0; lines.length < limit; ) {
+    const index = content.indexOf(search, from);
+    if (index === -1) break;
+    lines.push(content.slice(0, index).split("\n").length);
+    from = index + Math.max(1, search.length);
+  }
+  return lines;
+}
+
+function trigrams(value: string): Set<string> {
+  const text = value.trim().toLowerCase().replace(/\s+/g, " ");
+  const grams = new Set<string>();
+  for (let index = 0; index + 3 <= text.length; index += 1) grams.add(text.slice(index, index + 3));
+  return grams;
+}
+
+/** Lines most similar to the first line of the missing text, to help the agent correct it. */
+function closestLines(content: string, search: string, limit = 3): string[] {
+  const first = search.split("\n").find((line) => line.trim().length >= 3);
+  if (!first) return [];
+  const wanted = trigrams(first);
+  if (wanted.size === 0) return [];
+  const scored: Array<{ line: number; text: string; score: number }> = [];
+  for (const [index, text] of content.split("\n").entries()) {
+    if (text.trim().length < 3) continue;
+    const grams = trigrams(text);
+    let shared = 0;
+    for (const gram of wanted) if (grams.has(gram)) shared += 1;
+    const score = shared / (wanted.size + grams.size - shared);
+    if (score >= 0.3) scored.push({ line: index + 1, text: text.trim().slice(0, 120), score });
+  }
+  return scored
+    .sort((a, b) => b.score - a.score || a.line - b.line)
+    .slice(0, limit)
+    .map((item) => `line ${item.line}: ${item.text}`);
+}
+
+/** Writes via a temporary file in the same directory and renames it into place. */
+async function writeFileAtomic(
+  target: string,
+  data: string | Buffer,
+  mode?: number,
+): Promise<void> {
+  const temporary = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.agent-dir-${process.pid}-${Date.now()}.tmp`,
+  );
+  try {
+    await fs.writeFile(temporary, data, mode === undefined ? undefined : { mode });
+    if (mode !== undefined) await fs.chmod(temporary, mode);
+    await fs.rename(temporary, target);
+  } catch (error) {
+    await fs.rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+function describePatchProblems(
+  content: string,
+  displayPath: string,
+  patch: FilePatch,
+  occurrences: number,
+): string | undefined {
+  if (occurrences === 0) {
+    const hints = closestLines(content, patch.search);
+    return `Patch text was not found in '${displayPath}'.${
+      hints.length ? ` Closest lines: ${hints.join("; ")}.` : ""
+    } Re-read the file with read_range and copy the text exactly; whitespace matters.`;
+  }
+  if (patch.count === undefined && occurrences > 1) {
+    return `Patch text occurs ${occurrences} times in '${displayPath}' (lines ${occurrenceLines(content, patch.search).join(", ")}${
+      occurrences > 5 ? ", ..." : ""
+    }). Add surrounding context so it matches once, or set count to replace the first N occurrences.`;
+  }
+  return undefined;
 }
 
 export async function applyFileChanges(
@@ -102,48 +184,62 @@ export async function applyFileChanges(
   const prepared: PreparedFileChange[] = [];
 
   for (const change of changes) {
-    const changeTarget = await safePath(resolvedRoot, change.path, change.kind === "write");
-    const protectedProblem = protectedPathProblem(
-      path.relative(resolvedRoot, changeTarget),
-      protection,
-    );
+    if (typeof change.path !== "string" || !change.path)
+      throw new Error("Every change needs a non-empty string path.");
+    let target: string;
+    try {
+      target = await safePath(resolvedRoot, change.path, change.kind === "write");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT")
+        throw new Error(`'${change.path}' does not exist.`);
+      throw error;
+    }
+    const protectedProblem = protectedPathProblem(path.relative(resolvedRoot, target), protection);
     if (protectedProblem) throw new Error(protectedProblem);
-    if (seen.has(changeTarget)) throw new Error(`Duplicate change path: '${change.path}'.`);
-    seen.add(changeTarget);
+    if (seen.has(target)) throw new Error(`Duplicate change path: '${change.path}'.`);
+    seen.add(target);
+
+    let previous: Buffer | undefined;
+    let mode: number | undefined;
+    try {
+      previous = await fs.readFile(target);
+      mode = (await fs.stat(target)).mode & 0o7777;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || change.kind !== "write")
+        throw error;
+    }
+    const existed = previous !== undefined;
+    const base = {
+      kind: change.kind,
+      path: change.path,
+      target,
+      existed,
+      ...(previous === undefined ? {} : { previous, previousContent: previous.toString("utf8") }),
+      ...(mode === undefined ? {} : { mode }),
+      ...(dryRun ? { dryRun: true } : {}),
+    };
 
     if (change.kind === "write") {
-      const target = changeTarget;
-      let previousContent: string | undefined;
-      let existed = false;
-      try {
-        previousContent = await fs.readFile(target, "utf8");
-        existed = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
       prepared.push({
-        kind: change.kind,
-        path: change.path,
-        target,
+        ...base,
         content: change.content,
-        ...(previousContent === undefined ? {} : { previousContent }),
-        existed,
-        changed: previousContent !== change.content,
-        ...(dryRun ? { dryRun: true } : {}),
+        changed: previous === undefined || !previous.equals(Buffer.from(change.content, "utf8")),
       });
       continue;
     }
 
-    const target = changeTarget;
-    const previousContent = await fs.readFile(target, "utf8");
-
     if (change.kind === "patch") {
+      if (!previous) throw new Error(`'${change.path}' does not exist.`);
+      if (previous.includes(0))
+        throw new Error(`'${change.path}' looks like a binary file and cannot be patched.`);
       if (change.patches.length === 0) throw new Error("At least one patch is required.");
-      let content = previousContent;
+      const original = previous.toString("utf8");
+      let content = original;
       for (const patch of change.patches) {
         if (!patch.search) throw new Error("Patch search text cannot be empty.");
         const occurrences = content.split(patch.search).length - 1;
-        if (occurrences === 0) throw new Error(`Patch text was not found in '${change.path}'.`);
+        const problem = describePatchProblems(content, change.path, patch, occurrences);
+        if (problem) throw new Error(problem);
         const count = patch.count ?? 1;
         if (!Number.isInteger(count) || count < 1)
           throw new Error("Patch count must be a positive integer.");
@@ -159,31 +255,21 @@ export async function applyFileChanges(
           offset = index + patch.replace.length;
         }
       }
-      prepared.push({
-        kind: change.kind,
-        path: change.path,
-        target,
-        content,
-        previousContent,
-        existed: true,
-        changed: content !== previousContent,
-        ...(dryRun ? { dryRun: true } : {}),
-      });
+      prepared.push({ ...base, content, changed: content !== original });
       continue;
     }
 
-    prepared.push({
-      kind: change.kind,
-      path: change.path,
-      target,
-      previousContent,
-      existed: true,
-      changed: true,
-      ...(dryRun ? { dryRun: true } : {}),
-    });
+    if (!previous) throw new Error(`'${change.path}' does not exist.`);
+    prepared.push({ ...base, changed: true });
   }
 
-  if (dryRun) return prepared.map(({ target: _target, ...change }) => change);
+  const strip = ({
+    target: _target,
+    previous: _previous,
+    mode: _mode,
+    ...change
+  }: PreparedFileChange) => change;
+  if (dryRun) return prepared.map(strip);
 
   const applied: PreparedFileChange[] = [];
   try {
@@ -195,16 +281,16 @@ export async function applyFileChanges(
       if (change.kind === "delete") await fs.unlink(change.target);
       else {
         await fs.mkdir(path.dirname(change.target), { recursive: true });
-        await fs.writeFile(change.target, change.content ?? "", "utf8");
+        await writeFileAtomic(change.target, change.content ?? "", change.mode);
       }
       applied.push(change);
     }
   } catch (error) {
     for (const change of applied.reverse()) {
       try {
-        if (change.existed) {
+        if (change.existed && change.previous !== undefined) {
           await fs.mkdir(path.dirname(change.target), { recursive: true });
-          await fs.writeFile(change.target, change.previousContent ?? "", "utf8");
+          await writeFileAtomic(change.target, change.previous, change.mode);
         } else {
           await fs.rm(change.target, { force: true });
         }
@@ -217,5 +303,5 @@ export async function applyFileChanges(
     );
   }
 
-  return prepared.map(({ target: _target, ...change }) => change);
+  return prepared.map(strip);
 }

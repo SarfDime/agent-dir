@@ -10,6 +10,82 @@ export interface Diagnostic {
   message: string;
 }
 
+/** Content checks skip larger files; they are not source code worth scanning. */
+const MAX_CONTENT_BYTES = 1_000_000;
+
+/** Files whose format is JSON with comments, so comments there are normal. */
+const JSONC_NAMES =
+  /(?:^|\/)(?:tsconfig[^/]*\.json|jsconfig[^/]*\.json|\.eslintrc\.json|devcontainer\.json|\.vscode\/[^/]+\.json|[^/]+\.jsonc|biome\.jsonc?)$/i;
+
+/** Removes comments and trailing commas, leaving string contents untouched. */
+export function stripJsonc(text: string): string {
+  let output = "";
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index] as string;
+    const next = text[index + 1];
+    if (char === '"') {
+      let end = index + 1;
+      while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      output += text.slice(index, end + 1);
+      index = end + 1;
+    } else if (char === "/" && next === "/") {
+      while (index < text.length && text[index] !== "\n") index += 1;
+    } else if (char === "/" && next === "*") {
+      const end = text.indexOf("*/", index + 2);
+      index = end === -1 ? text.length : end + 2;
+    } else {
+      output += char;
+      index += 1;
+    }
+  }
+  return output.replace(/,(\s*[}\]])/g, "$1");
+}
+
+function jsonProblem(relativePath: string, content: string): Diagnostic | undefined {
+  try {
+    JSON.parse(content);
+    return undefined;
+  } catch {
+    // Fall through to the tolerant parse.
+  }
+  try {
+    JSON.parse(stripJsonc(content));
+  } catch {
+    return {
+      severity: "error",
+      code: "INVALID_JSON",
+      path: relativePath,
+      message: "File is not valid JSON.",
+    };
+  }
+  if (JSONC_NAMES.test(relativePath)) return undefined;
+  return {
+    severity: "warning",
+    code: "JSON_WITH_COMMENTS",
+    path: relativePath,
+    message: "File contains comments or trailing commas, which strict JSON parsers reject.",
+  };
+}
+
+/** Reports real conflict blocks only: a lone ======= line (a Markdown heading) is ignored. */
+function conflictMarkers(lines: string[]): number[] {
+  const found: number[] = [];
+  let inConflict = false;
+  for (const [index, line] of lines.entries()) {
+    if (/^<<<<<<<(?: .*)?$/.test(line)) {
+      found.push(index + 1);
+      inConflict = true;
+    } else if (inConflict && /^=======$/.test(line)) {
+      found.push(index + 1);
+    } else if (/^>>>>>>>(?: .*)?$/.test(line)) {
+      found.push(index + 1);
+      inConflict = false;
+    }
+  }
+  return found;
+}
+
 export async function diagnostics(root: string, maxResults = 200): Promise<Diagnostic[]> {
   if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 1000)
     throw new Error("maxResults must be an integer between 1 and 1000.");
@@ -39,32 +115,27 @@ export async function diagnostics(root: string, maxResults = 200): Promise<Diagn
       }
       continue;
     }
-    if (path.extname(entry.path).toLowerCase() === ".json") {
-      try {
-        JSON.parse(await fs.readFile(target, "utf8"));
-      } catch {
-        results.push({
-          severity: "error",
-          code: "INVALID_JSON",
-          path: entry.path,
-          message: "File is not valid JSON.",
-        });
-      }
-    }
+    if (!stat.isFile() || stat.size > MAX_CONTENT_BYTES) continue;
+    let content: string;
     try {
-      const content = await fs.readFile(target, "utf8");
-      const lines = content.split(/\r?\n/);
-      for (let index = 0; index < lines.length && results.length < maxResults; index += 1)
-        if (/^(?:<<<<<<<|=======|>>>>>>>)(?:.*)?$/.test(lines[index] ?? ""))
-          results.push({
-            severity: "error",
-            code: "MERGE_CONFLICT",
-            path: entry.path,
-            line: index + 1,
-            message: "Unresolved Git merge-conflict marker.",
-          });
+      content = await fs.readFile(target, "utf8");
     } catch {
-      /* binary/unreadable */
+      continue;
+    }
+    if (content.includes("\0")) continue;
+    if (path.extname(entry.path).toLowerCase() === ".json" || /\.jsonc$/i.test(entry.path)) {
+      const problem = jsonProblem(entry.path, content);
+      if (problem) results.push(problem);
+    }
+    for (const line of conflictMarkers(content.split(/\r?\n/))) {
+      if (results.length >= maxResults) break;
+      results.push({
+        severity: "error",
+        code: "MERGE_CONFLICT",
+        path: entry.path,
+        line,
+        message: "Unresolved Git merge-conflict marker.",
+      });
     }
   }
   const rootEntries = await fs.readdir(resolvedRoot);
