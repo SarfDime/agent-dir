@@ -23,6 +23,7 @@ import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
 import {
+  packageScriptArgsProblem,
   packageScriptCapture,
   packageScriptLabel,
   packageScriptProblem,
@@ -393,7 +394,22 @@ const baseTools: ToolDefinition[] = [
     "run_package_scripts_batch",
     "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
     {
-      scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
+      scripts: {
+        type: "array",
+        minItems: 1,
+        maxItems: 10,
+        items: {
+          anyOf: [
+            stringSchema,
+            objectOutput(
+              { script: stringSchema, args: { type: "array", items: stringSchema, maxItems: 16 } },
+              ["script"],
+            ),
+          ],
+        },
+        description:
+          "Script names, or { script, args } to pass extra arguments (for example a test path). Arguments are only accepted for scripts listed in the profile as argumentScripts.",
+      },
       onError: onErrorSchema,
       timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
@@ -519,6 +535,7 @@ export function createMcpHandler(
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
       : undefined;
   const allowedScripts = commandConfig.scripts?.allowedScripts ?? [];
+  const argumentScripts = commandConfig.scripts?.argumentScripts ?? [];
   const packageManager = commandConfig.packageManager ?? "npm";
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
@@ -818,6 +835,7 @@ export function createMcpHandler(
               blacklistedCommands,
               commandPolicy,
               pathProtection,
+              argumentScripts,
               notify,
               request.signal,
               codeGraph,
@@ -1339,6 +1357,7 @@ async function callTool(
   blacklistedCommands: string[],
   commandPolicy: CommandPolicyConfig | undefined,
   pathProtection: PathProtectionConfig | undefined,
+  argumentScripts: string[],
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
@@ -1754,18 +1773,21 @@ async function callTool(
       structuredContent = await fileInfo(root, String(args.path));
       break;
     case "run_package_scripts_batch": {
-      const scripts = stringArray(args.scripts, "scripts");
+      const requested = scriptRequests(args.scripts);
       const timeoutMs = timeoutMsArg(args.timeoutMs);
-      if (scripts.length > 10)
+      if (requested.length > 10)
         throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
       structuredContent = await runBatch(
-        scripts.map((script) => ({
-          label: packageScriptLabel(packageManager, script),
-          preflight: () => packageScriptProblem(root, script, allowedScripts),
+        requested.map(({ script, args: scriptArgs }) => ({
+          label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
+          preflight: async () =>
+            (await packageScriptProblem(root, script, allowedScripts)) ??
+            packageScriptArgsProblem(script, scriptArgs, argumentScripts),
           execute: () =>
             packageScriptCapture(root, script, {
               timeoutMs,
               packageManager,
+              ...(scriptArgs?.length ? { args: scriptArgs } : {}),
               ...(signal ? { signal } : {}),
             }),
         })),
@@ -2239,6 +2261,25 @@ function intArg(value: unknown, fallback: number, min: number, max: number, name
   if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
     throw new Error(`${name} must be an integer between ${min} and ${max}.`);
   return value as number;
+}
+
+/** Accepts script names or `{ script, args }` objects. */
+function scriptRequests(value: unknown): Array<{ script: string; args?: string[] }> {
+  if (!Array.isArray(value) || value.length === 0)
+    throw new Error(
+      "scripts must be a non-empty array of script names or { script, args } objects.",
+    );
+  return value.map((item) => {
+    if (typeof item === "string") return { script: item };
+    if (isRecord(item) && typeof item.script === "string")
+      return {
+        script: item.script,
+        ...(item.args === undefined ? {} : { args: item.args as string[] }),
+      };
+    throw new Error(
+      "Each script must be a name or an object with a script name and optional args.",
+    );
+  });
 }
 
 function defaultValidationScripts(level: string, allowedScripts: string[]): string[] {

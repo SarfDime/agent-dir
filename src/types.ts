@@ -7,6 +7,8 @@ export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
 export interface PackageScriptsConfig {
   allowedScripts: string[];
+  /** Allowed scripts that may receive extra arguments (appended after `--`). */
+  argumentScripts?: string[];
 }
 
 export interface Profile {

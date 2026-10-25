@@ -31,22 +31,57 @@ export async function packageScriptProblem(
   return undefined;
 }
 
-export function packageScriptLabel(packageManager: PackageManager, script: string): string {
-  return `${packageManager} run ${script}`;
+const MAX_SCRIPT_ARGS = 16;
+const MAX_SCRIPT_ARG_LENGTH = 300;
+
+/** Extra arguments are only accepted for scripts the profile lists in `argumentScripts`. */
+export function packageScriptArgsProblem(
+  script: string,
+  args: unknown,
+  argumentScripts: string[] = [],
+): string | undefined {
+  if (args === undefined) return undefined;
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
+    return "Package script args must be an array of strings.";
+  if (args.length === 0) return undefined;
+  if (!argumentScripts.includes(script))
+    return `Package script '${script}' does not accept arguments; add it to scripts.argumentScripts in the profile to allow them.`;
+  if (args.length > MAX_SCRIPT_ARGS) return `At most ${MAX_SCRIPT_ARGS} arguments are allowed.`;
+  if (args.some((arg) => arg.length > MAX_SCRIPT_ARG_LENGTH || /[\0\r\n]/.test(arg)))
+    return `Arguments must be single lines of at most ${MAX_SCRIPT_ARG_LENGTH} characters.`;
+  return undefined;
+}
+
+export function packageScriptLabel(
+  packageManager: PackageManager,
+  script: string,
+  args: string[] = [],
+): string {
+  return [`${packageManager} run ${script}`, ...(args.length ? ["--", ...args] : [])].join(" ");
 }
 
 /** Runs an already validated script with the shared process runner. */
 export function packageScriptCapture(
   root: string,
   script: string,
-  options: { timeoutMs?: number; signal?: AbortSignal; packageManager?: PackageManager } = {},
+  options: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    packageManager?: PackageManager;
+    args?: string[];
+  } = {},
 ): Promise<CaptureResult> {
   const packageManager = options.packageManager ?? "npm";
   const executable = process.platform === "win32" ? `${packageManager}.cmd` : packageManager;
-  return spawnCapture(root, executable, ["run", script], {
-    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  return spawnCapture(
+    root,
+    executable,
+    ["run", script, ...(options.args?.length ? ["--", ...options.args] : [])],
+    {
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.signal ? { signal: options.signal } : {}),
+    },
+  );
 }
 
 export async function runPackageScript(

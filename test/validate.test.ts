@@ -123,7 +123,12 @@ async function validate(
 
 const PACKAGE = JSON.stringify({
   name: "fixture",
-  scripts: { check: "node -e 0", typecheck: "node -e 0", lint: "node -e 1", test: "node -e 0" },
+  scripts: {
+    check: "node -e 0",
+    typecheck: "node -e 0",
+    lint: 'node -e "process.exit(1)"',
+    test: "node -e 0",
+  },
 });
 
 test("validate rejects unknown levels and explains the diagnostics-only limits", async () => {

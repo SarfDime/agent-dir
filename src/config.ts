@@ -139,6 +139,12 @@ function isProfile(value: unknown): value is Profile {
       scripts.allowedScripts.some((item) => typeof item !== "string")
     )
       return false;
+    if (
+      scripts.argumentScripts !== undefined &&
+      (!Array.isArray(scripts.argumentScripts) ||
+        scripts.argumentScripts.some((item) => typeof item !== "string"))
+    )
+      return false;
   }
   if (profile.commands !== undefined) {
     if (

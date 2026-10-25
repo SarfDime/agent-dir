@@ -448,6 +448,47 @@ test("batch tools accept a per-call timeout and reject out-of-range values", asy
   }
 });
 
+test("package scripts accept arguments only when the profile allows them", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-script-args-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        scripts: {
+          show: "node -e \"console.log(process.argv.slice(1).join('|'))\"",
+          other: 'node -e "console.log(1)"',
+        },
+      }),
+    );
+    const handler = createMcpHandler(
+      root,
+      { scripts: { allowedScripts: ["show", "other"], argumentScripts: ["show"] } },
+      { level: "none" },
+    );
+    const result = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: [
+        { script: "show", args: ["one", "two words"] },
+        { script: "other", args: ["x"] },
+      ],
+      onError: "continue",
+    });
+    assert.equal(result.items[0]?.status, "success");
+    assert.equal(result.items[0]?.command, "npm run show -- one two words");
+    assert.match((result.items[0] as { stdout?: string }).stdout ?? "", /one\|two words/);
+    assert.equal(result.items[1]?.status, "failure");
+    assert.equal(result.items[1]?.ran, false);
+    assert.match(result.items[1]?.reason ?? "", /does not accept arguments/);
+
+    const bad = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: [{ script: "show", args: ["line\nbreak"] }],
+    });
+    assert.match(bad.items[0]?.reason ?? "", /single lines/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("scripts that rewrite files are identified for warnings", () => {
   assert.deepEqual(
     mutatingScripts(["check", "format", "check:write", "lint:fix", "test", "prefix", "build"]),

@@ -1016,17 +1016,16 @@ test("validate composes diagnostics with explicitly allowed package scripts", as
       result: {
         structuredContent: {
           ok: boolean;
-          checks: Array<{ kind: string; script?: string; ok: boolean }>;
+          diagnostics: { ok: boolean };
+          scripts: { items: Array<{ command: string; status: string }> };
         };
       };
     };
     assert.equal(body.result.structuredContent.ok, true);
+    assert.equal(body.result.structuredContent.diagnostics.ok, true);
     assert.deepEqual(
-      body.result.structuredContent.checks.map((check) => [check.kind, check.script, check.ok]),
-      [
-        ["diagnostics", undefined, true],
-        ["package-script", "check", true],
-      ],
+      body.result.structuredContent.scripts.items.map((item) => [item.command, item.status]),
+      [["npm run check", "success"]],
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -197,6 +197,19 @@ agent-dir config add myproject --directory . \
 
 `--protect` adds patterns, `--unprotect` keeps matching paths editable, and both can also be passed when launching with `agent-dir --directory .` to override a profile for that run. The setup wizard asks for extra protected paths. The startup banner lists the active protected paths.
 
+### Script arguments
+
+By default package scripts run exactly as defined. To let agents pass arguments (for example a test file) to specific scripts, list them in the profile:
+
+```json
+"scripts": {
+  "allowedScripts": ["check", "test"],
+  "argumentScripts": ["test"]
+}
+```
+
+The agent then calls `run_package_scripts_batch` with `{ "script": "test", "args": ["test/foo.test.js"] }`. Arguments are appended after `--`, limited to 16 single-line arguments of 300 characters, and rejected for scripts that are not listed. Only enable this for scripts whose behavior you are happy to have influenced by the arguments.
+
 ### Scripts that rewrite files
 
 Scripts such as `format`, `check:write` or `lint:fix` change files without going through `apply_changes`, so protected-path checks do not apply to what they write. Agent Dir warns at startup and in the setup wizard when an allowed script name suggests it rewrites files.
