@@ -204,22 +204,42 @@ async function closestPathHint(root: string, requested: string): Promise<string>
   return ` Did you mean ${names.join(" or ")}?`;
 }
 
+/** Failure reasons a caller can act on; kept in sync with the telemetry `errorReason` vocabulary. */
+export type ToolFailureReason = "patch_text_not_found" | "patch_ambiguous" | "path_not_found";
+
+/** A tool failure whose reason is safe to record, so analytics can separate the cases. */
+export class ToolFailure extends Error {
+  readonly reason: ToolFailureReason;
+
+  constructor(reason: ToolFailureReason, message: string) {
+    super(message);
+    this.name = "ToolFailure";
+    this.reason = reason;
+  }
+}
+
 function describePatchProblems(
   content: string,
   displayPath: string,
   patch: FilePatch,
   occurrences: number,
-): string | undefined {
+): ToolFailure | undefined {
   if (occurrences === 0) {
     const hints = closestLines(content, patch.search);
-    return `Patch text was not found in '${displayPath}'.${
-      hints.length ? ` Closest lines: ${hints.join("; ")}.` : ""
-    } Re-read the file with read_range and copy the text exactly; whitespace matters.`;
+    return new ToolFailure(
+      "patch_text_not_found",
+      `Patch text was not found in '${displayPath}'.${
+        hints.length ? ` Closest lines: ${hints.join("; ")}.` : ""
+      } Re-read the file with read_range and copy the text exactly; whitespace matters.`,
+    );
   }
   if (patch.count === undefined && occurrences > 1) {
-    return `Patch text occurs ${occurrences} times in '${displayPath}' (lines ${occurrenceLines(content, patch.search).join(", ")}${
-      occurrences > 5 ? ", ..." : ""
-    }). Add surrounding context so it matches once, or set count to replace the first N occurrences.`;
+    return new ToolFailure(
+      "patch_ambiguous",
+      `Patch text occurs ${occurrences} times in '${displayPath}' (lines ${occurrenceLines(content, patch.search).join(", ")}${
+        occurrences > 5 ? ", ..." : ""
+      }). Add surrounding context so it matches once, or set count to replace the first N occurrences.`,
+    );
   }
   return undefined;
 }
@@ -244,7 +264,8 @@ export async function applyFileChanges(
       target = await safePath(resolvedRoot, change.path, change.kind === "write");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT")
-        throw new Error(
+        throw new ToolFailure(
+          "path_not_found",
           `'${change.path}' does not exist.${await closestPathHint(resolvedRoot, change.path)}`,
         );
       throw error;
@@ -284,7 +305,7 @@ export async function applyFileChanges(
     }
 
     if (change.kind === "patch") {
-      if (!previous) throw new Error(`'${change.path}' does not exist.`);
+      if (!previous) throw new ToolFailure("path_not_found", `'${change.path}' does not exist.`);
       if (previous.includes(0))
         throw new Error(`'${change.path}' looks like a binary file and cannot be patched.`);
       if (change.patches.length === 0) throw new Error("At least one patch is required.");
@@ -294,7 +315,7 @@ export async function applyFileChanges(
         if (!patch.search) throw new Error("Patch search text cannot be empty.");
         const occurrences = content.split(patch.search).length - 1;
         const problem = describePatchProblems(content, change.path, patch, occurrences);
-        if (problem) throw new Error(problem);
+        if (problem) throw problem;
         const count = patch.count ?? 1;
         if (!Number.isInteger(count) || count < 1)
           throw new Error("Patch count must be a positive integer.");
@@ -314,7 +335,7 @@ export async function applyFileChanges(
       continue;
     }
 
-    if (!previous) throw new Error(`'${change.path}' does not exist.`);
+    if (!previous) throw new ToolFailure("path_not_found", `'${change.path}' does not exist.`);
     prepared.push({ ...base, changed: true });
   }
 

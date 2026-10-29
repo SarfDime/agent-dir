@@ -3,9 +3,11 @@ import {
   ARG_SHAPE_KEYS,
   type ArgShape,
   TELEMETRY_ERROR_CATEGORIES,
+  TELEMETRY_ERROR_REASONS,
   type TelemetryCommandEvent,
   type TelemetryEnvelope,
   type TelemetryErrorCategory,
+  type TelemetryErrorReason,
   type TelemetryHttpRequestEvent,
   type TelemetryLevel,
   type TelemetryMcpRequestEvent,
@@ -19,6 +21,7 @@ import {
 } from "./types.js";
 
 const SAFE_ERROR_CATEGORIES: ReadonlySet<string> = new Set(TELEMETRY_ERROR_CATEGORIES);
+const SAFE_ERROR_REASONS: ReadonlySet<string> = new Set(TELEMETRY_ERROR_REASONS);
 const SAFE_OUTCOMES: ReadonlySet<string> = new Set(TOOL_OUTCOMES);
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
@@ -54,6 +57,7 @@ const MCP_REQUEST_RULES: FieldRules<TelemetryMcpRequestEvent> = {
   responseBytes: (value) => boundedNumber(value),
   estimatedResponseTokens: (value) => boundedNumber(value),
   errorCategory: (value) => sanitizeErrorCategory(value),
+  errorReason: (value) => sanitizeErrorReason(value),
   toolCount: (value) => boundedInteger(value),
   toolSetHash: (value) => sanitizeHash(value),
   guidanceVariant: (value) => sanitizeIdentifier(value, SAFE_VARIANT),
@@ -92,6 +96,8 @@ const TOOL_CALL_RULES: FieldRules<TelemetryToolEvent> = {
   outcome: (value) => sanitizeOutcome(value),
   readLines: (value) => boundedInteger(value),
   errorCategory: (value) => sanitizeErrorCategory(value),
+  errorReason: (value) => sanitizeErrorReason(value),
+  argumentKeys: (value) => sanitizeArgumentKeys(value),
 };
 
 const COMMAND_CALL_RULES: FieldRules<TelemetryCommandEvent> = {
@@ -339,6 +345,26 @@ function sanitizeHash(value: string): string {
 function sanitizeErrorCategory(value: string): TelemetryErrorCategory {
   const normalized = value.trim().toLowerCase();
   return SAFE_ERROR_CATEGORIES.has(normalized) ? (normalized as TelemetryErrorCategory) : "unknown";
+}
+
+/** Unknown reasons are dropped rather than coerced, so an unlisted value never looks classified. */
+function sanitizeErrorReason(value: string): TelemetryErrorReason | undefined {
+  const normalized = value.trim().toLowerCase();
+  return SAFE_ERROR_REASONS.has(normalized) ? (normalized as TelemetryErrorReason) : undefined;
+}
+
+/**
+ * Argument key names from a rejected call. Only identifier-shaped names survive; anything else is
+ * `<unknown>`, so an invented argument such as `base64Args` is visible without persisting text that
+ * a client made up.
+ */
+function sanitizeArgumentKeys(value: string[]): string[] {
+  const keys = value
+    .slice(0, 40)
+    .map((key) =>
+      typeof key === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) ? key : "<unknown>",
+    );
+  return keys;
 }
 
 function boundedNumber(value: number): number {

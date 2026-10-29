@@ -101,6 +101,8 @@ Arguments are validated against the advertised `inputSchema` before the tool run
 
 Rejections return a normal tool result with `isError: true` and a single JSON text block (`{"error": "..."}`) rather than a protocol error, so the calling agent sees the message and can correct the call in the same turn. Calling an unknown tool returns `isError` too, with close matches when there are any (`Unknown tool: read_rang. Closest tools: read_range.`).
 
+`apply_changes` does not accept an encoding wrapper. If a rejected argument name looks like one (`base64Args`, `args_b64`, `encoded`), the rejection says so explicitly: it takes plain JSON, and quotes and newlines in `content`/`patches` are escaped as normal JSON strings. The reason for a rejection is also recorded in telemetry as `errorReason`, with the argument key names, so a client that keeps retrying the same shape is visible without logging what it sent.
+
 ### Batch results
 
 `run_command_batch` and `run_package_scripts_batch` return one object: `{ ok, onError, summary, items, truncated }`. Every item has exactly one `status`: `success`, `failure` or `skipped`, plus `ran` (whether the process was started) and, when not successful, a `reason`. Agents never have to infer whether a command ran.

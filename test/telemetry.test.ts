@@ -5,7 +5,11 @@ import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import { createTelemetryEnvelope, sanitizeAnonymousEvent } from "../src/telemetry/privacy.js";
 import { TelemetryRecorder } from "../src/telemetry/recorder.js";
 import { telemetrySessionPath } from "../src/telemetry/storage.js";
-import type { TelemetryErrorCategory, ToolOutcome } from "../src/telemetry/types.js";
+import type {
+  TelemetryErrorCategory,
+  TelemetryErrorReason,
+  ToolOutcome,
+} from "../src/telemetry/types.js";
 
 test("telemetry defaults to no recorded events", () => {
   const recorder = new TelemetryRecorder({ level: "none" });
@@ -590,4 +594,28 @@ test("recorder is bounded and returns isolated snapshots", () => {
   assert.equal((snapshot[0].event as { wallClockDurationMs: number }).wallClockDurationMs, 2);
   snapshot.pop();
   assert.equal(recorder.size, 2);
+});
+
+test("privacy sanitizer keeps only known rejection reasons and safe argument keys", () => {
+  const valid = sanitizeAnonymousEvent({
+    event: "tool_call",
+    tool: "apply_changes",
+    success: false,
+    durationMs: 1,
+    errorCategory: "invalid_input",
+    errorReason: "unknown_argument",
+    argumentKeys: ["base64Args", "not a key!", "changes"],
+  });
+  assert.equal(valid.errorReason, "unknown_argument");
+  assert.deepEqual(valid.argumentKeys, ["base64Args", "<unknown>", "changes"]);
+
+  const unlisted = sanitizeAnonymousEvent({
+    event: "tool_call",
+    tool: "apply_changes",
+    success: false,
+    durationMs: 1,
+    errorReason: "made_up_reason" as unknown as TelemetryErrorReason,
+  });
+  // An unlisted reason is dropped, not coerced, so it can never look classified.
+  assert.equal("errorReason" in unlisted, false);
 });

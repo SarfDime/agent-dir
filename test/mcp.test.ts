@@ -406,3 +406,134 @@ test("skills/list and resources/read expose project skills", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("argument rejections record a reason, sanitized keys and an input fingerprint", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-reason-"));
+  try {
+    const configId = `test-mcp-reason-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+    const call = (id: number, name: string, args: Record<string, unknown>) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": "tools/call",
+            "mcp-name": name,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name, arguments: args, _meta: META },
+          }),
+        }),
+      );
+
+    // An invented encoding wrapper: the message has to correct the belief, the event records why.
+    const base64 = await call(1, "apply_changes", { base64Args: "e30=" });
+    const base64Text = String(
+      (
+        ((await base64.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(base64Text, /Unknown argument 'base64Args'/);
+    assert.match(base64Text, /There is no base64 option/);
+    assert.match(base64Text, /escape quotes and newlines/);
+
+    const typed = await call(2, "apply_changes", { changes: "not-an-array" });
+    assert.equal(((await typed.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const missing = await call(3, "apply_changes", {});
+    assert.equal(((await missing.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const badEnum = await call(4, "validate", { level: "nonsense" });
+    assert.equal(((await badEnum.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const badRange = await call(5, "read_range", {
+      path: "x.ts",
+      startLine: 1,
+      endLine: 2,
+      maxBytes: 1,
+    });
+    assert.equal(
+      ((await badRange.json()) as { result: { isError: boolean } }).result.isError,
+      true,
+    );
+
+    const rejections = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .map((envelope) => envelope.event)
+      .filter((event) => event.event === "tool_call");
+    const reasons = rejections.map((event) =>
+      event.event === "tool_call" ? event.errorReason : undefined,
+    );
+    assert.deepEqual(reasons, [
+      "unknown_argument",
+      "type_mismatch",
+      "missing_required",
+      "enum_mismatch",
+      "length_or_range",
+    ]);
+    for (const event of rejections) {
+      if (event.event !== "tool_call") continue;
+      assert.equal(event.errorCategory, "invalid_input");
+      assert.equal(event.success, false);
+      assert.equal(event.inputFingerprint?.length, 64);
+    }
+    assert.deepEqual(
+      rejections.map((event) => (event.event === "tool_call" ? event.argumentKeys : undefined)),
+      [
+        // An invented key is recorded as <unknown>, never verbatim.
+        ["<unknown>"],
+        ["changes"],
+        undefined,
+        ["level"],
+        ["path", "startLine", "endLine", "maxBytes"],
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("client identity from initialize is attached to later events", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-client-"));
+  try {
+    const configId = `test-mcp-client-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "basic", configId });
+    const send = (id: number, method: string, params: Record<string, unknown>) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2024-11-05",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        }),
+      );
+    await send(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "better-deepseek", version: "0.1.15" },
+    });
+    // A later request from the same client carries no clientInfo of its own.
+    await send(2, "tools/call", { name: "find_files", arguments: { pattern: "*.md" } });
+
+    const clientNames = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .map((envelope) => envelope.runtime?.mcpClientName);
+    assert.ok(clientNames.length >= 2);
+    assert.deepEqual([...new Set(clientNames)], ["better-deepseek"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

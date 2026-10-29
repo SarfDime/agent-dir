@@ -24,6 +24,24 @@ export const TELEMETRY_ERROR_CATEGORIES = [
 
 export type TelemetryErrorCategory = (typeof TELEMETRY_ERROR_CATEGORIES)[number];
 
+/**
+ * Canonical rejection reasons: why a call failed, at the level of detail that is safe to persist.
+ * Never carries argument values, patch text, paths or free-form messages.
+ */
+export const TELEMETRY_ERROR_REASONS = [
+  "unknown_argument",
+  "type_mismatch",
+  "missing_required",
+  "enum_mismatch",
+  "length_or_range",
+  "patch_text_not_found",
+  "patch_ambiguous",
+  "path_not_found",
+  "other",
+] as const;
+
+export type TelemetryErrorReason = (typeof TELEMETRY_ERROR_REASONS)[number];
+
 /** Canonical tool outcomes; `toolOutcome` returns one of these. */
 export const TOOL_OUTCOMES = ["ok", "empty", "truncated", "error"] as const;
 
@@ -73,6 +91,7 @@ export interface TelemetryMcpRequestEvent {
   responseBytes?: number;
   estimatedResponseTokens?: number;
   errorCategory?: TelemetryErrorCategory;
+  errorReason?: TelemetryErrorReason;
   /**
    * `tools/list` only: how many tools were advertised and a stable hash of their names, so a size
    * change can be attributed to a code change or to a tool appearing/disappearing.
@@ -126,6 +145,12 @@ export interface TelemetryToolEvent {
   /** `read_range` only: total lines requested, so large reads are visible in aggregates. */
   readLines?: number;
   errorCategory?: TelemetryErrorCategory;
+  errorReason?: TelemetryErrorReason;
+  /**
+   * Argument key names from a rejected call. Unknown keys are recorded as `<unknown>`, so a
+   * misspelled or invented argument is visible without persisting the text that was sent.
+   */
+  argumentKeys?: string[];
 }
 
 export interface TelemetryCommandEvent {

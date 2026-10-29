@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "n
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { applyFileChanges } from "../src/tools/files.js";
+import { applyFileChanges, ToolFailure } from "../src/tools/files.js";
 
 async function withRoot(run: (root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-apply-"));
@@ -120,5 +120,38 @@ test("a failure while applying rolls back earlier changes, including binary file
     assert.equal(await readFile(path.join(root, "a.txt"), "utf8"), "original");
     assert.ok((await readFile(path.join(root, "b.bin"))).equals(bytes));
     assert.deepEqual((await readdir(root)).sort(), ["a.txt", "b.bin", "ro"]);
+  });
+});
+
+test("apply_changes failures carry a reason instead of only a message", async () => {
+  await withRoot(async (root) => {
+    await writeFile(path.join(root, "b.ts"), SOURCE);
+    const reasonOf = async (change: Parameters<typeof applyFileChanges>[1][number]) => {
+      try {
+        await applyFileChanges(root, [change]);
+        return undefined;
+      } catch (error) {
+        assert.ok(error instanceof ToolFailure, "failures should be typed");
+        return error.reason;
+      }
+    };
+
+    assert.equal(await reasonOf({ kind: "delete" as const, path: "missing.ts" }), "path_not_found");
+    assert.equal(
+      await reasonOf({
+        kind: "patch" as const,
+        path: "b.ts",
+        patches: [{ search: "nope gamma", replace: "const gamma = 4;" }],
+      }),
+      "patch_text_not_found",
+    );
+    assert.equal(
+      await reasonOf({
+        kind: "patch" as const,
+        path: "b.ts",
+        patches: [{ search: "alpha", replace: "omega" }],
+      }),
+      "patch_ambiguous",
+    );
   });
 });
