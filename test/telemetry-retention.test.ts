@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -153,6 +154,35 @@ test("readTelemetryEvents filters by profile, session and time without writing",
     assert.equal(readTelemetryEvents({ directory, profile: "missing" }).length, 0);
     assert.equal(statSync(a).mtimeMs, mtimeBefore);
     assert.equal(existsSync(old), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("analytics reads skip malformed lines and never create or modify files", () => {
+  const directory = temporaryDirectory();
+  try {
+    const good = sessionFile(directory, "alpha", "good");
+    const broken = join(directory, "alpha", "session-broken.jsonl");
+    writeFileSync(broken, `not json at all\n\n${JSON.stringify({ schemaVersion: 1 })}\n`, {
+      mode: 0o600,
+    });
+    const mtime = statSync(good).mtimeMs;
+
+    const events = readTelemetryEvents({ directory });
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.sessionId, "good");
+    assert.equal(statSync(good).mtimeMs, mtime);
+    assert.equal(readFileSync(broken, "utf8").startsWith("not json at all"), true);
+
+    const empty = temporaryDirectory();
+    try {
+      assert.equal(readTelemetryEvents({ directory: empty }).length, 0);
+      assert.equal(existsSync(empty), true);
+      assert.equal(readdirSync(empty).length, 0);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

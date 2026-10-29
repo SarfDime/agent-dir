@@ -86,6 +86,7 @@ See [MCP interface and security model](docs/MCP.md) for the supported protocol, 
 
 - [Configuration and tunnel setup](docs/CONFIGURATION.md) — setup wizard, profiles, Cloudflare Tunnel, Wormhole, tokens, and command allowlists.
 - [MCP interface and security model](docs/MCP.md) — supported endpoint, protocol behavior, tools, authentication, command execution, and the optional CodeGraph integration.
+- [Migrating to 2.0](docs/MIGRATION.md) — breaking changes: removed and renamed tools, single-payload results, result shapes, batch semantics, and configuration keys.
 - [Telemetry interpretation](docs/telemetry.md) — privacy levels, event model, metric definitions, and interpretation guidance.
 - [Release procedure](docs/RELEASING.md) — validation, branch/PR flow, semantic-release, and npm publishing.
 - [Contributing guide](https://github.com/SarfDime/agent-dir/blob/main/.github/CONTRIBUTING.md) — development setup, checks, and pull-request expectations.

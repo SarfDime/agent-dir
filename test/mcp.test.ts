@@ -36,6 +36,39 @@ async function request(
   return (await response.json()) as Record<string, unknown>;
 }
 
+test("every advertised tool rejects unknown arguments and names the valid ones", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-args-"));
+  try {
+    const list = await request(root, 1, "tools/list");
+    const tools = (list.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+    assert.ok(tools.length > 0);
+
+    for (const tool of tools) {
+      const name = String(tool.name);
+      const call = await request(root, 2, "tools/call", {
+        name,
+        arguments: { definitelyNotAnArgument: true },
+      });
+      const result = call.result as Record<string, unknown>;
+      assert.equal(result.isError, true, `${name} should reject an unknown argument`);
+      const text = String((result.content as Array<{ text: string }>)[0]?.text);
+      assert.match(text, /Unknown argument 'definitelyNotAnArgument'/, `${name}: ${text}`);
+      assert.match(text, /Valid arguments:|takes no arguments/, `${name}: ${text}`);
+
+      if (!tool.inputSchema || typeof tool.inputSchema !== "object") continue;
+      const required = (tool.inputSchema as Record<string, unknown>).required;
+      if (!Array.isArray(required) || required.length === 0) continue;
+      const missing = await request(root, 3, "tools/call", { name, arguments: {} });
+      const missingText = String(
+        ((missing.result as Record<string, unknown>).content as Array<{ text: string }>)[0]?.text,
+      );
+      assert.match(missingText, /is required/, `${name} should name a missing required argument`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("telemetry analytics is only exposed when explicitly enabled", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-analytics-"));
   try {

@@ -1264,9 +1264,7 @@ export function validateToolArguments(
   if (isRecord(value)) {
     const properties = isRecord(schema.properties) ? schema.properties : {};
     const names = Object.keys(properties);
-    for (const required of Array.isArray(schema.required) ? schema.required : []) {
-      if (!(String(required) in value)) return `'${label}.${String(required)}' is required.`;
-    }
+    // Report a misspelled argument before a missing one: it is the more actionable signal.
     for (const [key, entry] of Object.entries(value)) {
       const property = properties[key];
       if (!isRecord(property)) {
@@ -1278,6 +1276,10 @@ export function validateToolArguments(
       }
       const error = validateToolArguments(property, entry, path ? `${label}.${key}` : key);
       if (error) return error;
+    }
+    for (const required of Array.isArray(schema.required) ? schema.required : []) {
+      const name = String(required);
+      if (!(name in value)) return `'${path ? `${label}.${name}` : name}' is required.`;
     }
   }
   return undefined;

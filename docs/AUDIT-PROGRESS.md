@@ -163,10 +163,34 @@ The table above was padded into wide single-line rows by a Markdown formatter, s
 
 ### Phase 6: tests, documentation, release and re-measurement
 
-- [ ] 6.01 Tests: protocol matrix (section 7), command-policy table, batch semantics, depth/ignore fixtures, truncation envelopes, apply_changes rollback and partial failure, integration kill/recover, telemetry privacy by level, analytics bounded reads.
-- [ ] 6.02 Docs: `docs/MCP.md` (versions, tools, envelopes, batch semantics), `docs/CONFIGURATION.md` (policy rules, migration), `SECURITY.md` (trust model), `docs/telemetry.md` (levels, retention, scrub), `README.md`, `AGENTS.md` if tool names change.
-- [ ] 6.03 Re-baseline with the same queries as section 3 on a fresh telemetry window and fill a before/after table here.
-- [ ] 6.04 Release notes: list every breaking change (batch result shape, search envelopes, tool rename, config keys, policy defaults, removal of Serena and ast-grep, single-representation tool results with no `structuredContent` or output schemas).
+- [x] 6.01 Tests: protocol matrix (section 7), command-policy table, batch semantics, depth/ignore fixtures, truncation envelopes, apply_changes rollback and partial failure, integration kill/recover, telemetry privacy by level, analytics bounded reads. Added the three gaps that existed: every advertised tool is called at both protocol versions and checked for a valid result shape; every advertised tool rejects an unknown argument and names the valid ones (and names a missing required argument); analytics reads tolerate malformed or empty JSONL and never create or modify files. 195 tests.
+- [x] 6.02 Docs: `docs/MCP.md` (versions, tools, envelopes, batch semantics, argument validation, capability model), `docs/CONFIGURATION.md` (policy rules, migration), `SECURITY.md` (trust model), `docs/telemetry.md` (levels, retention, scrub, `toolCount`/`toolSetHash`), `README.md`, `docs/MIGRATION.md`. No stale references to removed tools remain in `AGENTS.md`, `SECURITY.md`, `docs/RELEASING.md` or the maintainer skill.
+- [~] 6.03 Re-baseline: structural metrics measured below; behavioural metrics need a fresh telemetry window because no build with these changes has been used yet.
+- [x] 6.04 Release notes: `docs/MIGRATION.md` lists every breaking change (result shape, removed and renamed tools, search and batch envelopes, config keys, policy defaults, single-representation results).
+
+#### 6.03 Re-baseline
+
+Structural metrics were measured directly against the built server. Behavioural metrics come from tool-call telemetry, so they need real usage of the 2.0 build; re-run the section 4b aggregation once a window exists and compare `toolSetHash` to be sure the advertised set is identical.
+
+| Metric | Baseline (section 3) | Now | Status |
+| --- | --- | --- | --- |
+| `tools/list` size | 22.7 KB | 11.1 KB (no integrations), 11.9 KB with CodeGraph and analytics | measured |
+| `initialize` response | 4.7-5.0 KB (long instructions) | 850 B (short decision table) | measured |
+| `server/discover` size | 1.5 KB | 2.4 KB (adds `capabilityModel`) | measured |
+| Advertised tools | 13-22 | 11-13 | measured |
+| Result wire size vs `maxBytes` | 1.84-2.08x | 1.01-1.13x | measured |
+| `telemetry_analytics` wire vs `maxBytes` | 1.76-2.27x | 0.40-1.00x | measured |
+| Search truncation reported | 0 of 93 | always (`truncated` + `truncationReason`) | structural |
+| Session summaries recorded | 7 of 20 | one per session (periodic snapshots) | structural |
+| Telemetry client identity | 3 of 3,153 events | every request | structural |
+| Legacy `diagnosticDetails` | 303 events | 0 | measured |
+| `read_range` share of output tokens | 62% | - | needs window |
+| `read_range` truncated | 10.6% | - | needs window |
+| Reads that follow a read | 73% | - | needs window |
+| `apply_changes` failures | 21.7% | - | needs window |
+| `validate` truncated / latency | 44% / 13.0 s mean | - | needs window |
+| `run_command_batch` latency | 3.6 s mean / 27.0 s p95 | - | needs window |
+| Duplicate output calls | 18 calls / ~35k tokens | - | needs window |
 
 ## 4b. Credit-usage investigation (2026-10-29)
 
@@ -311,3 +335,4 @@ Issues the ChatGPT audit did not find: analytics result shape, initialize negoti
 - 2026-10-19: Phase 5 checklist extended after review: 5.11 setup-wizard recommendation against general search/read executables, 5.12 denial hints that name the built-in tool, 5.13 multi-line `search_code`. Context: the first telemetry with executable names shows agents use `rg`, `grep` and `cat` through `run_command_batch` whenever a profile allows them.
 - 2026-10-29: Credit-usage investigation (section 4b). Serena and ast-grep removed entirely (measured: 4% and 0% of tool calls, and Serena contributed about 8.6 KB of `tools/list`). Tool results now carry one representation (no `structuredContent` duplicate), tools advertise no `outputSchema` or `title`, `fitAnalyticsResult` budgets the whole envelope, and `tools/list` telemetry records `toolCount` and `toolSetHash`. 4.05 and 5.03 closed; 5.05, 5.08 and 5.10 closed as not applicable. Breaking: result shape, removed tools, `structuredContent` consumers must read `content[0].text`. `npm run check` and `npm test` pass (192 tests).
 - 2026-10-29: Phase 5 completed (see "Phase 5 outcome"). 5.01 capability model, 5.02 short decision-table guidance, 5.06 schema-based argument validation, 5.09 nearest-name suggestions with `isError` kept, 5.13 multi-line `search_code`. 5.04, 5.11 and 5.12 were already implemented and are recorded as done. Docs updated for the single-payload result shape and the reduced tool set.
+- 2026-10-29: Phase 6 completed except the behavioural half of 6.03. 6.01 closed three coverage gaps (per-tool protocol matrix at both versions, per-tool unknown and missing argument rejection, malformed/empty JSONL tolerance with no write side effects); 195 tests. 6.02 docs verified. 6.03 structural metrics measured and tabulated; behavioural metrics need a fresh window. 6.04 shipped as `docs/MIGRATION.md`.

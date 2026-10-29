@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -78,10 +78,13 @@ async function rpc(
   return { status: response.status, body: (await response.json()) as Json };
 }
 
-async function withServer(run: (port: number, root: string) => Promise<void>): Promise<void> {
+async function withServer(
+  run: (port: number, root: string) => Promise<void>,
+  commandConfig: Parameters<typeof startServer>[0]["commandConfig"] = {},
+): Promise<void> {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-contract-"));
   const port = await freePort();
-  const server = await startServer({ root, port, token: TOKEN });
+  const server = await startServer({ root, port, token: TOKEN, commandConfig });
   try {
     await run(port, root);
   } finally {
@@ -196,6 +199,71 @@ test("tools/call returns one text payload at both protocol versions", async () =
       if (version === MODERN) assert.equal(body.result.resultType, "complete");
     }
   });
+});
+
+/** Minimal valid arguments for every tool that can be advertised without CodeGraph. */
+const MATRIX_ARGUMENTS: Record<string, Json> = {
+  read_range: { path: "notes.txt", startLine: 1, endLine: 2 },
+  apply_changes: {
+    dryRun: true,
+    changes: [{ kind: "write", path: "matrix-preview.txt", content: "preview\n" }],
+  },
+  find_files: { pattern: "*.txt" },
+  search_code: { query: "needle", maxResults: 5 },
+  find_symbol: { symbol: "needle", maxResults: 5 },
+  find_references: { symbol: "needle", maxResults: 5 },
+  project_context: {},
+  validate: { level: "diagnostics" },
+  file_info: { path: "notes.txt" },
+  run_package_scripts_batch: { scripts: ["check"] },
+  run_command_batch: {
+    commands: [{ command: "node", args: ["-e", "process.stdout.write('ok')"] }],
+  },
+  telemetry_analytics: { mode: "summary", maxBytes: 2048 },
+};
+
+test("every advertised tool answers with a valid result shape at both versions", async () => {
+  await withServer(
+    async (port, root) => {
+      await mkdir(path.join(root, "src"), { recursive: true });
+      await writeFile(path.join(root, "notes.txt"), "needle one\nneedle two\n", "utf8");
+      await writeFile(
+        path.join(root, "package.json"),
+        JSON.stringify({ name: "matrix", scripts: { check: "node -e 0" } }),
+        "utf8",
+      );
+
+      for (const version of VERSIONS) {
+        const listed = await rpc(port, version, "tools/list");
+        const tools = (listed.body.result.tools as Array<{ name: string }>).map(
+          (tool) => tool.name,
+        );
+        assert.ok(tools.length > 0, `${version}: no tools advertised`);
+
+        for (const name of tools) {
+          const args = MATRIX_ARGUMENTS[name];
+          assert.ok(args, `add matrix arguments for the new tool '${name}'`);
+
+          const { status, body } = await rpc(port, version, "tools/call", {
+            name,
+            arguments: args,
+          });
+          assert.equal(status, 200, `${version} ${name}: ${JSON.stringify(body)}`);
+          assert.equal(body.result?.isError, undefined, `${version} ${name} errored`);
+          assert.equal(body.result.resultType, "complete", `${version} ${name}`);
+          assert.equal(body.result.structuredContent, undefined, `${version} ${name}`);
+          const content = body.result.content as Array<{ type: string; text: string }>;
+          assert.equal(content[0]?.type, "text", `${version} ${name}`);
+          assert.ok(String(content[0]?.text).length > 0, `${version} ${name} empty payload`);
+        }
+      }
+    },
+    {
+      packageManager: "npm",
+      scripts: { allowedScripts: ["check"] },
+      commands: ["node"],
+    },
+  );
 });
 
 test("subscriptions/listen streams correctly framed SSE events over HTTP", async () => {
