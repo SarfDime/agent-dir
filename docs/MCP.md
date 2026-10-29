@@ -27,6 +27,12 @@ Both versions are covered by HTTP-level contract tests (`test/protocol-contract.
 
 Standard Streamable HTTP requests do not need implementation-specific `MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` headers. If supplied, these headers are validated against the JSON-RPC request and metadata.
 
+### Browser origins and CORS
+
+A request carrying an `Origin` header is accepted only from the same origin as the request URL, or from an origin listed in the profile's `allowedOrigins` (CLI: `--allow-origin`). Anything else returns `403 Invalid Origin`, and the error names the rejected origin. This is the DNS-rebinding guard: without it, any page a browser user visits could reach a localhost MCP server.
+
+For listed origins the server also sends `Access-Control-Allow-Origin` (plus `Vary: Origin`) and answers the `OPTIONS` preflight before authentication, because browsers never attach credentials to a preflight. The preflight allows `POST` and the headers the transport uses: `authorization`, `content-type`, `accept`, `mcp-protocol-version`, `mcp-method`, `mcp-name`, `mcp-session-id`. Authentication is still required for the actual request, so listing an origin does not grant access by itself.
+
 Supported features include:
 
 - `server/discover`

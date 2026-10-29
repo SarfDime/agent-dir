@@ -176,6 +176,9 @@ export function printHelp(): void {
   writeLine("      --scripts <scripts>    Comma-separated allowed package scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
+  writeLine(
+    "      --allow-origin <origins> Comma-separated browser origins allowed to call /mcp (web agents)",
+  );
   writeLine("      --protect <paths>      Comma-separated extra paths agents may not edit (globs)");
   writeLine(
     "      --unprotect <paths>    Comma-separated paths that stay editable despite defaults",

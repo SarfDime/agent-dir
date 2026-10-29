@@ -24,6 +24,7 @@ export function startServer({
   telemetry = { level: "none" },
   codeGraph,
   analytics = false,
+  allowedOrigins = [],
 }: ServerOptions): Promise<ServerHandle> {
   const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, analytics);
   const httpTelemetry = new TelemetryRecorder({
@@ -32,6 +33,11 @@ export function startServer({
     ...(telemetry.configId ? { configId: telemetry.configId } : {}),
     sessionId: telemetry.sessionId ?? `http-${Date.now()}`,
   });
+  const allowedOriginSet = new Set(
+    allowedOrigins
+      .map((value) => normalizeOrigin(value))
+      .filter((value): value is string => value !== undefined),
+  );
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const startedAt = performance.now();
     const requestController = new AbortController();
@@ -40,11 +46,44 @@ export function startServer({
       if (!res.writableFinished) requestController.abort();
     });
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const requestOrigin = req.headers.origin;
+    const normalizedOrigin =
+      requestOrigin === undefined ? undefined : normalizeOrigin(requestOrigin);
+    const originAllowed = normalizedOrigin !== undefined && allowedOriginSet.has(normalizedOrigin);
+    if (originAllowed && normalizedOrigin) applyCorsHeaders(res, normalizedOrigin);
     let authenticated = false;
     try {
       if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
         res.setHeader("cache-control", "no-store");
         sendText(res, 200, "ok\n");
+        return;
+      }
+      // Browser clients send a preflight without credentials, so this has to be answered before
+      // authentication or the browser never sends the real request.
+      if (url.pathname === "/mcp" && req.method === "OPTIONS") {
+        if (!originAllowed || !normalizedOrigin) {
+          sendText(
+            res,
+            403,
+            "Origin not allowed. Add this site's origin to the profile's allowedOrigins.\n",
+          );
+          logRequest({
+            method: req.method,
+            path: url.pathname,
+            status: 403,
+            detail: "MCP header validation: origin not allowed",
+          });
+          recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 403, false, startedAt);
+          return;
+        }
+        res.setHeader("access-control-allow-methods", "POST, OPTIONS");
+        res.setHeader(
+          "access-control-allow-headers",
+          "authorization, content-type, accept, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id",
+        );
+        res.setHeader("access-control-max-age", "600");
+        res.statusCode = 204;
+        res.end();
         return;
       }
       // Authenticate from headers and URL alone, before buffering any request body.
@@ -100,7 +139,7 @@ export function startServer({
           );
           return;
         }
-        const headerError = validateMcpHeaders(request, messageBody(body));
+        const headerError = validateMcpHeaders(request, messageBody(body), allowedOriginSet);
         if (headerError) {
           const errorDetail = await getResponseErrorDetail(headerError);
           await sendResponse(res, headerError);
@@ -231,6 +270,7 @@ function messageBody(body: Buffer): Record<string, unknown> | null {
 export function validateMcpHeaders(
   request: Request,
   message: Record<string, unknown> | null,
+  allowedOrigins: ReadonlySet<string> = new Set(),
 ): Response | undefined {
   const method = typeof message?.method === "string" ? message.method : undefined;
   const isNotification = method !== undefined && !Object.hasOwn(message ?? {}, "id");
@@ -309,8 +349,13 @@ export function validateMcpHeaders(
         400,
       );
   }
-  if (origin && origin !== new URL(request.url).origin)
-    return jsonRpcErrorForServer(message, -32020, "Invalid Origin.", 403);
+  if (origin && origin !== new URL(request.url).origin && !allowedOrigins.has(origin))
+    return jsonRpcErrorForServer(
+      message,
+      -32020,
+      `Invalid Origin. Add '${origin}' to the profile's allowedOrigins (or pass --allow-origin) to let this browser client call /mcp.`,
+      403,
+    );
   return undefined;
 }
 
@@ -326,6 +371,24 @@ function decodeMcpHeaderValue(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Origins arrive with a trailing slash or different case; compare them normalized. */
+function normalizeOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    return url.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Headers a browser client needs to read a cross-origin response. */
+function applyCorsHeaders(res: ServerResponse, origin: string): void {
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("vary", "origin");
+  res.setHeader("access-control-expose-headers", "mcp-session-id");
 }
 
 function jsonRpcErrorForServer(

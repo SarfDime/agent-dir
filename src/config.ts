@@ -109,6 +109,23 @@ function isAgentConfig(value: unknown): value is AgentConfig {
   return true;
 }
 
+/**
+ * An allowed browser origin: scheme plus host, no path, no wildcard. Accepting `*` or a path here
+ * would quietly turn the origin check into no check at all.
+ */
+export function isHttpOrigin(value: string): boolean {
+  if (/\s/.test(value) || value === "*" || value.includes("*")) return false;
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.origin === value.replace(/\/$/, "")
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isProfile(value: unknown): value is Profile {
   if (!value || typeof value !== "object") return false;
   const profile = value as Record<string, unknown>;
@@ -177,6 +194,13 @@ function isProfile(value: unknown): value is Profile {
     if (
       !Array.isArray(profile.blacklistedCommands) ||
       profile.blacklistedCommands.some((item) => typeof item !== "string")
+    )
+      return false;
+  }
+  if (profile.allowedOrigins !== undefined) {
+    if (
+      !Array.isArray(profile.allowedOrigins) ||
+      profile.allowedOrigins.some((item) => typeof item !== "string" || !isHttpOrigin(item))
     )
       return false;
   }

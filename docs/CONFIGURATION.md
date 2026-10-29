@@ -28,7 +28,7 @@ agent-dir . --random --tunnel wormhole
 
 ## Profiles
 
-Profiles store the project directory, port, tunnel settings, allowed package scripts, allowed executables, blocked command prefixes, and optional MCP tool exclusions.
+Profiles store the project directory, port, tunnel settings, allowed package scripts, allowed executables, blocked command prefixes, browser origins allowed to call `/mcp`, and optional MCP tool exclusions.
 
 ```bash
 agent-dir config add my-project \
@@ -73,6 +73,7 @@ Profile configuration is stored at `~/.config/agent-dir/config.json`, outside th
   "scripts": {
     "allowedScripts": ["typecheck", "lint", "test"]
   },
+  "allowedOrigins": ["https://agent.example.com"],
   "tunnel": "cloudflared",
   "defaultTunnel": "cloudflared",
   "tunnels": {
@@ -86,6 +87,19 @@ Profile configuration is stored at `~/.config/agent-dir/config.json`, outside th
 ```
 
 Use `tools.disabled` to exclude exact MCP tool names and `tools.disabledSets` to exclude groups. Supported groups are `codegraph`, `analytics`, `filesystem`, `search`, and `commands`. Excluded tools are omitted from `tools/list` and rejected if a client attempts to call them. Tool names are the names exposed by MCP (for example, `codegraph_explore` or `read_range`).
+
+### Browser clients and CORS
+
+Non-browser clients (CLI, desktop apps, server-side agents) work without extra configuration. A client running in a web page sends an `Origin` header, and Agent Dir rejects it with `403 Invalid Origin` unless that origin is listed:
+
+```bash
+agent-dir my-project --allow-origin https://agent.example.com
+agent-dir config add my-project --directory ~/src/my-project --allow-origin https://agent.example.com
+```
+
+The value is a list of origins (`scheme://host[:port]`, no path, no wildcard), stored as `allowedOrigins` in the profile. Same-origin requests — a page served from the tunnel host itself — are always accepted. Listed origins also receive the CORS headers a browser needs, including the `OPTIONS` preflight answered before authentication, because a browser never sends credentials on a preflight.
+
+Only list origins you control: any page on a listed origin can call the endpoint if it also holds the Bearer token. Adding an origin does not bypass authentication, and removing the token from a URL (`--token` in shell history, or a token in a query string) matters more once a browser is involved. The 403 names the rejected origin, so a mismatch is quick to diagnose.
 
 Profiles written before Serena and ast-grep were removed may still contain `serena` or `ast_grep` in `disabledSets`, or `serena_*` and `ast_grep_search` in `disabled`. Those entries are accepted and stripped at load time with a warning; both integrations no longer exist.
 

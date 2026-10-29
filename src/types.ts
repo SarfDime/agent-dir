@@ -42,6 +42,11 @@ export interface Profile {
   scripts?: PackageScriptsConfig;
   commands?: string[];
   blacklistedCommands?: string[];
+  /**
+   * Browser origins allowed to call `/mcp`, for web-based agents. Same-origin requests are always
+   * accepted; anything else needs to be listed here. Holds origins only (`https://app.example`).
+   */
+  allowedOrigins?: string[];
   commandPolicy?: CommandPolicyConfig;
   protectedPaths?: PathProtectionConfig;
   tools?: ToolSelectionConfig;
@@ -71,6 +76,8 @@ export interface ServerOptions {
   telemetry?: TelemetryConfig;
   codeGraph?: import("./codegraph.js").CodeGraphIntegration;
   analytics?: boolean;
+  /** Browser origins allowed to call `/mcp` in addition to same-origin requests. */
+  allowedOrigins?: string[];
 }
 
 export interface RequestLog {

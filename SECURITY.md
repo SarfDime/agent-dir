@@ -35,6 +35,7 @@ agent-dir is designed to expose a trusted local project to an authenticated AI a
 - external commands are launched without a shell;
 - Git commands are available only when the `git` executable is allowlisted, with configured blacklist prefixes taking precedence;
 - unauthenticated requests are rejected before any request body is read;
+- browser requests are accepted only from the same origin or from origins a profile explicitly lists (`allowedOrigins` / `--allow-origin`), which limits DNS-rebinding style attacks from arbitrary pages;
 - request diagnostics avoid logging arbitrary request parameter values.
 
 When contributing, preserve these boundaries. A compatibility fix must not become an authentication bypass, path traversal, command-execution expansion, or sensitive-data logging change.

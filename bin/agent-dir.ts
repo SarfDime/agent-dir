@@ -68,6 +68,7 @@ const { values, positionals } = parseArgs({
     scripts: { type: "string" },
     command: { type: "string" },
     blacklist: { type: "string" },
+    "allow-origin": { type: "string" },
     protect: { type: "string" },
     unprotect: { type: "string" },
     token: { type: "string" },
@@ -415,6 +416,8 @@ if (command === "config") {
     if (commands !== undefined) profile.commands = commands;
     const blacklist = parseList(values.blacklist);
     if (blacklist !== undefined) profile.blacklistedCommands = blacklist;
+    const allowOrigin = parseList(values["allow-origin"]);
+    if (allowOrigin !== undefined) profile.allowedOrigins = allowOrigin;
     const protect = parseList(values.protect);
     const unprotect = parseList(values.unprotect);
     if (protect !== undefined || unprotect !== undefined)
@@ -575,6 +578,7 @@ const server = await startServer({
   commandConfig,
   codeGraph,
   analytics: values.analytics === true,
+  allowedOrigins: parseList(values["allow-origin"]) ?? profile?.allowedOrigins ?? [],
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
     ...(telemetryConfigId ? { configId: telemetryConfigId } : {}),
