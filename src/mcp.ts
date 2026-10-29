@@ -232,10 +232,26 @@ const baseTools: ToolDefinition[] = [
         description:
           "text: grep-style lines. json: {items, returned, truncated, truncationReason}.",
       },
+      queries: {
+        type: "array",
+        items: stringSchema,
+        maxItems: 5,
+        description:
+          "Several patterns in one call instead of a single query; each result group is labelled with its pattern. Divides maxBytes between the groups.",
+      },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    ["query"],
+    [],
+    {
+      anyOf: [
+        { required: ["query"], properties: { query: stringSchema } },
+        {
+          required: ["queries"],
+          properties: { queries: { type: "array", items: stringSchema, maxItems: 5 } },
+        },
+      ],
+    },
   ),
   tool(
     "find_symbol",
@@ -339,6 +355,7 @@ function tool(
   description: string,
   properties: Record<string, unknown>,
   required: string[] = [],
+  schemaExtras: Record<string, unknown> = {},
 ): ToolDefinition {
   return {
     name,
@@ -347,6 +364,7 @@ function tool(
       type: "object",
       properties,
       ...(required.length ? { required } : {}),
+      ...schemaExtras,
       additionalProperties: false,
     },
   };
@@ -1244,6 +1262,17 @@ export function validateToolArguments(
   path = "",
 ): string | undefined {
   const label = path || "arguments";
+  // A misspelled argument is reported against the parent schema before any `anyOf` branch runs,
+  // otherwise an alternative shape's `required` check masks the typo with "is required".
+  if (isRecord(value) && schema.additionalProperties === false && isRecord(schema.properties)) {
+    const names = Object.keys(schema.properties);
+    for (const key of Object.keys(value)) {
+      if (!isRecord(schema.properties[key]))
+        return names.length
+          ? `Unknown argument '${key}'. Valid arguments: ${names.join(", ")}.`
+          : `Unknown argument '${key}'. This tool takes no arguments.`;
+    }
+  }
   if (Array.isArray(schema.anyOf)) {
     const errors = schema.anyOf.map((branch) =>
       isRecord(branch) ? validateToolArguments(branch, value, path) : undefined,
@@ -1811,19 +1840,42 @@ async function callTool(
     case "search_code": {
       const paths = optionalStringArray(args.paths, "paths", 20);
       const globs = optionalStringArray(args.globs, "globs", 20);
-      const envelope = await searchCode(root, String(args.query), {
+      const queries = Array.isArray(args.queries)
+        ? optionalStringArray(args.queries, "queries", 5)
+        : undefined;
+      const maxBytes = outputBytesArg(args.maxBytes);
+      const options = {
         regex: args.regex === true,
         caseSensitive: args.caseSensitive === true,
         includeGenerated: args.includeGenerated === true,
         multiline: args.multiline === true,
         context: intArg(args.context, 0, 0, 5, "context"),
         maxResults: numberArg(args.maxResults, 200, 1000),
-        maxBytes: outputBytesArg(args.maxBytes),
         ...(paths ? { paths } : {}),
         ...(globs ? { globs } : {}),
-      });
+      };
+      const asText = args.format !== "json";
+      if (queries && queries.length > 0) {
+        // One call for several patterns keeps the round trips down; each group gets a share.
+        const share = Math.max(1024, Math.floor(maxBytes / queries.length));
+        const envelopes = await Promise.all(
+          queries.map((query) => searchCode(root, query, { ...options, maxBytes: share })),
+        );
+        payload = {
+          queries,
+          returned: envelopes.reduce((total, envelope) => total + envelope.returned, 0),
+          groups: envelopes,
+          truncated: envelopes.some((envelope) => envelope.truncated),
+        };
+        if (asText)
+          contentText = envelopes
+            .map((envelope, index) => `## ${queries[index]}\n${formatSearchEnvelope(envelope)}`)
+            .join("\n\n");
+        break;
+      }
+      const envelope = await searchCode(root, String(args.query), { ...options, maxBytes });
       payload = { ...envelope };
-      if (args.format !== "json") contentText = formatSearchEnvelope(envelope);
+      if (asText) contentText = formatSearchEnvelope(envelope);
       break;
     }
     case "find_symbol":
@@ -2425,6 +2477,7 @@ function argumentShape(argumentsValue: unknown): {
       : {}),
     ...(argumentsValue.multiline === true ? { multiline: true } : {}),
     ...(nonEmpty("ranges") ? { ranges: true } : {}),
+    ...(nonEmpty("queries") ? { queries: true } : {}),
     ...(argumentsValue.dryRun === true ? { dryRun: true } : {}),
     ...(present("okExitCodes") ? { okExitCodes: true } : {}),
     ...(present("maxResults") || present("limit") ? { limit: true } : {}),

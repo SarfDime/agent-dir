@@ -30,7 +30,7 @@ hand-bumped.
 | --- | --- | --- | --- | --- |
 | 4c-1 | P1 | M | Ignored trees are invisible to `search_code` and `find_files`: `node_modules`, `dist`, `build`, `coverage`, `target` and everything `.gitignore`d. `read_range` can still open a known path, so only discovery is missing. | An `includeIgnored` option on both tools, or a documented decision that vendored code is out of scope. |
 | 4c-2 | P2 | S | `git grep` and `git log -S` bypass the removal of shell search commands while `git` stays allowed. | `commandPolicy.rules.git` with `denySubcommands: ["grep"]` and `denyOptions: ["-S", "-G"]`, plus a test. |
-| 4c-3 | P2 | S | One query per `search_code` call. Several unrelated patterns need several round trips; agents currently batch them into `run_command_batch`. | A `queries: string[]` argument that returns labelled result groups. |
+| 4c-3 | P2 | S | One query per `search_code` call was the remaining gap; several unrelated patterns needed several round trips or a `run_command_batch` of shell greps. | Closed: `queries: string[]` (up to 5) returns one labelled group per pattern and splits `maxBytes` between them. |
 | 4c-4 | P3 | S | `docs/CONFIGURATION.md` still shows `--command grep,find,rg,git` in its example, which contradicts the recommendation to drop them. | Update the example once the §4c decision is applied to a real profile. |
 
 ## Decisions still standing

@@ -114,7 +114,7 @@ the server name and version during `initialize`.
 | E-04 | Note repeated identical calls in the result (`same arguments as an earlier call in this session`) so the client can skip re-reading. | F-07 | Low risk, targets 4% of calls | M | Open |
 | E-05 | Suggest the closest existing path on `apply_changes` `not_found`. | F-05 | Recovers 39 observed failures in one turn instead of two | S | Done |
 | E-06 | `validate` default: severity and per-file summary plus the first few errors per file. | F-06 | Removes the 47% truncated case that currently forces a second run | M | Done: `diagnostics.summary` and `byFile` always present, flat `issues` only when it fits; 30 issues in 30 files now return 1,807 B with the worst files named |
-| E-07 | `search_code` accepts `queries: string[]` and returns labelled groups. | §4c-3 | Fewer round trips for multi-pattern work, which today falls back to `run_command_batch` | S | Open |
+| E-07 | `search_code` accepts `queries: string[]` and returns labelled groups. | §4c-3 | Fewer round trips for multi-pattern work, which today falls back to `run_command_batch` | S | Done: two patterns in one call measure 1,024 B against 1,157 B plus a second round trip |
 | E-08 | Drop `serverInfo` from per-result `_meta`. | F-08 | −84 B per call, about 200 KB on this window | S | Open |
 
 **Do not do:** shrink `tools/list` further (F-01), re-add output schemas or titles, or remove

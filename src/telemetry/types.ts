@@ -38,6 +38,7 @@ export const ARG_SHAPE_KEYS = [
   "context",
   "multiline",
   "ranges",
+  "queries",
   "dryRun",
   "okExitCodes",
   "limit",
