@@ -48,7 +48,7 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 | `find_files`                                     | `{ items, truncated }`                                                                                                |
 | `apply_changes`                                  | `{ items, dryRun }` (per-file status only, never contents or diffs)                                                   |
 | `read_range`                                     | Plain text with a header plus `eof`, `totalLines`, `nextStartLine`; 16 KB default; `ranges: [...]` for several ranges |
-| `validate`                                       | `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }`                                            |
+| `validate`                                       | `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }`; `diagnostics` now has `summary` and `byFile`, and `issues` only when it fits |
 | `run_command_batch`, `run_package_scripts_batch` | `{ ok, onError, summary, items, truncated }` with a per-item `status`                                                 |
 
 `search_code` also gained `multiline` (patterns can span lines; identical on the ripgrep and built-in

@@ -90,6 +90,7 @@ const TOOL_CALL_RULES: FieldRules<TelemetryToolEvent> = {
   integrationStatus: (value) => sanitizeIdentifier(value, SAFE_VARIANT),
   argShape: (value) => sanitizeArgShape(value),
   outcome: (value) => sanitizeOutcome(value),
+  readLines: (value) => boundedInteger(value),
   errorCategory: (value) => sanitizeErrorCategory(value),
 };
 

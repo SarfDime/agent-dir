@@ -108,10 +108,10 @@ the server name and version during `initialize`.
 | --- | --- | --- | --- | --- | --- |
 | E-01 | Explain empty and truncated results: files scanned, match mode, ignore rules applied, and one next step. | F-04 | Removes a class of wasted retries; 63 empty searches alone | S | Done |
 | E-02 | Render `search_code` results as `path:line:col text` lines by default, JSON on request. | F-03 | −43% of search bytes, about 0.5 MB and 130k tokens on this window | S | Done: 2,028 B to 964 B and 8,643 B to 3,962 B on two measured queries (−52%, −54%) |
-| E-03 | Record the read span (lines requested) as a bucketed telemetry field, then decide whether reads are too big or too many. | F-02 | Turns the largest cost into a measured question | S | Open |
+| E-03 | Record the read span (lines requested) as a bucketed telemetry field, then decide whether reads are too big or too many. | F-02 | Turns the largest cost into a measured question | S | Done: `readLines` per call, `efficiency.readSpans` buckets (1-40, 41-200, 201-800, 801+) |
 | E-04 | Note repeated identical calls in the result (`same arguments as an earlier call in this session`) so the client can skip re-reading. | F-07 | Low risk, targets 9% of calls | M | Open |
 | E-05 | Suggest the closest existing path on `apply_changes` `not_found`. | F-05 | Recovers 39 observed failures in one turn instead of two | S | Done |
-| E-06 | `validate` default: severity and per-file summary plus the first few errors per file. | F-06 | Removes the 47% truncated case that currently forces a second run | M | Open |
+| E-06 | `validate` default: severity and per-file summary plus the first few errors per file. | F-06 | Removes the 47% truncated case that currently forces a second run | M | Done: `diagnostics.summary` and `byFile` always present, flat `issues` only when it fits; 30 issues in 30 files now return 1,807 B with the worst files named |
 | E-07 | `search_code` accepts `queries: string[]` and returns labelled groups. | §4c-3 | Fewer round trips for multi-pattern work, which today falls back to `run_command_batch` | S | Open |
 | E-08 | Drop `serverInfo` from per-result `_meta`. | F-08 | −84 B per call, about 200 KB on this window | S | Open |
 

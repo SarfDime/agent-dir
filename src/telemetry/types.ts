@@ -122,6 +122,8 @@ export interface TelemetryToolEvent {
   argShape?: ArgShape;
   /** Normalized result classification: ok, empty, truncated or error. */
   outcome?: ToolOutcome;
+  /** `read_range` only: total lines requested, so large reads are visible in aggregates. */
+  readLines?: number;
   errorCategory?: TelemetryErrorCategory;
 }
 

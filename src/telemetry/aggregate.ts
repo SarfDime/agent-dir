@@ -142,6 +142,11 @@ export interface TelemetryEfficiency {
   duplicateInputCalls: number;
   /** read_range calls on a file already read earlier in the same session. */
   repeatedFileReadCalls: number;
+  /**
+   * Requested read sizes, bucketed. Answers whether reads are too big or merely too frequent, which
+   * output bytes alone cannot: the byte total is dominated by the largest reads either way.
+   */
+  readSpans: { calls: number; medianLines: number; buckets: Record<string, number> };
   searchThenReadTransitions: number;
   /** Calls grouped into episodes separated by an idle gap; sessions are process lifetimes. */
   episodes: { count: number; callsMedian: number; callsMax: number; idleGapMinutes: number };
@@ -189,6 +194,14 @@ function median(values: number[]): number {
   return sorted[Math.floor(sorted.length / 2)] ?? 0;
 }
 
+/** Buckets requested read sizes; the boundaries separate a focused read from a file dump. */
+function readSpanBucket(lines: number): string {
+  if (lines <= 40) return "1-40";
+  if (lines <= 200) return "41-200";
+  if (lines <= 800) return "201-800";
+  return "801+";
+}
+
 /** Efficiency metrics derived only from recorded events; never invents unmeasured values. */
 function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
   const calls = group
@@ -217,6 +230,8 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
   let duplicateInputCalls = 0;
   let repeatedFileReadCalls = 0;
   let searchThenReadTransitions = 0;
+  const readLines: number[] = [];
+  const readBuckets: Record<string, number> = {};
 
   for (const { envelope, event } of calls) {
     const tokens = event.estimatedOutputTokens ?? 0;
@@ -243,6 +258,11 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
       const key = `${sessionKey}|${event.files[0].pathHash}`;
       if (readPaths.has(key)) repeatedFileReadCalls += 1;
       readPaths.add(key);
+    }
+    if (event.tool === "read_range" && event.readLines !== undefined) {
+      readLines.push(event.readLines);
+      const bucket = readSpanBucket(event.readLines);
+      readBuckets[bucket] = (readBuckets[bucket] ?? 0) + 1;
     }
 
     const time = Date.parse(envelope.timestamp);
@@ -288,6 +308,11 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
     duplicateOutputBytes,
     duplicateInputCalls,
     repeatedFileReadCalls,
+    readSpans: {
+      calls: readLines.length,
+      medianLines: median(readLines),
+      buckets: readBuckets,
+    },
     searchThenReadTransitions,
     episodes: {
       count: episodeCalls.length,

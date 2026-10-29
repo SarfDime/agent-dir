@@ -814,6 +814,7 @@ export function createMcpHandler(
                 inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...(count === undefined ? {} : { resultCount: count }),
                 ...argumentShape(argumentsValue),
+                ...(toolName === "read_range" ? { readLines: readSpan(argumentsValue) } : {}),
                 ...(toolName === "codegraph_explore"
                   ? {
                       integration: "codegraph",
@@ -1909,6 +1910,33 @@ async function callTool(
       const diagnosticsBudget = scripts.length > 0 ? Math.floor(maxBytes * 0.25) : maxBytes - 400;
       const boundedDiagnostics = boundedItems(diagnosticItems, Math.max(256, diagnosticsBudget));
       const diagnosticsOk = !diagnosticItems.some((item) => item.severity === "error");
+      // A flat list of issues is the first thing a byte budget cuts, and a cut list tells the
+      // caller nothing about where the problems are. The per-file summary survives any budget.
+      const summary = { error: 0, warning: 0, info: 0, files: 0 };
+      const perFile = new Map<
+        string,
+        { path: string; error: number; warning: number; info: number; first: string }
+      >();
+      for (const item of diagnosticItems) {
+        summary[item.severity] += 1;
+        const filePath = item.path ?? "(project)";
+        const entry = perFile.get(filePath) ?? {
+          path: filePath,
+          error: 0,
+          warning: 0,
+          info: 0,
+          first: "",
+        };
+        entry[item.severity] += 1;
+        if (!entry.first)
+          entry.first =
+            `${item.line ? `line ${item.line}: ` : ""}${item.code}: ${item.message}`.slice(0, 160);
+        perFile.set(filePath, entry);
+      }
+      summary.files = perFile.size;
+      const byFile = [...perFile.values()]
+        .sort((a, b) => b.error - a.error || b.warning - a.warning || a.path.localeCompare(b.path))
+        .slice(0, 10);
       const batch =
         scripts.length > 0
           ? await runBatch(
@@ -1934,8 +1962,16 @@ async function callTool(
         diagnostics: {
           ok: diagnosticsOk,
           count: diagnosticItems.length,
-          issues: boundedDiagnostics.items,
-          truncated: boundedDiagnostics.truncated,
+          summary,
+          byFile,
+          // The flat list is kept only when it fits whole; otherwise the summary is the result.
+          ...(boundedDiagnostics.truncated ? {} : { issues: boundedDiagnostics.items }),
+          truncated: boundedDiagnostics.truncated || byFile.length < perFile.size,
+          ...(boundedDiagnostics.truncated
+            ? {
+                note: `Issue list omitted because it exceeded the output budget; ${summary.error} errors and ${summary.warning} warnings in ${summary.files} files, top files listed in byFile. Raise maxBytes to see every issue.`,
+              }
+            : {}),
         },
         ...(batch ? { scripts: batch } : {}),
         scriptsRequested: scripts,
@@ -2394,6 +2430,27 @@ function argumentShape(argumentsValue: unknown): {
     ...(present("maxResults") || present("limit") ? { limit: true } : {}),
   };
   return Object.keys(shape).length ? { argShape: shape } : {};
+}
+
+/**
+ * Total lines a `read_range` call asked for, summed over ranges. Line counts carry no content, so
+ * they are safe to record and they are the only way to tell whether reads are too big or merely
+ * too frequent.
+ */
+function readSpan(argumentsValue: unknown): number {
+  if (!isRecord(argumentsValue)) return 0;
+  const span = (start: unknown, end: unknown): number => {
+    const from = Number(start);
+    const to = Number(end);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return 0;
+    return Math.max(0, Math.min(1_000_000, Math.floor(to) - Math.floor(from) + 1));
+  };
+  if (Array.isArray(argumentsValue.ranges))
+    return argumentsValue.ranges.reduce<number>(
+      (total, range) => total + (isRecord(range) ? span(range.startLine, range.endLine) : 0),
+      0,
+    );
+  return span(argumentsValue.startLine, argumentsValue.endLine);
 }
 
 function toolOutcome(
