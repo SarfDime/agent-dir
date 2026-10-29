@@ -537,3 +537,68 @@ test("client identity from initialize is attached to later events", async () => 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("two clients in one process keep their own identity", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mixed-"));
+  try {
+    const configId = `test-mcp-mixed-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "basic", configId });
+    const send = (id: number, method: string, params: Record<string, unknown>, sessionId: string) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2025-11-25",
+            "mcp-session-id": sessionId,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        }),
+      );
+
+    await send(
+      1,
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "first-client", version: "1.0.0" },
+      },
+      "session-a",
+    );
+    await send(
+      2,
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "second-client", version: "2.0.0" },
+      },
+      "session-b",
+    );
+    // Neither follow-up request carries clientInfo: attribution must come from its own session.
+    await send(
+      3,
+      "tools/call",
+      { name: "find_files", arguments: { pattern: "*.md" } },
+      "session-a",
+    );
+    await send(
+      4,
+      "tools/call",
+      { name: "find_files", arguments: { pattern: "*.md" } },
+      "session-b",
+    );
+
+    const toolClients = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .flatMap((envelope) =>
+        envelope.event.event === "tool_call" ? [envelope.runtime?.mcpClientName] : [],
+      );
+    assert.deepEqual(toolClients, ["first-client", "second-client"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

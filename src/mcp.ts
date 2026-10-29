@@ -390,6 +390,7 @@ export function createMcpHandler(
   analyticsEnabled = false,
 ): McpHandler {
   const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
+  const clientRegistry = createClientRegistry();
   const telemetryRecorder = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -565,10 +566,15 @@ export function createMcpHandler(
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
     }
     const params = message.params ?? {};
+    const clientContext = {
+      sessionKey: request.headers.get("mcp-session-id")?.trim() || UNIDENTIFIED_SESSION,
+      registry: clientRegistry,
+    };
     runtime = telemetryRuntime(
       params,
       telemetry.level,
       request.headers.get("mcp-protocol-version"),
+      clientContext,
     );
     const meta = isRecord(params._meta) ? params._meta : undefined;
     if (message.method === "initialize") {
@@ -741,6 +747,7 @@ export function createMcpHandler(
                 params,
                 telemetry.level,
                 request.headers.get("mcp-protocol-version"),
+                clientContext,
               ),
               telemetryProject,
             );
@@ -846,6 +853,7 @@ export function createMcpHandler(
               params,
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
+              clientContext,
             );
             const metrics = toolTelemetryMetrics(toolName, output.payload, seenOutputFingerprints);
             const outcome = toolOutcome(count, metrics.truncated === true);
@@ -907,6 +915,7 @@ export function createMcpHandler(
               params,
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
+              clientContext,
             );
             const errorCategory = classifyTelemetryError(error);
             const errorReason = classifyTelemetryReason(error);
@@ -2428,12 +2437,14 @@ function toolResult(payload: Record<string, unknown>, text?: string): Record<str
 type TelemetryRuntime = import("./telemetry/types.js").TelemetryRuntimeContext;
 let cachedStaticRuntime: TelemetryRuntime | undefined;
 
-/**
- * Last client identity reported to this process. Clients that only send it on `initialize` would
- * otherwise have every other event attributed to nobody, which is what made filtering by client
- * expensive in practice.
- */
-let rememberedClient: { name?: string; version?: string } | undefined;
+/** Identity a client reports about itself; carried across its own requests, never shared. */
+interface ClientIdentity {
+  name?: string;
+  version?: string;
+}
+
+/** Key used when a request carries no `Mcp-Session-Id` header. */
+const UNIDENTIFIED_SESSION = "unidentified";
 
 /** Fields that never change during the process lifetime are collected once. */
 function staticTelemetryRuntime(): TelemetryRuntime {
@@ -2458,10 +2469,53 @@ function staticTelemetryRuntime(): TelemetryRuntime {
   return cachedStaticRuntime;
 }
 
+/**
+ * Client identities seen by one handler. Clients that send a `Mcp-Session-Id` are tracked
+ * separately; a client that never sends one (protocol 2024-11-05) is tracked once, because a
+ * request without an identity cannot be attributed to a session at all. The identity is only used
+ * when the request itself carries no `clientInfo`, so a client that identifies every request is
+ * always attributed to itself.
+ */
+interface ClientRegistry {
+  bySession: Map<string, ClientIdentity>;
+  withoutSession?: ClientIdentity;
+}
+
+const MAX_TRACKED_CLIENT_SESSIONS = 32;
+
+function createClientRegistry(): ClientRegistry {
+  return { bySession: new Map() };
+}
+
+function rememberClient(
+  registry: ClientRegistry,
+  sessionKey: string,
+  identity: ClientIdentity,
+): void {
+  if (sessionKey === UNIDENTIFIED_SESSION) {
+    registry.withoutSession = identity;
+    return;
+  }
+  registry.bySession.delete(sessionKey);
+  registry.bySession.set(sessionKey, identity);
+  while (registry.bySession.size > MAX_TRACKED_CLIENT_SESSIONS) {
+    const oldest = registry.bySession.keys().next().value;
+    if (oldest === undefined) break;
+    registry.bySession.delete(oldest);
+  }
+}
+
+function lookupClient(registry: ClientRegistry, sessionKey: string): ClientIdentity | undefined {
+  return sessionKey === UNIDENTIFIED_SESSION
+    ? registry.withoutSession
+    : registry.bySession.get(sessionKey);
+}
+
 function telemetryRuntime(
   params: Record<string, unknown>,
   level: TelemetryLevel,
   headerProtocolVersion?: string | null,
+  clientContext?: { sessionKey: string; registry: ClientRegistry },
 ): TelemetryRuntime {
   const meta = isRecord(params._meta) ? params._meta : undefined;
   const metaClient = meta?.["io.modelcontextprotocol/clientInfo"];
@@ -2470,14 +2524,22 @@ function telemetryRuntime(
     : isRecord(metaClient)
       ? metaClient
       : undefined;
-  // Older clients (for example protocol 2024-11-05) send clientInfo only on `initialize`, so the
-  // identity is remembered and attached to later events instead of being lost.
-  if (typeof reportedClient?.name === "string" || typeof reportedClient?.version === "string")
-    rememberedClient = {
-      ...(typeof reportedClient.name === "string" ? { name: reportedClient.name } : {}),
-      ...(typeof reportedClient.version === "string" ? { version: reportedClient.version } : {}),
-    };
-  const clientInfo = reportedClient ?? rememberedClient;
+  const reportedIdentity: ClientIdentity = {
+    ...(typeof reportedClient?.name === "string" ? { name: reportedClient.name } : {}),
+    ...(typeof reportedClient?.version === "string" ? { version: reportedClient.version } : {}),
+  };
+  if (
+    clientContext &&
+    (reportedIdentity.name !== undefined || reportedIdentity.version !== undefined)
+  )
+    rememberClient(clientContext.registry, clientContext.sessionKey, reportedIdentity);
+  // Prefer what this request said; otherwise use what the same session said earlier.
+  const clientInfo =
+    reportedIdentity.name !== undefined || reportedIdentity.version !== undefined
+      ? reportedIdentity
+      : clientContext
+        ? lookupClient(clientContext.registry, clientContext.sessionKey)
+        : undefined;
   const metaVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
   const protocolVersion =
     typeof params.protocolVersion === "string"
