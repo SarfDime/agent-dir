@@ -43,7 +43,7 @@ Three further fields describe *how* a tool was called, never what was passed:
 | `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `okExitCodes`, `limit`). Values are never recorded. |
 | `readLines` | `read_range` only: total lines requested, summed over `ranges`. A count, never content. `mode=summary` buckets it under `efficiency.readSpans`, which is how a large-byte read total is attributed to big reads or to many small ones. |
 | `errorReason` | Why a call failed, from a closed list: `unknown_argument`, `type_mismatch`, `missing_required`, `enum_mismatch`, `length_or_range`, `patch_text_not_found`, `patch_ambiguous`, `path_not_found`, `other`. It refines `errorCategory` (which stays the coarse bucket) without ever carrying a message, an argument value, a path or patch text. A value that is not on the list is dropped rather than coerced. |
-| `argumentKeys` | Key names from a rejected call, so a retry of the same bad shape is visible. Keys the tool does not advertise are recorded as `<unknown>`, and anything that is not identifier-shaped is `<unknown>` too. Values are never recorded. |
+| `argumentKeys` | Key names from a rejected call, recorded as sent, so an invented key such as `_raw` or `base64Args` is visible and a retry of the same bad shape is countable. A key that is not identifier-shaped or is longer than 64 characters is recorded as `<unknown>`. Values are never recorded. |
 
 `argShape` is what makes guidance experiments measurable: it shows whether agents actually use `paths`/`globs` to scope a search, or `context` instead of a follow-up read.
 

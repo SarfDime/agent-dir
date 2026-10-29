@@ -489,8 +489,9 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
     assert.deepEqual(
       rejections.map((event) => (event.event === "tool_call" ? event.argumentKeys : undefined)),
       [
-        // An invented key is recorded as <unknown>, never verbatim.
-        ["<unknown>"],
+        // An invented key is recorded by name: it is the diagnostic signal, and the sanitizer
+        // already drops anything that is not identifier-shaped.
+        ["base64Args"],
         ["changes"],
         undefined,
         ["level"],

@@ -719,15 +719,13 @@ export function createMcpHandler(
             tool: string,
             category: TelemetryErrorCategory,
             rejected?: unknown,
-            details: { reason?: TelemetryErrorReason; knownKeys?: string[] } = {},
+            details: { reason?: TelemetryErrorReason } = {},
           ): void => {
             const serialized = JSON.stringify(rejected ?? {});
-            const knownKeys = details.knownKeys;
-            const argumentKeys = isRecord(rejected)
-              ? Object.keys(rejected).map((key) =>
-                  knownKeys && !knownKeys.includes(key) ? "<unknown>" : key,
-                )
-              : undefined;
+            // Key names are recorded as sent: a client-invented `_raw` or `base64Args` is the whole
+            // diagnostic signal. The privacy sanitizer still drops anything that is not
+            // identifier-shaped, so this cannot persist arbitrary text.
+            const argumentKeys = isRecord(rejected) ? Object.keys(rejected) : undefined;
             telemetryRecorder.record(
               {
                 event: "tool_call",
@@ -791,7 +789,6 @@ export function createMcpHandler(
             telemetryRequestErrorReason = "other";
             recordRejectedToolCall(toolName, "invalid_input", argumentsValue, {
               reason: "other",
-              knownKeys: knownArgumentKeys(toolDefinition.inputSchema),
             });
             return jsonRpcError(message.id ?? null, -32020, headerError, 400);
           }
@@ -808,7 +805,6 @@ export function createMcpHandler(
             telemetryRequestErrorReason = argumentError.reason;
             recordRejectedToolCall(toolName, "invalid_input", argumentsValue, {
               reason: argumentError.reason,
-              knownKeys: knownArgumentKeys(toolDefinition.inputSchema),
             });
             mcpSuccess = true;
             return trackedJson({
@@ -1305,11 +1301,6 @@ export interface ToolArgumentProblem {
 
 /** Keys shaped like a transport encoding wrapper, which Agent Dir does not accept anywhere. */
 const ENCODING_ARGUMENT = /base64|b64|encod/i;
-
-/** Top-level argument names a tool advertises, used to sanitize recorded argument key names. */
-function knownArgumentKeys(schema: ArgumentSchema): string[] {
-  return isRecord(schema.properties) ? Object.keys(schema.properties) : [];
-}
 
 /** True when an event came from the named client, as `name` or `name@version`. */
 function matchesClient(event: TelemetryEnvelope, filter: string): boolean {
