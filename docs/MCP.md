@@ -162,3 +162,5 @@ skills/
 ```
 
 Skills are exposed through `skills/list`, `skills/get`, `resources/list`, and `resources/read`. Skill manifests are bounded to 512 resources and 16 MiB. Binary supporting files are returned as MCP blobs; `resources/directory/read` lists direct children of a skill resource directory.
+
+This repository ships two skills worth copying into a project you expose: `skills/agent-dir-tools/SKILL.md` is written for the agent that *uses* the server (tool choice, exact argument shapes, how to fix a rejected call in the same turn, where the token cost is) and `skills/agent-dir-maintainer/SKILL.md` is for changing Agent Dir itself. A skill is discovered from the exposed project, not from the package, so copy it to `skills/agent-dir-tools/SKILL.md` in that project (or to your client's own skills directory) to have it offered automatically.
