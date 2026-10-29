@@ -241,6 +241,57 @@ Where the tables above were widened by a Markdown formatter, this list is author
 
 Fix found while closing 2.07: `toolCount` and `toolSetHash` were added to the `tools/list` event but were being dropped by the telemetry privacy allowlist, so they never reached disk. Both are now sanitized and recorded, together with `guidanceVariant`.
 
+## 4c. Shell search commands vs the built-in search tools (2026-10-29)
+
+Question: can `grep`, `find`, `rg`, `cat` and similar be removed from profile allowlists so agents use `search_code`, `find_files` and `read_range` instead, and would that cost the agent more or less?
+
+Short answer: safe for the common cases, but not a cost win and not complete. Removing them buys enforcement and consistency, not tokens.
+
+### What is already in place
+
+| Base | Where |
+| --- | --- |
+| Denials name the replacement | `BUILT_IN_ALTERNATIVES` in `src/tools/commands.ts` maps `grep`/`egrep`/`fgrep`/`rg`/`ag`/`ack` to `search_code`, `cat`/`head`/`tail`/`less`/`more` to `read_range`, `find`/`fd` to `find_files`, `ls` to `find_files or project_context` |
+| Profile-time recommendation | `generalSearchWarning()` in `src/tools/policy.ts`, surfaced by the setup wizard |
+| Client guidance | `initialize` and `server/discover` instructions already say to prefer dedicated tools over `run_command_batch` |
+| Query coverage | `search_code`: literal or regex, case sensitivity, `paths`, `globs` with `!` exclusions, `context` 0 to 5, `multiline`, `maxResults`, `maxBytes`, `includeGenerated`, identical ripgrep and built-in backends |
+| Discovery and reads | `find_files`, `read_range` (ranges, `nextStartLine`), `find_symbol`, `find_references` |
+| Path safety | `safePath` confines every read to the project root, so the "reads outside the project" risk grep adds does not exist in the tools |
+
+Denials are rare, so the redirect is cheap: 5 of 118 command calls (4.2%) were policy denials in the baseline window, and each now returns the name of the tool to use instead.
+
+### Gaps that are not covered
+
+1. **Ignored and generated trees are invisible to discovery.** `listProjectFiles` hard-excludes `node_modules`, `dist`, `build`, `coverage`, `target`, `.next`, `.codegraph`, `vendor` variants and everything matched by `.gitignore`. `includeGenerated` only re-adds lockfiles and minified files, so it cannot reach those directories. `read_range` can still read a gitignored file by exact path; only *finding* it is impossible. Any task of the form "where is this defined in a vendored dependency" needs the shell.
+2. **`git grep` is a one-word bypass.** `git` normally stays allowed and no `commandPolicy.rules.git` exists by default, so `git grep`, `git log -S` and `git show | ...` still search. Removing `grep` is guidance, not enforcement, unless `git` gains `denySubcommands: ["grep"]` and `denyOptions: ["-S", "-G"]`.
+3. **One query per call.** `search_code` takes a single `query`. Several unrelated patterns in one shot currently fit in one `run_command_batch`; afterwards they need either several round trips or one regex alternation, which conflates the result sets.
+4. **Documentation still recommends them.** The `docs/CONFIGURATION.md` example is `--command grep,find,rg,git`, which contradicts the recommendation.
+
+Minor: no directory listing (`find_files` returns files only), files over 1 MB, binary and non-UTF8 files are outside `search_code`, and the default flips from case-sensitive (grep) to case-insensitive (`search_code`), so result sets get larger rather than smaller.
+
+### Measured cost
+
+From the local telemetry store (8,975 events, 4 profiles, diagnostic level). Bytes are measured; tokens are the 4-bytes-per-token estimate used by `estimateTokens`, because `command_call` events carry no output-token field.
+
+| Route | Calls | B/call | est. tok/call |
+| --- | --- | --- | --- |
+| `read_range` | 859 | 8,103 | 2,026 |
+| `run_command_batch`, all | 438 | 6,001 | 1,501 |
+| - batches containing grep/rg/find/cat/ls | 90 | 5,849 | 1,460 |
+| - batches without one | 473 | 5,730 | 1,433 |
+| `search_code` | 299 | 4,066 | 1,017 |
+| `find_files` | 88 | 1,328 | 332 |
+
+Search through the shell is therefore about 1.4x the cost of `search_code` per call, and the 90 batches that use a search or read executable average *more* output than the 473 that do not. Same-query comparison on this repository (9 matches for `sanitizeAnonymousEvent`): `search_code` returns 1,127 B of JSON, `rg -n src test bin` returns 728 B of raw text, and `rg -n --no-ignore --hidden .` - the closest thing to what an agent actually types - returns 1,644 B because it re-finds everything under `dist/`. Per match the JSON costs about 125 B against 81 B of raw text, so the envelope overhead is real but smaller than what missing ignore rules add back.
+
+### Verdict
+
+1. Removing these commands does not shrink `tools/list` at all, because `run_command_batch` stays advertised. There is no definition-side token saving.
+2. Per call the tools are cheaper; per *answered question* the shell can still win, because the expensive tool is `read_range` at 2,026 tokens per call and 73% of reads already follow a read in the baseline. A single `grep` that returns the exact lines can end an episode that `search_code` plus `read_range` would continue, which costs more than the 1.4x per-call difference saves.
+3. Recommendation: remove them for consistency, bounded output, `.gitignore` awareness and `policy_denied` telemetry - not for cost. Close gap 1 (`includeIgnored` on `search_code`/`find_files`) and gap 2 (`git` subcommand and option rules) first, update gap 4, and treat gap 3 as accepted friction with regex alternation as the workaround. Keep `git` and drop only the general search and read executables.
+
+Acceptance for the change, measured on a fresh window: `read_range` calls per session must not rise, `searchThenReadTransitions` must not rise, the `search_code` zero-result rate must not rise (baseline 14%), and `run_command_batch` policy denials must stay in the low single digits.
+
 ## 5. Findings verified at the audited commit
 
 Status: V = verified in source at HEAD, M = also supported by measurement, T = supported by telemetry, U = not runtime-verified.
@@ -354,3 +405,5 @@ Issues the ChatGPT audit did not find: analytics result shape, initialize negoti
 - 2026-10-29: Phase 5 completed (see "Phase 5 outcome"). 5.01 capability model, 5.02 short decision-table guidance, 5.06 schema-based argument validation, 5.09 nearest-name suggestions with `isError` kept, 5.13 multi-line `search_code`. 5.04, 5.11 and 5.12 were already implemented and are recorded as done. Docs updated for the single-payload result shape and the reduced tool set.
 - 2026-10-29: Phase 6 completed except the behavioural half of 6.03. 6.01 closed three coverage gaps (per-tool protocol matrix at both versions, per-tool unknown and missing argument rejection, malformed/empty JSONL tolerance with no write side effects); 195 tests. 6.02 docs verified. 6.03 structural metrics measured and tabulated; behavioural metrics need a fresh window. 6.04 shipped as `docs/MIGRATION.md`.
 - 2026-10-29: Phase 7 and the remaining items closed. 7.01 shipped as instrumentation: `AGENT_DIR_GUIDANCE` variant selection, `guidanceVariant` telemetry, `efficiency.guidanceVariants`, and `argShape` on every tool call. 1.07 added an official-SDK conformance suite (dev dependency only); 1.08 and 4.03 verified done. 2.07 completed (`skippedCount`, `integration`/`integrationStatus`, `argShape`) and 2.09 gained a `policy_denied` category. Fixed a real gap: `toolCount`/`toolSetHash` were being dropped by the privacy allowlist and never persisted. 7.02 declined, 7.03 gated on 6.03, 7.04 stays deferred by D-02; 2.05, 2.09, 2.11 and 4.11 remain partial/deferred with reasons recorded. 197 tests.
+- 2026-10-29: Telemetry privacy allowlist and vocabulary unified (see "Adding a telemetry field" in `docs/telemetry.md`). The event-specific rule tables are typed against the event interfaces, so a field without a rule and a new event type both fail the build; error categories, outcomes and argument-shape keys are declared once and reused by the classifier and the sanitizer.
+- 2026-10-29: Removed-shell-search decision recorded (section 4c). Measured: command-based search costs about 1.4x `search_code` per call, and the removal saves nothing in `tools/list`. The remaining gaps are ignored-tree discovery, the `git grep` bypass, one-query-per-call, and the `docs/CONFIGURATION.md` example. No code changed for this entry.
