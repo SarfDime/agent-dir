@@ -27,6 +27,8 @@ export interface SearchEnvelope<T extends SearchItem = SearchItem> {
   backend: SearchBackend;
   /** True when the file list or search was cut short, so results may be missing. */
   incomplete?: boolean;
+  /** Candidate files searched, so an empty result can say what it looked at. */
+  scanned?: number;
   notes?: string[];
 }
 
@@ -113,8 +115,26 @@ async function search<T extends SearchItem>(
 ): Promise<SearchEnvelope<T>> {
   const outcome = await runSearch(root, request, options.backend);
   const items = outcome.matches.map((match) => decorate(toItem(match)));
-  const fitted = fitItems(items, options.maxBytes ?? DEFAULT_OUTPUT_BYTES);
+  const maxBytes = options.maxBytes ?? DEFAULT_OUTPUT_BYTES;
+  // Notes explain empty and truncated results; they come out of the same budget as the items.
+  const NOTES_RESERVE_BYTES = 420;
+  const fitted = fitItems(items, Math.max(256, maxBytes - NOTES_RESERVE_BYTES));
   const truncated = fitted.cut || outcome.moreAvailable;
+  const notes = [...outcome.notes];
+  if (fitted.kept.length === 0)
+    notes.push(
+      `No match for ${describeQuery(request)} in ${outcome.scanned} searched ${
+        outcome.scanned === 1 ? "file" : "files"
+      }. Literal match unless regex is set; case-insensitive unless caseSensitive is set; generated files, binaries and files over 1 MB are skipped. Check the spelling, widen paths/globs, set includeGenerated, or use find_symbol for definitions.`,
+    );
+  if (truncated && fitted.cut)
+    notes.push(
+      `Results were cut by maxBytes after ${fitted.kept.length} of ${items.length} matches; raise maxBytes, lower context, or narrow with paths/globs.`,
+    );
+  else if (truncated)
+    notes.push(
+      `More than ${fitted.kept.length} matches exist; narrow with paths/globs or raise maxResults.`,
+    );
   return {
     items: fitted.kept,
     returned: fitted.kept.length,
@@ -123,9 +143,38 @@ async function search<T extends SearchItem>(
       ? { truncationReason: fitted.cut ? ("maxBytes" as const) : ("maxResults" as const) }
       : {}),
     backend: outcome.backend,
+    scanned: outcome.scanned,
     ...(outcome.incomplete ? { incomplete: true } : {}),
-    ...(outcome.notes.length ? { notes: outcome.notes } : {}),
+    ...(notes.length ? { notes } : {}),
   };
+}
+
+/** Quotes the query so a note reads clearly whatever the user typed. */
+function describeQuery(request: SearchRequest): string {
+  const shown = request.query.length > 80 ? `${request.query.slice(0, 77)}...` : request.query;
+  return `'${shown}'`;
+}
+
+/**
+ * Renders a search envelope as grep-style lines instead of JSON. Matched text is what an agent
+ * uses; the JSON keys around it were 43% of the payload on a measured sample.
+ */
+export function formatSearchEnvelope(envelope: SearchEnvelope): string {
+  const files = new Set(envelope.items.map((item) => item.path)).size;
+  const header = `${envelope.returned} ${
+    envelope.returned === 1 ? "match" : "matches"
+  } in ${files} ${files === 1 ? "file" : "files"} (${envelope.backend}${
+    envelope.truncated ? `, truncated: ${envelope.truncationReason}` : ""
+  }${envelope.incomplete ? ", incomplete" : ""})`;
+  const lines: string[] = [header];
+  for (const item of envelope.items) {
+    const range = item.endLine === undefined ? `${item.line}` : `${item.line}-${item.endLine}`;
+    lines.push(`${item.path}:${range}:${item.column} ${item.text}`);
+    for (const before of item.before ?? []) lines.push(`  | ${before}`);
+    for (const after of item.after ?? []) lines.push(`  | ${after}`);
+  }
+  for (const note of envelope.notes ?? []) lines.push(`note: ${note}`);
+  return lines.join("\n");
 }
 
 export function searchCode(
@@ -159,11 +208,24 @@ export async function findFiles(
   root: string,
   pattern: string,
   maxResults = 200,
-): Promise<{ files: string[]; truncated: boolean }> {
+): Promise<{ files: string[]; truncated: boolean; scanned?: number; note?: string }> {
   if (!pattern.trim()) throw new Error("File pattern cannot be empty.");
   const listing = await listProjectFiles(root);
   const matching = listing.files.filter((file) => matchesGlob(pattern, file));
-  return { files: matching.slice(0, maxResults), truncated: matching.length > maxResults };
+  const truncated = matching.length > maxResults;
+  const files = matching.slice(0, maxResults);
+  const note =
+    matching.length === 0
+      ? `No file matched '${pattern}' among ${listing.files.length} project files. Patterns match project-relative paths; '*' does not cross '/', so use '**' or a bare name such as 'mcp.ts'. Files ignored by .gitignore, node_modules and build output are not listed.`
+      : truncated
+        ? `Showing ${files.length} of ${matching.length} matching files; raise maxResults or narrow the pattern.`
+        : undefined;
+  return {
+    files,
+    truncated,
+    scanned: listing.files.length,
+    ...(note ? { note } : {}),
+  };
 }
 
 function escapeRegex(value: string): string {

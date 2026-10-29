@@ -151,6 +151,59 @@ async function writeFileAtomic(
   }
 }
 
+/** Bounded Levenshtein distance for short names; used only for suggestion hints. */
+function editDistance(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= a.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= b.length; column += 1) {
+      const substitution =
+        (previous[column - 1] as number) + (a[row - 1] === b[column - 1] ? 0 : 1);
+      current[column] = Math.min(
+        (previous[column] as number) + 1,
+        (current[column - 1] as number) + 1,
+        substitution,
+      );
+    }
+    previous = current;
+  }
+  return previous[b.length] as number;
+}
+
+/**
+ * Names the closest existing paths when a change targets a file that does not exist. Without this
+ * the agent has to spend a whole turn finding out that it guessed a path wrong.
+ */
+async function closestPathHint(root: string, requested: string): Promise<string> {
+  const normalized = requested.replace(/\\/g, "/").replace(/^\.\//, "");
+  const base = path.posix.basename(normalized);
+  const directory = path.posix.dirname(normalized);
+  if (base.length < 3) return "";
+  const listing = await listProjectFiles(root);
+  const threshold = Math.max(2, Math.floor(base.length / 3));
+  const scored: Array<{ file: string; score: number }> = [];
+  for (const file of listing.files) {
+    const candidateBase = path.posix.basename(file);
+    const candidateDirectory = path.posix.dirname(file);
+    if (candidateBase === base) {
+      scored.push({ file, score: candidateDirectory === directory ? 3 : 2 });
+      continue;
+    }
+    if (candidateDirectory !== directory) continue;
+    if (editDistance(candidateBase.toLowerCase(), base.toLowerCase()) <= threshold)
+      scored.push({ file, score: 1 });
+  }
+  if (scored.length === 0) return "";
+  scored.sort(
+    (a, b) => b.score - a.score || a.file.length - b.file.length || a.file.localeCompare(b.file),
+  );
+  const names = scored.slice(0, 3).map((entry) => `'${entry.file}'`);
+  return ` Did you mean ${names.join(" or ")}?`;
+}
+
 function describePatchProblems(
   content: string,
   displayPath: string,
@@ -191,7 +244,9 @@ export async function applyFileChanges(
       target = await safePath(resolvedRoot, change.path, change.kind === "write");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT")
-        throw new Error(`'${change.path}' does not exist.`);
+        throw new Error(
+          `'${change.path}' does not exist.${await closestPathHint(resolvedRoot, change.path)}`,
+        );
       throw error;
     }
     const protectedProblem = protectedPathProblem(path.relative(resolvedRoot, target), protection);

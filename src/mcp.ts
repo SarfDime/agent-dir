@@ -14,7 +14,13 @@ import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { readTelemetryEvents } from "./telemetry/storage.js";
 import type { TelemetryConfig, TelemetryErrorCategory, TelemetryLevel } from "./telemetry/types.js";
 import { type BatchOnError, runBatch } from "./tools/batch.js";
-import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
+import {
+  findFiles,
+  findReferences,
+  findSymbol,
+  formatSearchEnvelope,
+  searchCode,
+} from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile } from "./tools/files.js";
@@ -193,7 +199,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search project text files (source, docs and configuration) by literal text or regex. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Returns {items, returned, truncated, truncationReason, backend}; always check truncated. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. Uses ripgrep when installed.",
+    "Search project text files (source, docs and configuration) by literal text or regex. Results are grep-style lines `path:line:col text` after a one-line summary; pass format='json' for the object envelope. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. An empty result explains what was searched and what to try next. Uses ripgrep when installed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
@@ -219,6 +225,13 @@ const baseTools: ToolDefinition[] = [
           "Let the pattern span lines; with regex, '.' then also matches newlines. Works with both backends.",
       },
       includeGenerated: { type: "boolean", default: false },
+      format: {
+        type: "string",
+        enum: ["text", "json"],
+        default: "text",
+        description:
+          "text: grep-style lines. json: {items, returned, truncated, truncationReason}.",
+      },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
@@ -1790,25 +1803,26 @@ async function callTool(
       payload = {
         items: bounded.items,
         truncated: bounded.truncated || found.truncated,
+        ...(found.note && !bounded.truncated ? { note: found.note } : {}),
       };
       break;
     }
     case "search_code": {
       const paths = optionalStringArray(args.paths, "paths", 20);
       const globs = optionalStringArray(args.globs, "globs", 20);
-      payload = {
-        ...(await searchCode(root, String(args.query), {
-          regex: args.regex === true,
-          caseSensitive: args.caseSensitive === true,
-          includeGenerated: args.includeGenerated === true,
-          multiline: args.multiline === true,
-          context: intArg(args.context, 0, 0, 5, "context"),
-          maxResults: numberArg(args.maxResults, 200, 1000),
-          maxBytes: outputBytesArg(args.maxBytes),
-          ...(paths ? { paths } : {}),
-          ...(globs ? { globs } : {}),
-        })),
-      };
+      const envelope = await searchCode(root, String(args.query), {
+        regex: args.regex === true,
+        caseSensitive: args.caseSensitive === true,
+        includeGenerated: args.includeGenerated === true,
+        multiline: args.multiline === true,
+        context: intArg(args.context, 0, 0, 5, "context"),
+        maxResults: numberArg(args.maxResults, 200, 1000),
+        maxBytes: outputBytesArg(args.maxBytes),
+        ...(paths ? { paths } : {}),
+        ...(globs ? { globs } : {}),
+      });
+      payload = { ...envelope };
+      if (args.format !== "json") contentText = formatSearchEnvelope(envelope);
       break;
     }
     case "find_symbol":

@@ -47,7 +47,7 @@ The core public tool set is intentionally small:
 | --------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `project_context`           | Compact project overview and active execution policy                                                           |
 | `find_files`                | Find paths by glob; a pattern without `/` matches file names at any depth                                      |
-| `search_code`               | Search project text (source, docs, config) with scoping, context lines and bounded output; reports `truncated` |
+| `search_code`               | Search project text (source, docs, config); grep-style output, scoping and context lines                       |
 | `find_symbol`               | Locate likely symbol definitions (heuristic; JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP)      |
 | `find_references`           | Locate whole-identifier occurrences of a symbol (lexical, case-sensitive)                                      |
 | `read_range`                | Read a bounded line range from a UTF-8 file                                                                    |
@@ -64,11 +64,12 @@ The core public tool set is intentionally small:
 
 - **File list:** inside a git work tree it is `git ls-files --cached --others --exclude-standard`, so `.gitignore` (nested and global) is honored. Elsewhere a bounded walk skips `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs and tool caches. There is no depth limit; if the file cap is hit the result says `incomplete`.
 - **What is searched:** any text file, including docs and configuration. Binary files and files over 1 MB are skipped; lockfiles and minified files are skipped unless `includeGenerated` is true. Results are ordered by path and line, one result per line.
-- **`search_code` parameters:** `query`, `regex`, `caseSensitive` (default false), `paths` (files or directories), `globs` (includes, or excludes prefixed with `!`), `context` (0-5 surrounding lines in `before`/`after`), `multiline` (let the pattern span lines; with `regex`, `.` also matches newlines), `includeGenerated`, `maxResults`, `maxBytes`. `multiline` behaves identically on the ripgrep (`-U`) and built-in backends.
-- **Results are objects:** `{ items, returned, truncated, truncationReason, backend, incomplete?, notes? }`. `truncationReason` is `maxResults` or `maxBytes`; `notes` explains things like a path that matched no files.
+- **`search_code` parameters:** `query`, `regex`, `caseSensitive` (default false), `paths` (files or directories), `globs` (includes, or excludes prefixed with `!`), `context` (0-5 surrounding lines), `multiline` (let the pattern span lines; with `regex`, `.` also matches newlines), `includeGenerated`, `format` (`text` by default, `json` for the object envelope), `maxResults`, `maxBytes`. `multiline` behaves identically on the ripgrep (`-U`) and built-in backends.
+- **`search_code` output is text by default:** a summary line `N matches in M files (backend[, truncated: reason])`, then one line per match as `path:line:col text` (`path:start-end:col` when a match spans lines). Context lines follow the match as `  | line`. Pass `format: "json"` to get `{ items, returned, truncated, truncationReason, backend, incomplete?, scanned?, notes? }` instead; `truncationReason` is `maxResults` or `maxBytes`.
+- **Empty and truncated results explain themselves.** A search that finds nothing says how many files were searched and which mode applied (literal, case-insensitive, generated and binary files skipped) and what to try next. A cut result says whether `maxBytes` or `maxResults` stopped it. `find_files` does the same for a pattern that matches nothing, including the reminder that `*` does not cross `/`.
 - **Backends:** ripgrep is used when it is installed (recommended: faster and its regex engine cannot backtrack catastrophically); otherwise a built-in scanner runs. Both search the same candidate files and return the same shape and limits, and `backend` reports which one ran. The built-in backend rejects regexes with nested quantifiers. The startup banner and `project_context` say which backend is active. Set `AGENT_DIR_SEARCH_BACKEND=builtin` to force the built-in search. A pattern ripgrep cannot parse (for example lookahead) falls back to the built-in search with a note.
 
-`apply_changes` returns `{ items, dryRun }`.
+`apply_changes` returns `{ items, dryRun }`. A change that targets a file that does not exist names the closest existing paths, so a mistyped path costs one turn instead of two.
 
 ### Reading, editing and validating
 

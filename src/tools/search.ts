@@ -51,6 +51,8 @@ export interface SearchOutcome {
   backend: SearchBackend;
   incomplete: boolean;
   notes: string[];
+  /** Number of candidate files actually searched, so an empty result can explain itself. */
+  scanned: number;
 }
 
 const MAX_FILE_BYTES = 1_000_000;
@@ -223,5 +225,6 @@ export async function runSearch(
     backend,
     incomplete,
     notes,
+    scanned: files.length,
   };
 }

@@ -76,12 +76,11 @@ test("official SDK client calls a tool and reads the single payload", async () =
     assert.notEqual(search.isError, true);
     const content = search.content as Array<{ type: string; text?: string }>;
     assert.equal(content[0]?.type, "text");
-    const payload = JSON.parse(String(content[0]?.text)) as {
-      items: Array<{ path: string; line: number }>;
-      truncated: boolean;
-    };
-    assert.equal(payload.items.length, 2);
-    assert.equal(payload.items[0]?.path, "notes.txt");
+    // Default rendering is grep-style: a summary line, then `path:line:col text`.
+    const lines = String(content[0]?.text).split("\n");
+    assert.match(lines[0] ?? "", /^2 matches in 1 file \(/);
+    assert.equal(lines[1], "notes.txt:1:1 needle one");
+    assert.equal(lines[2], "notes.txt:2:1 needle two");
     assert.equal(search.structuredContent, undefined);
 
     const missing = await client.callTool({

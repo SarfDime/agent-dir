@@ -807,9 +807,10 @@ test("LLM-oriented output budgets bound high-volume results", async () => {
       }),
     );
     const searchBody = (await jsonPayload(searchResponse)) as {
-      result: { structuredContent: { items: Array<unknown> } };
+      result: { textContent: string };
     };
-    assert.ok(searchBody.result.structuredContent.items.length < 20);
+    assert.match(searchBody.result.textContent, /truncated: maxBytes/);
+    assert.ok(Buffer.byteLength(searchBody.result.textContent, "utf8") <= 1024);
 
     const contextResponse = await handler(
       requestFor(3, "tools/call", {
@@ -852,11 +853,15 @@ test("discovery search outputs honor maxBytes", async () => {
         requestFor(index + 1, "tools/call", { name, arguments: argumentsValue }),
       );
       assert.equal(response.status, 200);
-      const body = (await jsonPayload(response)) as { result: { structuredContent: unknown } };
-      assert.ok(
-        Buffer.byteLength(JSON.stringify(body.result.structuredContent), "utf8") <= 1024,
-        name,
-      );
+      const body = (await jsonPayload(response)) as {
+        result: { structuredContent?: unknown; textContent?: string };
+      };
+      // search_code renders grep-style text by default; the other tools return an object.
+      const rendered =
+        name === "search_code"
+          ? String(body.result.textContent)
+          : JSON.stringify(body.result.structuredContent);
+      assert.ok(Buffer.byteLength(rendered, "utf8") <= 1024, name);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1014,10 +1019,11 @@ test("file, symbol, and code lookups return bounded context", async () => {
       }),
     );
     const codeBody = (await jsonPayload(codeResponse)) as {
-      result: { structuredContent: { items: Array<{ text: string }> } };
+      result: { textContent: string };
     };
-    assert.equal(codeBody.result.structuredContent.items.length, 1);
-    assert.match(codeBody.result.structuredContent.items[0]?.text ?? "", /return message/);
+    const codeLines = codeBody.result.textContent.split("\n");
+    assert.equal(codeLines.length, 2, "one header line plus one match");
+    assert.match(codeLines[1] ?? "", /return message/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1729,13 +1735,10 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
       }),
     );
     const relevant = (await jsonPayload(relevantResponse)) as {
-      result: {
-        structuredContent: { items: Array<{ path: string; line: number; text: string }> };
-      };
+      result: { textContent: string };
     };
-    assert.equal(relevant.result.structuredContent.items[0]?.path, "src/demo.ts");
-    assert.equal(relevant.result.structuredContent.items[0]?.line, 1);
-    assert.match(relevant.result.structuredContent.items[0]?.text ?? "", /target/);
+    assert.match(relevant.result.textContent, /^1 match in 1 file \(/);
+    assert.match(relevant.result.textContent, /src\/demo\.ts:1:\d+ export function target/);
 
     const commandResponse = await handler(
       requestFor(3, "tools/call", {
@@ -1777,13 +1780,12 @@ test("code search provides bounded discovery", async () => {
       }),
     );
     const body = (await jsonPayload(response)) as {
-      result: {
-        structuredContent: { items: Array<{ path: string; text: string }> };
-      };
+      result: { textContent: string };
     };
-    assert.equal(body.result.structuredContent.items.length, 1);
-
-    assert.equal(body.result.structuredContent.items[0]?.path, "src/demo.ts");
+    const lines = body.result.textContent.split("\n");
+    assert.equal(lines.length, 2, "one header line plus one match under maxResults: 1");
+    assert.match(lines[1] ?? "", /^src\/demo\.ts:1:\d+ /);
+    assert.match(lines[0] ?? "", /^1 match in 1 file \(/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

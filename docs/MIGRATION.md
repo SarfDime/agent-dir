@@ -44,7 +44,7 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 
 | Tool                                             | Result                                                                                                                |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `search_code`, `find_symbol`, `find_references`  | `{ items, returned, truncated, truncationReason?, backend, incomplete?, notes? }` instead of a bare array             |
+| `search_code`, `find_symbol`, `find_references`  | `{ items, returned, truncated, truncationReason?, backend, incomplete?, notes? }` instead of a bare array. `search_code` now renders grep-style text by default; pass `format: "json"` to get this object |
 | `find_files`                                     | `{ items, truncated }`                                                                                                |
 | `apply_changes`                                  | `{ items, dryRun }` (per-file status only, never contents or diffs)                                                   |
 | `read_range`                                     | Plain text with a header plus `eof`, `totalLines`, `nextStartLine`; 16 KB default; `ranges: [...]` for several ranges |
@@ -53,6 +53,14 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 
 `search_code` also gained `multiline` (patterns can span lines; identical on the ripgrep and built-in
 backends) alongside the existing `paths`, `globs`, `context`, `caseSensitive` and `includeGenerated`.
+
+Its result is now grep-style text by default instead of JSON, because the JSON keys around each match were
+43% of a measured payload: a summary line `N matches in M files (backend)`, then `path:line:col text` per
+match, context lines as `  | line`, and `note:` lines for empty or truncated results. Anything that parsed
+the old JSON must pass `format: "json"`, which returns the same object envelope as before plus `scanned`.
+
+The format switch is the only incompatible part; `format: "json"` keeps existing parsers working. A change
+targeting a missing file now also suggests the closest existing paths.
 
 ## Batch semantics
 
