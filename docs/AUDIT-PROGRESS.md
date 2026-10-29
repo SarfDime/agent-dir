@@ -219,10 +219,27 @@ Actions taken: removed Serena and ast-grep; one representation per result; no ou
 
 ### Phase 7: exploratory (P3, needs measurement or prototype first)
 
-- [ ] 7.01 Episode-level analytics and guidance experiments (does a shorter decision table change integration usage?).
-- [ ] 7.02 Tree-sitter or ast-grep backed symbol index for languages the lexical tools miss.
-- [ ] 7.03 Combined search-and-read tool (matches with context) if 4.03/4.04 do not reduce the search-then-read pattern.
-- [ ] 7.04 Sandbox wrapper prototype (see 3.11).
+- [x] 7.01 Episode-level analytics and guidance experiments. The instrumentation is in place: two guidance variants selectable with `AGENT_DIR_GUIDANCE` (`table`, the default, and `terse`), `guidanceVariant` recorded on every `initialize`/`server/discover` request, `efficiency.guidanceVariants` counted in `mode=summary`, and `argShape` on every tool call so a change in tool usage is visible. The experiment itself needs two runs of the same workload (see `docs/telemetry.md`).
+- [!] 7.02 Tree-sitter or ast-grep backed symbol index. Declined: ast-grep was removed on request and re-adding an AST parser for symbol lookup reintroduces the dependency this release just removed, while CodeGraph already covers structural navigation where it is installed. Revisit only with evidence that `find_symbol` misses real cases in a project without CodeGraph.
+- [~] 7.03 Combined search-and-read tool. Deferred by its own precondition: it exists only if 4.03/4.04 fail to reduce the search-then-read pattern, and that number is part of the 6.03 behavioural window. `search_code` now takes `context` and `multiline`, and `read_range` takes `ranges`, which is the cheaper way to close the same gap.
+- [!] 7.04 Sandbox wrapper. Deferred by decision D-02: an OS-level sandbox is a separate future enhancement, not part of the guardrail model, and it needs bubblewrap or a container runtime on the host.
+
+### Status of the remaining items (2026-10-29)
+
+Where the tables above were widened by a Markdown formatter, this list is authoritative for the items that moved after the audit.
+
+| ID | Status | Evidence |
+| --- | --- | --- |
+| 1.07 | Done | `test/sdk-client.test.ts` drives a full session with the official `@modelcontextprotocol/sdk` client over Streamable HTTP: connect/initialize, `ping`, `tools/list` (no output schemas, object input schemas), `tools/call` reading the single text payload, and an `isError` result. The package is a dev dependency only. |
+| 1.08 | Done | CodeGraph results go through the same `toolResult()` envelope as native tools (`resultType`, one `content` text block, `_meta`), and `toolTelemetryMetrics` measures the payload, so truncation and file metrics are recorded for them. Serena no longer exists. |
+| 2.05 | Partial | Retention (30 days or 100 MB), file-level filtering, side-effect-free reads and `telemetry prune` are in place. The streaming reader is not: the analytics tool still loads the filtered files into memory, bounded by the retention cap. Justified only if analytics latency is measured above ~1 s. |
+| 2.07 | Done | Every tool call records `outcome`, `truncated` and `resultCount`; batch tools add `skippedCount`; integration tools add `integration` and `integrationStatus`; every call adds `argShape` booleans. All of them are on the privacy allowlist, so they survive sanitization. |
+| 2.09 | Partial | `policy_denied` is now a distinct category (guardrail and protected-path rejections were being counted as `authorization`), and `unknown_tool`, `not_found`, `invalid_input`, `unavailable_integration` and `timeout` are classified before the generic buckets. Typed error classes are still not adopted; the messages are ours and covered by tests, so this is a refactor with no user-visible effect and is deliberately left open. |
+| 2.11 | Partial | Directory creation and chmod happen once per file rather than per event. Appends stay synchronous: a bounded event is a few hundred bytes and no latency effect has been measured. Buffering would trade durability (a killed process loses the buffer) for an unmeasured gain. |
+| 4.03 | Done | ripgrep and built-in backends with identical results, `paths`/`globs`/`context`/`caseSensitive`/`multiline`, docs and config search, ReDoS guard. The parity test could not run at audit time because ripgrep was missing; it now runs and passes. |
+| 4.11 | Deferred | The 2 s cached file list is in place. A watcher-based index needs a measurement on a large repository to justify the invalidation complexity; none exists yet. |
+
+Fix found while closing 2.07: `toolCount` and `toolSetHash` were added to the `tools/list` event but were being dropped by the telemetry privacy allowlist, so they never reached disk. Both are now sanitized and recorded, together with `guidanceVariant`.
 
 ## 5. Findings verified at the audited commit
 
@@ -336,3 +353,4 @@ Issues the ChatGPT audit did not find: analytics result shape, initialize negoti
 - 2026-10-29: Credit-usage investigation (section 4b). Serena and ast-grep removed entirely (measured: 4% and 0% of tool calls, and Serena contributed about 8.6 KB of `tools/list`). Tool results now carry one representation (no `structuredContent` duplicate), tools advertise no `outputSchema` or `title`, `fitAnalyticsResult` budgets the whole envelope, and `tools/list` telemetry records `toolCount` and `toolSetHash`. 4.05 and 5.03 closed; 5.05, 5.08 and 5.10 closed as not applicable. Breaking: result shape, removed tools, `structuredContent` consumers must read `content[0].text`. `npm run check` and `npm test` pass (192 tests).
 - 2026-10-29: Phase 5 completed (see "Phase 5 outcome"). 5.01 capability model, 5.02 short decision-table guidance, 5.06 schema-based argument validation, 5.09 nearest-name suggestions with `isError` kept, 5.13 multi-line `search_code`. 5.04, 5.11 and 5.12 were already implemented and are recorded as done. Docs updated for the single-payload result shape and the reduced tool set.
 - 2026-10-29: Phase 6 completed except the behavioural half of 6.03. 6.01 closed three coverage gaps (per-tool protocol matrix at both versions, per-tool unknown and missing argument rejection, malformed/empty JSONL tolerance with no write side effects); 195 tests. 6.02 docs verified. 6.03 structural metrics measured and tabulated; behavioural metrics need a fresh window. 6.04 shipped as `docs/MIGRATION.md`.
+- 2026-10-29: Phase 7 and the remaining items closed. 7.01 shipped as instrumentation: `AGENT_DIR_GUIDANCE` variant selection, `guidanceVariant` telemetry, `efficiency.guidanceVariants`, and `argShape` on every tool call. 1.07 added an official-SDK conformance suite (dev dependency only); 1.08 and 4.03 verified done. 2.07 completed (`skippedCount`, `integration`/`integrationStatus`, `argShape`) and 2.09 gained a `policy_denied` category. Fixed a real gap: `toolCount`/`toolSetHash` were being dropped by the privacy allowlist and never persisted. 7.02 declined, 7.03 gated on 6.03, 7.04 stays deferred by D-02; 2.05, 2.09, 2.11 and 4.11 remain partial/deferred with reasons recorded. 197 tests.

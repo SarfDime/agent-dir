@@ -129,7 +129,7 @@ When indexed, agents are instructed to use CodeGraph for non-trivial structural 
 
 One capability model is generated per request and rendered by every discovery surface, so `initialize`, `server/discover`, the capabilities resource and `project_context` cannot disagree:
 
-- `initialize` and `server/discover` return the same short decision table as `instructions` (sub-700 characters), conditioned on which integrations are actually available.
+- `initialize` and `server/discover` return the same short decision table as `instructions` (sub-700 characters), conditioned on which integrations are actually available. Set `AGENT_DIR_GUIDANCE=terse` for a single-paragraph variant; the variant is recorded in telemetry so the two can be compared (see `docs/telemetry.md`).
 - `server/discover` also returns the full model as `capabilityModel` (and the CodeGraph status as `codeGraph` for compatibility).
 - `project_context` includes the model's `efficiency` block, so an agent that never calls `discover` still sees the same preferred workflow and anti-patterns.
 

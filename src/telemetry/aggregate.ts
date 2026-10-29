@@ -161,6 +161,8 @@ export interface TelemetryEfficiency {
   topTransitions: Array<{ from: string; to: string; count: number }>;
   clients: Record<string, number>;
   protocolVersions: Record<string, number>;
+  /** Requests per guidance variant, for comparing call mixes across 7.01 experiments. */
+  guidanceVariants: Record<string, number>;
 }
 
 const EPISODE_IDLE_GAP_MS = 10 * 60 * 1000;
@@ -266,6 +268,7 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
 
   const clients: Record<string, number> = {};
   const protocolVersions: Record<string, number> = {};
+  const guidanceVariants: Record<string, number> = {};
   for (const envelope of group) {
     if (envelope.event.event !== "mcp_request" || !envelope.runtime) continue;
     const name = envelope.runtime.mcpClientName;
@@ -275,6 +278,8 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
     }
     const version = envelope.runtime.mcpProtocolVersion;
     if (version) protocolVersions[version] = (protocolVersions[version] ?? 0) + 1;
+    const variant = envelope.event.guidanceVariant;
+    if (variant) guidanceVariants[variant] = (guidanceVariants[variant] ?? 0) + 1;
   }
 
   return {
@@ -316,6 +321,7 @@ function summarizeEfficiency(group: TelemetryEnvelope[]): TelemetryEfficiency {
       }),
     clients,
     protocolVersions,
+    guidanceVariants,
   };
 }
 

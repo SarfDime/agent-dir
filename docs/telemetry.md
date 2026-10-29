@@ -26,11 +26,23 @@ One MCP/JSON-RPC request handled by Agent Dir. Its duration covers the request f
 
 For `tools/list`, the event also records `toolCount` and `toolSetHash` (a keyed hash of the sorted tool names). Use them before comparing `responseBytes` across time: an integration appearing or disappearing changes the list without any code change, which is otherwise easy to misread as a schema regression.
 
+For `initialize` and `server/discover`, the event records `guidanceVariant` (see [Guidance experiments](#guidance-experiments)).
+
 ### tool_call
 
 One Agent Dir tool execution inside an MCP request. Tool metrics are the best measure of individual Agent Dir capability reliability. Tool events include UTF-8 input/output byte counts, a rough token-size estimate (`ceil(bytes / 4)`), hashed request/input/output fingerprints, output repetition within the current process session, and bounded per-file metadata. File metadata contains hashes of paths and returned file text plus byte counts; it does not contain the paths or text themselves. A matching output fingerprint means the serialized tool result was identical, not that Claude necessarily re-read or billed those bytes again.
 
 Token estimates are **not tokenizer measurements** and do not represent Claude's actual input/output tokens or billing. Agent Dir cannot observe Claude's hidden prompt, cached tokens, reasoning tokens, or context carried between turns. Search results can be compared by result count, output bytes, truncation, and pagination, but Agent Dir does not currently judge semantic search relevance. Repeated input fingerprints and event ordering can help identify retry patterns, while validation-after-change counts must be inferred from the raw event sequence rather than treated as a definitive causal metric.
+
+Three further fields describe *how* a tool was called, never what was passed:
+
+| Field | Meaning |
+| --- | --- |
+| `skippedCount` | Batch tools only: items reported as `skipped`, i.e. never started because an earlier item failed or was rejected. |
+| `integration` / `integrationStatus` | Set for integration-backed tools (`codegraph_explore`), with the integration status at call time. |
+| `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `okExitCodes`, `limit`). Values are never recorded. |
+
+`argShape` is what makes guidance experiments measurable: it shows whether agents actually use `paths`/`globs` to scope a search, or `context` instead of a follow-up read.
 
 ### command_call
 
@@ -102,6 +114,17 @@ Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool.
 - Optional `profile`, `session`, `since`, and `until` filters narrow the dataset. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
 
 Diagnostic-level telemetry can still include identifying runtime metadata, so only enable remote analytics on a connector you trust. The analytics tool is hidden by default and is registered only when the explicit flag is true.
+
+### Guidance experiments
+
+The guidance text that `initialize` and `server/discover` return has two variants, selected with `AGENT_DIR_GUIDANCE`:
+
+- unset or `table` (default): the decision table.
+- `terse`: a single paragraph with the same policy.
+
+Each `initialize`/`discover` request records `guidanceVariant`, and `mode=summary` reports request counts per variant under `efficiency.guidanceVariants`. To compare, run the same workload under both variants and diff the `efficiency` block: calls per episode, `searchThenReadTransitions`, `argShape` usage, and tokens by tool. Nothing else in the response changes, so a difference is attributable to the guidance.
+
+Keep one variant per host and window; switching mid-session mixes the samples.
 
 ## Retention and maintenance
 

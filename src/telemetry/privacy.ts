@@ -11,6 +11,7 @@ const SAFE_ERROR_CATEGORIES = new Set([
   "authorization",
   "invalid_input",
   "not_found",
+  "policy_denied",
   "conflict",
   "timeout",
   "execution",
@@ -24,6 +25,19 @@ const SAFE_ERROR_CATEGORIES = new Set([
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
 const SAFE_COMMAND_FAMILY = /^[a-z][a-z0-9_-]*$/;
 const SAFE_OPERATION = /^[a-z][a-z0-9_.-]*$/;
+const SAFE_VARIANT = /^[a-z][a-z0-9_-]*$/;
+const ARG_SHAPE_KEYS = [
+  "regex",
+  "caseSensitive",
+  "paths",
+  "globs",
+  "context",
+  "multiline",
+  "ranges",
+  "dryRun",
+  "okExitCodes",
+  "limit",
+] as const;
 
 export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): AnonymousTelemetryEvent {
   if (event.event === "http_request") {
@@ -46,6 +60,11 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       durationMs: boundedNumber(event.durationMs),
       ...optionalNumber("responseBytes", event.responseBytes),
       ...optionalNumber("estimatedResponseTokens", event.estimatedResponseTokens),
+      ...optionalNumber("toolCount", event.toolCount),
+      ...(event.toolSetHash === undefined ? {} : { toolSetHash: sanitizeHash(event.toolSetHash) }),
+      ...(event.guidanceVariant === undefined
+        ? {}
+        : { guidanceVariant: sanitizeIdentifier(event.guidanceVariant, SAFE_VARIANT) }),
       ...(event.errorCategory === undefined
         ? {}
         : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
@@ -89,6 +108,14 @@ export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): Anonymou
       ...optionalNumber("outputBytes", event.outputBytes),
       ...optionalNumber("resultCount", event.resultCount),
       ...optionalNumber("affectedFiles", event.affectedFiles),
+      ...optionalNumber("skippedCount", event.skippedCount),
+      ...(event.integration === undefined
+        ? {}
+        : { integration: sanitizeIdentifier(event.integration, SAFE_VARIANT) }),
+      ...(event.integrationStatus === undefined
+        ? {}
+        : { integrationStatus: sanitizeIdentifier(event.integrationStatus, SAFE_VARIANT) }),
+      ...(event.argShape === undefined ? {} : { argShape: sanitizeArgShape(event.argShape) }),
       ...(event.truncated === undefined ? {} : { truncated: event.truncated === true }),
       ...(event.paginated === undefined ? {} : { paginated: event.paginated === true }),
       ...(event.outcome === undefined ? {} : { outcome: sanitizeOutcome(event.outcome) }),
@@ -266,6 +293,15 @@ function sanitizeMcpMethod(value: string): string {
 function sanitizeIdentifier(value: string, pattern: RegExp): string {
   const normalized = value.trim().toLowerCase();
   return pattern.test(normalized) ? normalized : "unknown";
+}
+
+/** Only known boolean keys survive: argument values are never recorded. */
+function sanitizeArgShape(
+  shape: NonNullable<import("./types.js").TelemetryToolEvent["argShape"]>,
+): NonNullable<import("./types.js").TelemetryToolEvent["argShape"]> {
+  const output: NonNullable<import("./types.js").TelemetryToolEvent["argShape"]> = {};
+  for (const key of ARG_SHAPE_KEYS) if (shape[key] === true) output[key] = true;
+  return output;
 }
 
 function sanitizeSensitiveIdentifier(value: string): string {

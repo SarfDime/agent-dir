@@ -35,6 +35,8 @@ export interface TelemetryMcpRequestEvent {
    */
   toolCount?: number;
   toolSetHash?: string;
+  /** Which guidance variant `initialize`/`server/discover` returned, for A/B comparison. */
+  guidanceVariant?: string;
 }
 
 export interface TelemetryFileMetric {
@@ -65,6 +67,27 @@ export interface TelemetryToolEvent {
   affectedFiles?: number;
   truncated?: boolean;
   paginated?: boolean;
+  /** Batch tools only: items reported as `skipped` (never started). */
+  skippedCount?: number;
+  /** Integration-backed tool only, with the integration status at call time. */
+  integration?: string;
+  integrationStatus?: string;
+  /**
+   * Which optional arguments the caller actually used. Booleans only: this is for guidance and
+   * workflow experiments, never for inspecting the arguments themselves.
+   */
+  argShape?: {
+    regex?: boolean;
+    caseSensitive?: boolean;
+    paths?: boolean;
+    globs?: boolean;
+    context?: boolean;
+    multiline?: boolean;
+    ranges?: boolean;
+    dryRun?: boolean;
+    okExitCodes?: boolean;
+    limit?: boolean;
+  };
   /** Normalized result classification: ok, empty, truncated or error. */
   outcome?: "ok" | "empty" | "truncated" | "error";
   errorCategory?: string;

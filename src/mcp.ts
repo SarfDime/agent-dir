@@ -470,6 +470,7 @@ export function createMcpHandler(
     let runtime: import("./telemetry/types.js").TelemetryRuntimeContext | undefined;
     let telemetryRequestErrorCategory: string | undefined;
     let toolListMetrics: { toolCount: number; toolSetHash: string } | undefined;
+    let guidanceVariantUsed: GuidanceVariant | undefined;
     const recordMcpRequest = (method = message?.method ?? "unknown") => {
       telemetryRecorder.record(
         {
@@ -483,6 +484,7 @@ export function createMcpHandler(
             ? { errorCategory: telemetryRequestErrorCategory }
             : {}),
           ...(toolListMetrics ?? {}),
+          ...(guidanceVariantUsed ? { guidanceVariant: guidanceVariantUsed } : {}),
         },
         runtime,
         telemetryProject,
@@ -556,6 +558,7 @@ export function createMcpHandler(
         allowedCommands,
         blacklistedCommands,
       });
+      guidanceVariantUsed = initializeCapability.document.guidanceVariant;
       const initializeResponse = trackedJson({
         jsonrpc: "2.0",
         id: message.id,
@@ -613,6 +616,7 @@ export function createMcpHandler(
               allowedCommands,
               blacklistedCommands,
             });
+            guidanceVariantUsed = model.document.guidanceVariant;
             return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
@@ -796,6 +800,13 @@ export function createMcpHandler(
                 cumulativeEstimatedOutputTokens: sessionEstimatedOutputTokens,
                 inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...(count === undefined ? {} : { resultCount: count }),
+                ...argumentShape(argumentsValue),
+                ...(toolName === "codegraph_explore"
+                  ? {
+                      integration: "codegraph",
+                      integrationStatus: (await codeGraph.capability()).status,
+                    }
+                  : {}),
                 ...metrics,
               },
               runtime,
@@ -843,6 +854,7 @@ export function createMcpHandler(
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
                 estimatedInputTokens: estimateTokens(JSON.stringify(argumentsValue)),
                 inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
+                ...argumentShape(argumentsValue),
                 errorCategory,
               },
               runtime,
@@ -1356,11 +1368,23 @@ interface CapabilityDocument {
     preferred: Record<string, unknown>;
     avoid: string[];
   };
+  guidanceVariant: GuidanceVariant;
 }
 
 interface CapabilityModel {
   document: CapabilityDocument;
   instructions: string;
+}
+
+/** Guidance variants available for the workflow experiment (task 7.01). */
+export type GuidanceVariant = "table" | "terse";
+
+/**
+ * `AGENT_DIR_GUIDANCE=terse` serves the shorter paragraph form. The variant is recorded on the
+ * `initialize`/`server/discover` telemetry events so call mixes can be compared per variant.
+ */
+export function guidanceVariant(): GuidanceVariant {
+  return process.env.AGENT_DIR_GUIDANCE === "terse" ? "terse" : "table";
 }
 
 const INLINE_LIST_LIMIT = 12;
@@ -1406,8 +1430,17 @@ function efficiencyModel(
 }
 
 /** The short guidance every client gets; long-form details live in the instructions resource. */
-function capabilityInstructions(document: CapabilityDocument): string {
+function capabilityInstructions(
+  document: CapabilityDocument,
+  variant: GuidanceVariant = guidanceVariant(),
+): string {
   const graphAvailable = document.integrations.codegraph.status === "available";
+  const scripts = inlineList(document.execution.allowedScripts);
+  const commands = inlineList(document.execution.commands);
+  const blocked = inlineList(document.execution.blacklistedCommands);
+  if (variant === "terse") {
+    return `Agent Dir is the primary project interface: fewest calls, smallest output. Orient with project_context; locate with search_code or find_files; read with read_range; edit with apply_changes; verify with validate.${graphAvailable ? " Use codegraph_explore for behaviour, call flow and impact." : ""} Search before reading, read only the range you need, batch related calls, and never repeat a discovery. Scripts: ${scripts}. Commands: ${commands}. Blocked: ${blocked}.`;
+  }
   return `Use Agent Dir as the primary project interface: fewest calls, smallest output.
 
 - Orient, package, policy: project_context
@@ -1418,9 +1451,9 @@ function capabilityInstructions(document: CapabilityDocument): string {
 
 Search before reading, read only the range you need, batch related calls, and never repeat a discovery that already answered the question.
 
-Allowed scripts: ${inlineList(document.execution.allowedScripts)}
-Allowed commands: ${inlineList(document.execution.commands)}
-Blocked prefixes: ${inlineList(document.execution.blacklistedCommands)}`;
+Allowed scripts: ${scripts}
+Allowed commands: ${commands}
+Blocked prefixes: ${blocked}`;
 }
 
 /**
@@ -1436,6 +1469,7 @@ function capabilityModel(input: {
   blacklistedCommands: string[];
 }): CapabilityModel {
   const graphAvailable = input.codeGraph.status === "available";
+  const variant = guidanceVariant();
   const document: CapabilityDocument = {
     version: packageVersion,
     tools: [...input.tools],
@@ -1453,8 +1487,9 @@ function capabilityModel(input: {
       blacklistedCommands: [...input.blacklistedCommands],
     },
     efficiency: efficiencyModel(graphAvailable, input.analyticsEnabled),
+    guidanceVariant: variant,
   };
-  return { document, instructions: capabilityInstructions(document) };
+  return { document, instructions: capabilityInstructions(document, variant) };
 }
 
 /** Long-form instructions served from the `agent-dir://instructions` resource. */
@@ -2293,6 +2328,9 @@ function toolTelemetryMetrics(
   };
   visit(payload);
   if (payload.truncated === true) truncated = true;
+  const skipped = Array.isArray(payload.items)
+    ? payload.items.filter((item) => isRecord(item) && item.status === "skipped").length
+    : 0;
   const outputJson = JSON.stringify(payload);
   const outputFingerprint = telemetryHash(outputJson);
   const outputBytes = Buffer.byteLength(outputJson, "utf8");
@@ -2304,12 +2342,44 @@ function toolTelemetryMetrics(
       : {}),
     ...(truncated ? { truncated: true } : {}),
     ...(paginated ? { paginated: true } : {}),
+    ...(skipped > 0 ? { skippedCount: skipped } : {}),
     outputFingerprint,
     duplicateOutputBytes,
     textOutputBytes,
     uniqueFileCount: files.size,
     ...(files.size ? { files: [...files.values()].slice(0, 100) } : {}),
   };
+}
+
+/**
+ * Booleans describing which optional arguments were supplied. Values are never recorded, so this
+ * is safe at every level and sufficient to see whether guidance changes how agents call tools.
+ */
+function argumentShape(argumentsValue: unknown): {
+  argShape?: NonNullable<import("./telemetry/types.js").TelemetryToolEvent["argShape"]>;
+} {
+  if (!isRecord(argumentsValue)) return {};
+  const present = (key: string): boolean =>
+    argumentsValue[key] !== undefined && argumentsValue[key] !== null;
+  const nonEmpty = (key: string): boolean => {
+    const value = argumentsValue[key];
+    return Array.isArray(value) ? value.length > 0 : present(key);
+  };
+  const shape: NonNullable<import("./telemetry/types.js").TelemetryToolEvent["argShape"]> = {
+    ...(argumentsValue.regex === true ? { regex: true } : {}),
+    ...(argumentsValue.caseSensitive === true ? { caseSensitive: true } : {}),
+    ...(nonEmpty("paths") ? { paths: true } : {}),
+    ...(nonEmpty("globs") ? { globs: true } : {}),
+    ...(typeof argumentsValue.context === "number" && argumentsValue.context > 0
+      ? { context: true }
+      : {}),
+    ...(argumentsValue.multiline === true ? { multiline: true } : {}),
+    ...(nonEmpty("ranges") ? { ranges: true } : {}),
+    ...(argumentsValue.dryRun === true ? { dryRun: true } : {}),
+    ...(present("okExitCodes") ? { okExitCodes: true } : {}),
+    ...(present("maxResults") || present("limit") ? { limit: true } : {}),
+  };
+  return Object.keys(shape).length ? { argShape: shape } : {};
 }
 
 function toolOutcome(
@@ -2464,6 +2534,14 @@ function classifyTelemetryError(error: unknown): string {
     message.includes("does not exist")
   )
     return "not_found";
+  if (
+    message.includes("guardrail") ||
+    message.includes("is not allowed by this profile") ||
+    message.includes("is blocked by this profile") ||
+    message.includes("is protected") ||
+    message.includes("protected path")
+  )
+    return "policy_denied";
   if (message.includes("invalid") || message.includes("must be")) return "invalid_input";
   if (message.includes("blocked") || message.includes("not allowed")) return "authorization";
   if (message.includes("timeout") || message.includes("timed out")) return "timeout";
