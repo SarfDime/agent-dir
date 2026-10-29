@@ -104,6 +104,10 @@ Do not infer agent reasoning time, user wait time, or network latency from tool 
 
 Telemetry is persisted locally only when enabled. Persistence failures must never affect MCP request handling.
 
+### Adding a telemetry field
+
+Event shapes live in `src/telemetry/types.ts`; the persistence allowlist lives in `src/telemetry/privacy.ts`. The allowlist is a rule table typed against each event interface, so adding a field without a rule — or adding a whole event type — fails the build instead of writing an event whose field is silently dropped. Error categories, tool outcomes, and argument-shape keys are declared once as `as const` tuples and reused by both the classifier and the sanitizer, so a category cannot be emitted and then rewritten to `unknown` on the way to disk. Values that bypass the types (older data, hand-edited files) are still coerced at write time.
+
 ## MCP telemetry analytics (opt-in)
 
 Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool. It reads persisted telemetry across all profiles and sessions on the host; this is separate from enabling collection. Keep the flag off unless the connected agent needs access to this history.

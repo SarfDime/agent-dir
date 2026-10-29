@@ -12,7 +12,7 @@ import {
 } from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { readTelemetryEvents } from "./telemetry/storage.js";
-import type { TelemetryConfig, TelemetryLevel } from "./telemetry/types.js";
+import type { TelemetryConfig, TelemetryErrorCategory, TelemetryLevel } from "./telemetry/types.js";
 import { type BatchOnError, runBatch } from "./tools/batch.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
@@ -468,7 +468,7 @@ export function createMcpHandler(
     let message: JsonRpcRequest | undefined;
     let mcpSuccess = false;
     let runtime: import("./telemetry/types.js").TelemetryRuntimeContext | undefined;
-    let telemetryRequestErrorCategory: string | undefined;
+    let telemetryRequestErrorCategory: TelemetryErrorCategory | undefined;
     let toolListMetrics: { toolCount: number; toolSetHash: string } | undefined;
     let guidanceVariantUsed: GuidanceVariant | undefined;
     const recordMcpRequest = (method = message?.method ?? "unknown") => {
@@ -672,7 +672,7 @@ export function createMcpHandler(
           const toolName = params.name;
           const recordRejectedToolCall = (
             tool: string,
-            category: string,
+            category: TelemetryErrorCategory,
             rejected?: unknown,
           ): void => {
             const serialized = JSON.stringify(rejected ?? {});
@@ -2516,7 +2516,7 @@ function resultCount(payload: Record<string, unknown>): number | undefined {
   return undefined;
 }
 
-function classifyTelemetryError(error: unknown): string {
+function classifyTelemetryError(error: unknown): TelemetryErrorCategory {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   if (message.startsWith("unknown tool")) return "unknown_tool";
   if (

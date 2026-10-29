@@ -1,6 +1,7 @@
 import type { ChildProcess } from "node:child_process";
 import { spawn } from "node:child_process";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
+import type { TelemetryErrorCategory } from "./telemetry/types.js";
 import type { TunnelEvent, TunnelOptions, TunnelResult } from "./types.js";
 
 const STARTUP_TIMEOUT_MS = 15_000;
@@ -23,7 +24,7 @@ function publicUrl(options: TunnelOptions): string {
   if (options.subdomain) return `https://${options.subdomain}.wormhole.bar`;
   throw new Error("Tunnel URL cannot be determined from the configured options.");
 }
-function reasonCategory(reason: string): string {
+function reasonCategory(reason: string): TelemetryErrorCategory {
   if (/timeout/i.test(reason)) return "timeout";
   if (/auth/i.test(reason)) return "authentication";
   if (/registration|subdomain/i.test(reason)) return "startup";

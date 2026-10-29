@@ -1,172 +1,164 @@
-import type {
-  AnonymousTelemetryEvent,
-  TelemetryEnvelope,
-  TelemetryLevel,
-  TelemetryProjectContext,
-  TelemetryRuntimeContext,
+import {
+  type AnonymousTelemetryEvent,
+  ARG_SHAPE_KEYS,
+  type ArgShape,
+  TELEMETRY_ERROR_CATEGORIES,
+  type TelemetryCommandEvent,
+  type TelemetryEnvelope,
+  type TelemetryErrorCategory,
+  type TelemetryHttpRequestEvent,
+  type TelemetryLevel,
+  type TelemetryMcpRequestEvent,
+  type TelemetryProjectContext,
+  type TelemetryRuntimeContext,
+  type TelemetrySessionEvent,
+  type TelemetryToolEvent,
+  type TelemetryTunnelEvent,
+  TOOL_OUTCOMES,
+  type ToolOutcome,
 } from "./types.js";
 
-const SAFE_ERROR_CATEGORIES = new Set([
-  "authentication",
-  "authorization",
-  "invalid_input",
-  "not_found",
-  "policy_denied",
-  "conflict",
-  "timeout",
-  "execution",
-  "internal",
-  "startup",
-  "unknown",
-  "unknown_tool",
-  "unavailable_integration",
-]);
+const SAFE_ERROR_CATEGORIES: ReadonlySet<string> = new Set(TELEMETRY_ERROR_CATEGORIES);
+const SAFE_OUTCOMES: ReadonlySet<string> = new Set(TOOL_OUTCOMES);
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
 const SAFE_COMMAND_FAMILY = /^[a-z][a-z0-9_-]*$/;
 const SAFE_OPERATION = /^[a-z][a-z0-9_.-]*$/;
 const SAFE_VARIANT = /^[a-z][a-z0-9_-]*$/;
-const ARG_SHAPE_KEYS = [
-  "regex",
-  "caseSensitive",
-  "paths",
-  "globs",
-  "context",
-  "multiline",
-  "ranges",
-  "dryRun",
-  "okExitCodes",
-  "limit",
-] as const;
 
-export function sanitizeAnonymousEvent(event: AnonymousTelemetryEvent): AnonymousTelemetryEvent {
-  if (event.event === "http_request") {
-    return {
-      event: "http_request",
-      method: sanitizeMcpMethod(event.method),
-      route: event.route,
-      status: boundedInteger(event.status),
-      success: event.success === true,
-      durationMs: boundedNumber(event.durationMs),
-      authenticated: event.authenticated === true,
-    };
+/**
+ * One sanitizer per field. `-?` makes every field of the event type required here, so adding a
+ * field to an event interface without a rule is a compile error instead of a field that is
+ * silently dropped on the way to disk.
+ *
+ * Returning `undefined` drops the field; the applier skips absent input fields.
+ */
+type FieldRules<T> = {
+  [K in keyof Omit<T, "event">]-?: (value: NonNullable<T[K]>) => T[K];
+};
+
+const HTTP_REQUEST_RULES: FieldRules<TelemetryHttpRequestEvent> = {
+  method: (value) => sanitizeMcpMethod(value),
+  // The route is chosen from a closed set by our own code, not supplied by a client.
+  route: (value) => value,
+  status: (value) => boundedInteger(value),
+  success: (value) => value === true,
+  durationMs: (value) => boundedNumber(value),
+  authenticated: (value) => value === true,
+};
+
+const MCP_REQUEST_RULES: FieldRules<TelemetryMcpRequestEvent> = {
+  method: (value) => sanitizeMcpMethod(value),
+  success: (value) => value === true,
+  durationMs: (value) => boundedNumber(value),
+  responseBytes: (value) => boundedNumber(value),
+  estimatedResponseTokens: (value) => boundedNumber(value),
+  errorCategory: (value) => sanitizeErrorCategory(value),
+  toolCount: (value) => boundedInteger(value),
+  toolSetHash: (value) => sanitizeHash(value),
+  guidanceVariant: (value) => sanitizeIdentifier(value, SAFE_VARIANT),
+};
+
+const TOOL_CALL_RULES: FieldRules<TelemetryToolEvent> = {
+  tool: (value) => sanitizeIdentifier(value, SAFE_TOOL_NAME),
+  requestIdHash: (value) => sanitizeHash(value),
+  inputFingerprint: (value) => sanitizeHash(value),
+  outputFingerprint: (value) => sanitizeHash(value),
+  estimatedInputTokens: (value) => boundedNumber(value),
+  estimatedOutputTokens: (value) => boundedNumber(value),
+  cumulativeOutputBytes: (value) => boundedNumber(value),
+  cumulativeEstimatedOutputTokens: (value) => boundedNumber(value),
+  duplicateOutputBytes: (value) => boundedNumber(value),
+  textOutputBytes: (value) => boundedNumber(value),
+  uniqueFileCount: (value) => boundedInteger(value),
+  files: (value) =>
+    value.slice(0, 100).map((file) => ({
+      pathHash: sanitizeHash(file.pathHash),
+      ...(file.contentHash === undefined ? {} : { contentHash: sanitizeHash(file.contentHash) }),
+      bytes: boundedNumber(file.bytes),
+    })),
+  success: (value) => value === true,
+  durationMs: (value) => boundedNumber(value),
+  inputBytes: (value) => boundedNumber(value),
+  outputBytes: (value) => boundedNumber(value),
+  resultCount: (value) => boundedInteger(value),
+  affectedFiles: (value) => boundedInteger(value),
+  truncated: (value) => value === true,
+  paginated: (value) => value === true,
+  skippedCount: (value) => boundedInteger(value),
+  integration: (value) => sanitizeIdentifier(value, SAFE_VARIANT),
+  integrationStatus: (value) => sanitizeIdentifier(value, SAFE_VARIANT),
+  argShape: (value) => sanitizeArgShape(value),
+  outcome: (value) => sanitizeOutcome(value),
+  errorCategory: (value) => sanitizeErrorCategory(value),
+};
+
+const COMMAND_CALL_RULES: FieldRules<TelemetryCommandEvent> = {
+  commandFamily: (value) => sanitizeIdentifier(value, SAFE_COMMAND_FAMILY),
+  executables: (value) => value.slice(0, 10).map(sanitizeExecutable),
+  operation: (value) => sanitizeIdentifier(value, SAFE_OPERATION),
+  success: (value) => value === true,
+  durationMs: (value) => boundedNumber(value),
+  outputBytes: (value) => boundedNumber(value),
+  errorCategory: (value) => sanitizeErrorCategory(value),
+};
+
+const TUNNEL_RULES: FieldRules<TelemetryTunnelEvent> = {
+  // State names come from our own union, not from input.
+  state: (value) => value,
+  healthState: (value) => value,
+  attempt: (value) => boundedInteger(value),
+  attempts: (value) => boundedInteger(value),
+  durationMs: (value) => boundedNumber(value),
+  reasonCategory: (value) => sanitizeErrorCategory(value),
+};
+
+const SESSION_RULES: FieldRules<TelemetrySessionEvent> = {
+  wallClockDurationMs: (value) => boundedNumber(value),
+  activeRequestDurationMs: (value) => boundedNumber(value),
+  idleGapDurationMs: (value) => boundedNumber(value),
+  requestCount: (value) => boundedInteger(value),
+  toolCallCount: (value) => boundedInteger(value),
+  commandCallCount: (value) => boundedInteger(value),
+};
+
+/** Applies a field-rule table mechanically: one code path, no hand-written allowlist literal. */
+function sanitizeFields<T extends { event: string }>(event: T, rules: FieldRules<T>): T {
+  const source = event as Record<string, unknown>;
+  const output: Record<string, unknown> = { event: event.event };
+  for (const [key, rule] of Object.entries(rules)) {
+    const value = source[key];
+    if (value === undefined) continue;
+    const sanitized = (rule as (value: unknown) => unknown)(value);
+    if (sanitized !== undefined) output[key] = sanitized;
   }
+  return output as T;
+}
 
-  if (event.event === "mcp_request") {
-    return {
-      event: "mcp_request",
-      method: sanitizeMcpMethod(event.method),
-      success: event.success === true,
-      durationMs: boundedNumber(event.durationMs),
-      ...optionalNumber("responseBytes", event.responseBytes),
-      ...optionalNumber("estimatedResponseTokens", event.estimatedResponseTokens),
-      ...optionalNumber("toolCount", event.toolCount),
-      ...(event.toolSetHash === undefined ? {} : { toolSetHash: sanitizeHash(event.toolSetHash) }),
-      ...(event.guidanceVariant === undefined
-        ? {}
-        : { guidanceVariant: sanitizeIdentifier(event.guidanceVariant, SAFE_VARIANT) }),
-      ...(event.errorCategory === undefined
-        ? {}
-        : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
-    };
-  }
+/**
+ * Sanitizes an event before it reaches disk. The generic signature preserves the concrete event
+ * type, so callers keep the fields they passed instead of falling back to the union.
+ */
+export function sanitizeAnonymousEvent<T extends AnonymousTelemetryEvent>(event: T): T {
+  return dispatchAnonymousEvent(event) as T;
+}
 
-  if (event.event === "tool_call") {
-    return {
-      event: "tool_call",
-      tool: sanitizeIdentifier(event.tool, SAFE_TOOL_NAME),
-      ...(event.requestIdHash === undefined
-        ? {}
-        : { requestIdHash: sanitizeHash(event.requestIdHash) }),
-      ...(event.inputFingerprint === undefined
-        ? {}
-        : { inputFingerprint: sanitizeHash(event.inputFingerprint) }),
-      ...(event.outputFingerprint === undefined
-        ? {}
-        : { outputFingerprint: sanitizeHash(event.outputFingerprint) }),
-      ...optionalNumber("estimatedInputTokens", event.estimatedInputTokens),
-      ...optionalNumber("estimatedOutputTokens", event.estimatedOutputTokens),
-      ...optionalNumber("cumulativeOutputBytes", event.cumulativeOutputBytes),
-      ...optionalNumber("cumulativeEstimatedOutputTokens", event.cumulativeEstimatedOutputTokens),
-      ...optionalNumber("duplicateOutputBytes", event.duplicateOutputBytes),
-      ...optionalNumber("textOutputBytes", event.textOutputBytes),
-      ...optionalNumber("uniqueFileCount", event.uniqueFileCount),
-      ...(event.files === undefined
-        ? {}
-        : {
-            files: event.files.slice(0, 100).map((file) => ({
-              pathHash: sanitizeHash(file.pathHash),
-              ...(file.contentHash === undefined
-                ? {}
-                : { contentHash: sanitizeHash(file.contentHash) }),
-              bytes: boundedNumber(file.bytes),
-            })),
-          }),
-      success: event.success === true,
-      durationMs: boundedNumber(event.durationMs),
-      ...optionalNumber("inputBytes", event.inputBytes),
-      ...optionalNumber("outputBytes", event.outputBytes),
-      ...optionalNumber("resultCount", event.resultCount),
-      ...optionalNumber("affectedFiles", event.affectedFiles),
-      ...optionalNumber("skippedCount", event.skippedCount),
-      ...(event.integration === undefined
-        ? {}
-        : { integration: sanitizeIdentifier(event.integration, SAFE_VARIANT) }),
-      ...(event.integrationStatus === undefined
-        ? {}
-        : { integrationStatus: sanitizeIdentifier(event.integrationStatus, SAFE_VARIANT) }),
-      ...(event.argShape === undefined ? {} : { argShape: sanitizeArgShape(event.argShape) }),
-      ...(event.truncated === undefined ? {} : { truncated: event.truncated === true }),
-      ...(event.paginated === undefined ? {} : { paginated: event.paginated === true }),
-      ...(event.outcome === undefined ? {} : { outcome: sanitizeOutcome(event.outcome) }),
-      ...(event.errorCategory === undefined
-        ? {}
-        : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
-    };
-  }
+function dispatchAnonymousEvent(event: AnonymousTelemetryEvent): AnonymousTelemetryEvent {
+  if (event.event === "http_request") return sanitizeFields(event, HTTP_REQUEST_RULES);
 
-  if (event.event === "tunnel") {
-    return {
-      event: "tunnel",
-      state: event.state,
-      ...(event.healthState === undefined ? {} : { healthState: event.healthState }),
-      ...(event.attempt === undefined ? {} : { attempt: boundedInteger(event.attempt) }),
-      ...(event.attempts === undefined ? {} : { attempts: boundedInteger(event.attempts) }),
-      ...(event.durationMs === undefined ? {} : { durationMs: boundedNumber(event.durationMs) }),
-      ...(event.reasonCategory === undefined
-        ? {}
-        : { reasonCategory: sanitizeErrorCategory(event.reasonCategory) }),
-    };
-  }
+  if (event.event === "mcp_request") return sanitizeFields(event, MCP_REQUEST_RULES);
 
-  if (event.event === "command_call") {
-    return {
-      event: "command_call",
-      commandFamily: sanitizeIdentifier(event.commandFamily, SAFE_COMMAND_FAMILY),
-      ...(event.operation === undefined
-        ? {}
-        : { operation: sanitizeIdentifier(event.operation, SAFE_OPERATION) }),
-      ...(event.executables === undefined
-        ? {}
-        : { executables: event.executables.slice(0, 10).map(sanitizeExecutable) }),
-      success: event.success === true,
-      durationMs: boundedNumber(event.durationMs),
-      ...optionalNumber("outputBytes", event.outputBytes),
-      ...(event.errorCategory === undefined
-        ? {}
-        : { errorCategory: sanitizeErrorCategory(event.errorCategory) }),
-    };
-  }
+  if (event.event === "tool_call") return sanitizeFields(event, TOOL_CALL_RULES);
 
-  return {
-    event: "session",
-    wallClockDurationMs: boundedNumber(event.wallClockDurationMs),
-    activeRequestDurationMs: boundedNumber(event.activeRequestDurationMs),
-    idleGapDurationMs: boundedNumber(event.idleGapDurationMs),
-    requestCount: boundedInteger(event.requestCount),
-    toolCallCount: boundedInteger(event.toolCallCount),
-    commandCallCount: boundedInteger(event.commandCallCount),
-  };
+  if (event.event === "tunnel") return sanitizeFields(event, TUNNEL_RULES);
+
+  if (event.event === "command_call") return sanitizeFields(event, COMMAND_CALL_RULES);
+
+  if (event.event === "session") return sanitizeFields(event, SESSION_RULES);
+
+  // A new event type without a rule table must not compile.
+  const unhandled: never = event;
+  return unhandled;
 }
 
 export function createTelemetryEnvelope(
@@ -296,10 +288,8 @@ function sanitizeIdentifier(value: string, pattern: RegExp): string {
 }
 
 /** Only known boolean keys survive: argument values are never recorded. */
-function sanitizeArgShape(
-  shape: NonNullable<import("./types.js").TelemetryToolEvent["argShape"]>,
-): NonNullable<import("./types.js").TelemetryToolEvent["argShape"]> {
-  const output: NonNullable<import("./types.js").TelemetryToolEvent["argShape"]> = {};
+function sanitizeArgShape(shape: ArgShape): ArgShape {
+  const output: ArgShape = {};
   for (const key of ARG_SHAPE_KEYS) if (shape[key] === true) output[key] = true;
   return output;
 }
@@ -316,8 +306,8 @@ function sanitizeLocalPath(value: string): string {
     : "unknown";
 }
 
-function sanitizeOutcome(value: string): "ok" | "empty" | "truncated" | "error" {
-  return value === "empty" || value === "truncated" || value === "error" ? value : "ok";
+function sanitizeOutcome(value: ToolOutcome): ToolOutcome {
+  return SAFE_OUTCOMES.has(value) ? value : "ok";
 }
 
 function sanitizeExecutable(value: string): string {
@@ -345,9 +335,9 @@ function sanitizeHash(value: string): string {
   return /^[a-f0-9]{64}$/.test(value) ? value : "unknown";
 }
 
-function sanitizeErrorCategory(value: string): string {
+function sanitizeErrorCategory(value: string): TelemetryErrorCategory {
   const normalized = value.trim().toLowerCase();
-  return SAFE_ERROR_CATEGORIES.has(normalized) ? normalized : "unknown";
+  return SAFE_ERROR_CATEGORIES.has(normalized) ? (normalized as TelemetryErrorCategory) : "unknown";
 }
 
 function boundedNumber(value: number): number {
@@ -357,11 +347,4 @@ function boundedNumber(value: number): number {
 
 function boundedInteger(value: number): number {
   return Math.max(0, Math.min(Math.round(Number.isFinite(value) ? value : 0), 1_000_000_000));
-}
-
-function optionalNumber<K extends string>(
-  key: K,
-  value: number | undefined,
-): Partial<Record<K, number>> {
-  return value === undefined ? {} : ({ [key]: boundedNumber(value) } as Partial<Record<K, number>>);
 }
