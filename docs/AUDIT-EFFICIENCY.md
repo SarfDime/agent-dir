@@ -100,9 +100,7 @@ those are different sessions asking the same question, which is not waste. The r
 residue of agents re-reading after context compaction rather than re-using their earlier result, and it is
 cheap to absorb (see E-04) but not free to fix.
 
-**F-08. Every tool result carries 84 B of redundant `_meta`.** 2,390 calls × 84 B is about 200 KB, and for
-small results it is proportionally large: 24% of the 347 B `file_info` payload. The client already learned
-the server name and version during `initialize`.
+**F-08. Every tool result used to carry 84 B of redundant `_meta`.** 2,390 calls × 84 B was about 200 KB, and for small results it was proportionally large: 24% of the 347 B `file_info` payload. The client learns the server name and version during `initialize`/`server/discover`, so tool results no longer repeat it: `file_info` is now 261 B and `read_range` 1,532 B.
 
 ## 4. Recommendations, ordered by expected effect
 
@@ -115,7 +113,7 @@ the server name and version during `initialize`.
 | E-05 | Suggest the closest existing path on `apply_changes` `not_found`. | F-05 | Recovers 39 observed failures in one turn instead of two | S | Done |
 | E-06 | `validate` default: severity and per-file summary plus the first few errors per file. | F-06 | Removes the 47% truncated case that currently forces a second run | M | Done: `diagnostics.summary` and `byFile` always present, flat `issues` only when it fits; 30 issues in 30 files now return 1,807 B with the worst files named |
 | E-07 | `search_code` accepts `queries: string[]` and returns labelled groups. | §4c-3 | Fewer round trips for multi-pattern work, which today falls back to `run_command_batch` | S | Done: two patterns in one call measure 1,024 B against 1,157 B plus a second round trip |
-| E-08 | Drop `serverInfo` from per-result `_meta`. | F-08 | −84 B per call, about 200 KB on this window | S | Open |
+| E-08 | Drop `serverInfo` from per-result `_meta`. | F-08 | −84 B per call, about 200 KB on this window | S | Done: `file_info` 347 to 261 B, `read_range` 1,618 to 1,532 B, `search_code` 964 to 878 B |
 
 **Do not do:** shrink `tools/list` further (F-01), re-add output schemas or titles, or remove
 `run_command_batch` — it is 22% of bytes but it is the only route to git and package managers, and removing

@@ -2290,10 +2290,11 @@ interface ToolCallOutput {
 }
 
 function toolResult(payload: Record<string, unknown>, text?: string): Record<string, unknown> {
+  // No `_meta`: the client already learned the server name and version from `initialize` or
+  // `server/discover`, and repeating it costs 84 bytes on every tool result.
   return {
     resultType: "complete",
     content: [{ type: "text", text: text ?? JSON.stringify(payload) }],
-    _meta: SERVER_INFO_META,
   };
 }
 type TelemetryRuntime = import("./telemetry/types.js").TelemetryRuntimeContext;

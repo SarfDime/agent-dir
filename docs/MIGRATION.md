@@ -54,6 +54,10 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 `search_code` also gained `multiline` (patterns can span lines; identical on the ripgrep and built-in
 backends) alongside the existing `paths`, `globs`, `context`, `caseSensitive` and `includeGenerated`.
 
+Tool results no longer repeat `_meta.serverInfo`: the client already has the server name and version from
+`initialize` or `server/discover`, and it cost 84 bytes on every result. `initialize`, `server/discover` and
+the subscription stream still carry it.
+
 Its result is now grep-style text by default instead of JSON, because the JSON keys around each match were
 43% of a measured payload: a summary line `N matches in M files (backend)`, then `path:line:col text` per
 match, context lines as `  | line`, and `note:` lines for empty or truncated results. Anything that parsed
