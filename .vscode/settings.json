@@ -1,0 +1,6 @@
+{
+  "//": "Biome formats the code and is the only formatter this repository checks in CI. The editor's Markdown formatter re-pads every table cell to the widest column, which produces large diffs that `npm run check` does not verify. Leave Markdown alone so docs match what a reviewer sees.",
+  "[markdown]": {
+    "editor.formatOnSave": false
+  }
+}
