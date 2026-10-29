@@ -1,5 +1,6 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { authenticate, unauthorized } from "./auth.js";
+import { normalizeBrowserOrigin } from "./config.js";
 import { logRequest } from "./logging.js";
 import { createMcpHandler } from "./mcp.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
@@ -50,7 +51,8 @@ export function startServer({
     const normalizedOrigin =
       requestOrigin === undefined ? undefined : normalizeOrigin(requestOrigin);
     const originAllowed = normalizedOrigin !== undefined && allowedOriginSet.has(normalizedOrigin);
-    if (originAllowed && normalizedOrigin) applyCorsHeaders(res, normalizedOrigin);
+    // Echo the header value exactly: browsers compare it byte for byte.
+    if (originAllowed && requestOrigin) applyCorsHeaders(res, requestOrigin);
     let authenticated = false;
     try {
       if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
@@ -349,13 +351,17 @@ export function validateMcpHeaders(
         400,
       );
   }
-  if (origin && origin !== new URL(request.url).origin && !allowedOrigins.has(origin))
-    return jsonRpcErrorForServer(
-      message,
-      -32020,
-      `Invalid Origin. Add '${origin}' to the profile's allowedOrigins (or pass --allow-origin) to let this browser client call /mcp.`,
-      403,
-    );
+  if (origin) {
+    const originKey = normalizeOrigin(origin);
+    const sameOrigin = normalizeOrigin(new URL(request.url).origin);
+    if (originKey === undefined || (originKey !== sameOrigin && !allowedOrigins.has(originKey)))
+      return jsonRpcErrorForServer(
+        message,
+        -32020,
+        `Invalid Origin. Add '${origin}' to the profile's allowedOrigins (or pass --allow-origin) to let this browser client call /mcp.`,
+        403,
+      );
+  }
   return undefined;
 }
 
@@ -375,13 +381,7 @@ function decodeMcpHeaderValue(value: string): string | undefined {
 
 /** Origins arrive with a trailing slash or different case; compare them normalized. */
 function normalizeOrigin(value: string): string | undefined {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
-    return url.origin;
-  } catch {
-    return undefined;
-  }
+  return normalizeBrowserOrigin(value);
 }
 
 /** Headers a browser client needs to read a cross-origin response. */

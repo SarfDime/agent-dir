@@ -97,7 +97,9 @@ agent-dir my-project --allow-origin https://agent.example.com
 agent-dir config add my-project --directory ~/src/my-project --allow-origin https://agent.example.com
 ```
 
-The value is a list of origins (`scheme://host[:port]`, no path, no wildcard), stored as `allowedOrigins` in the profile. Same-origin requests — a page served from the tunnel host itself — are always accepted. Listed origins also receive the CORS headers a browser needs, including the `OPTIONS` preflight answered before authentication, because a browser never sends credentials on a preflight.
+The value is a list of origins, stored as `allowedOrigins` in the profile. Same-origin requests — a page served from the tunnel host itself — are always accepted. Listed origins also receive the CORS headers a browser needs, including the `OPTIONS` preflight answered before authentication, because a browser never sends credentials on a preflight.
+
+Origin rules: `scheme://host[:port]`, no path, no query, no wildcard. Accepted schemes are `http`, `https`, `chrome-extension`, `moz-extension`, `safari-extension` and `safari-web-extension`, so a browser extension can be listed by the origin it sends (`moz-extension://<uuid>`). A trailing slash and a default port (`:443`, `:80`) are ignored; `*` and `null` are rejected, because accepting them would disable the check rather than narrow it. An invalid entry is reported with the profile, the index and the expected shape when the config loads.
 
 Only list origins you control: any page on a listed origin can call the endpoint if it also holds the Bearer token. Adding an origin does not bypass authentication, and removing the token from a URL (`--token` in shell history, or a token in a query string) matters more once a browser is involved. The 403 names the rejected origin, so a mismatch is quick to diagnose.
 
