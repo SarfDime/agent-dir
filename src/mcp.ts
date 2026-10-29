@@ -1302,6 +1302,13 @@ export interface ToolArgumentProblem {
 /** Keys shaped like a transport encoding wrapper, which Agent Dir does not accept anywhere. */
 const ENCODING_ARGUMENT = /base64|b64|encod/i;
 
+/**
+ * Keys shaped like the whole argument object wrapped into one string (`{"_raw": "{...}"}`).
+ * Deliberately narrow: a wrong key that is not one of these keeps the plain rejection, so the hint
+ * never costs bytes on an ordinary typo.
+ */
+const WRAPPED_ARGUMENTS = /^_?raw([_-]?arg(s|uments?))?$|^(args|arguments)[_-]?(json|raw)$/i;
+
 /** True when an event came from the named client, as `name` or `name@version`. */
 function matchesClient(event: TelemetryEnvelope, filter: string): boolean {
   const name = event.runtime?.mcpClientName?.toLowerCase();
@@ -1340,10 +1347,11 @@ export function validateToolArguments(
 ): ToolArgumentProblem | undefined {
   const label = path || "arguments";
   const unknownArgument = (key: string, names: string[]): ToolArgumentProblem => {
-    // A client that invented an encoding wrapper believes the tool takes base64; say otherwise in
-    // the text it actually reads, instead of only rejecting the key.
-    const hint =
-      toolName === "apply_changes" && ENCODING_ARGUMENT.test(key)
+    // A client that invented an encoding wrapper, or that wrapped the whole argument object into
+    // one string, is corrected in the text it actually reads instead of only being rejected.
+    const hint = WRAPPED_ARGUMENTS.test(key)
+      ? ' The whole argument object was sent as one string. Send the arguments themselves, for example {"changes": [...]}, not a wrapper key.'
+      : toolName === "apply_changes" && ENCODING_ARGUMENT.test(key)
         ? " apply_changes takes plain JSON; escape quotes and newlines in `content` and `patches` as normal JSON strings. There is no base64 option."
         : "";
     return argumentProblem(

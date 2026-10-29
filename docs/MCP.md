@@ -101,7 +101,7 @@ Arguments are validated against the advertised `inputSchema` before the tool run
 
 Rejections return a normal tool result with `isError: true` and a single JSON text block (`{"error": "..."}`) rather than a protocol error, so the calling agent sees the message and can correct the call in the same turn. Calling an unknown tool returns `isError` too, with close matches when there are any (`Unknown tool: read_rang. Closest tools: read_range.`).
 
-`apply_changes` does not accept an encoding wrapper. If a rejected argument name looks like one (`base64Args`, `args_b64`, `encoded`), the rejection says so explicitly: it takes plain JSON, and quotes and newlines in `content`/`patches` are escaped as normal JSON strings. The reason for a rejection is also recorded in telemetry as `errorReason`, with the argument key names, so a client that keeps retrying the same shape is visible without logging what it sent.
+`apply_changes` does not accept an encoding wrapper. If a rejected argument name looks like one (`base64Args`, `args_b64`, `encoded`), the rejection says so explicitly: it takes plain JSON, and quotes and newlines in `content`/`patches` are escaped as normal JSON strings. A rejected name that looks like the **whole argument object** wrapped into one string (`_raw`, `rawArgs`, `argumentsJson`) gets the other correction: send the arguments themselves, not a wrapper key. Both hints fire only on those shapes, so an ordinary misspelling still gets the short message. The reason for a rejection is also recorded in telemetry as `errorReason`, with the argument key names, so a client that keeps retrying the same shape is visible without logging what it sent.
 
 ### Batch results
 

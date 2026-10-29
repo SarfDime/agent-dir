@@ -445,6 +445,32 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
     assert.match(base64Text, /There is no base64 option/);
     assert.match(base64Text, /escape quotes and newlines/);
 
+    // A whole-argument wrapper gets its own hint, and it is not the base64 advice.
+    const wrapped = await call(6, "apply_changes", { _raw: '{"dryRun":true,"changes":[]}' });
+    const wrappedText = String(
+      (
+        ((await wrapped.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(wrappedText, /Unknown argument '_raw'/);
+    assert.match(wrappedText, /whole argument object was sent as one string/);
+    assert.match(wrappedText, /not a wrapper key/);
+    assert.equal(/base64 option/.test(wrappedText), false);
+
+    // An ordinary typo still gets the plain message, with no hint bytes attached.
+    const typo = await call(7, "apply_changes", { changez: [] });
+    const typoText = String(
+      (
+        ((await typo.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(typoText, /Unknown argument 'changez'/);
+    assert.equal(/wrapper key|base64 option/.test(typoText), false);
+
     const typed = await call(2, "apply_changes", { changes: "not-an-array" });
     assert.equal(((await typed.json()) as { result: { isError: boolean } }).result.isError, true);
 
@@ -475,6 +501,8 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
     );
     assert.deepEqual(reasons, [
       "unknown_argument",
+      "unknown_argument",
+      "unknown_argument",
       "type_mismatch",
       "missing_required",
       "enum_mismatch",
@@ -492,6 +520,8 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
         // An invented key is recorded by name: it is the diagnostic signal, and the sanitizer
         // already drops anything that is not identifier-shaped.
         ["base64Args"],
+        ["_raw"],
+        ["changez"],
         ["changes"],
         undefined,
         ["level"],
