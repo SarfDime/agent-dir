@@ -4,8 +4,6 @@ import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
-import type { SerenaTool } from "./serena.js";
-import { SerenaIntegration } from "./serena.js";
 import { summarizeTelemetry } from "./telemetry/aggregate.js";
 import {
   fingerprintInput,
@@ -15,7 +13,6 @@ import {
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { readTelemetryEvents } from "./telemetry/storage.js";
 import type { TelemetryConfig, TelemetryLevel } from "./telemetry/types.js";
-import { isAstGrepAvailable, runAstGrep } from "./tools/astgrep.js";
 import { type BatchOnError, runBatch } from "./tools/batch.js";
 import { findFiles, findReferences, findSymbol, searchCode } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
@@ -78,12 +75,14 @@ interface JsonRpcRequest {
   method: string;
   params?: Record<string, unknown>;
 }
+// Tool definitions are paid for on every model request, so a definition carries only what an
+// agent needs to choose and call the tool: no human-facing `title`, no output schema. Results are
+// returned as one text block (see `toolResult`), so an output schema would describe nothing the
+// model can see.
 interface ToolDefinition {
   name: string;
-  title: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  outputSchema: Record<string, unknown>;
   annotations?: Record<string, unknown>;
 }
 
@@ -97,67 +96,6 @@ const objectOutput = (
   properties,
   ...(required.length ? { required } : {}),
 });
-const arrayOutput = (items: Record<string, unknown>): Record<string, unknown> => ({
-  type: "array",
-  items,
-});
-const searchMatchSchema = objectOutput(
-  {
-    path: stringSchema,
-    line: { type: "integer" },
-    column: { type: "integer" },
-    text: stringSchema,
-    before: arrayOutput(stringSchema),
-    after: arrayOutput(stringSchema),
-  },
-  ["path", "line", "column", "text"],
-);
-const searchEnvelope = (item: Record<string, unknown>): Record<string, unknown> =>
-  objectOutput(
-    {
-      items: arrayOutput(item),
-      returned: { type: "integer" },
-      truncated: { type: "boolean" },
-      truncationReason: { type: "string", enum: ["maxResults", "maxBytes"] },
-      backend: { type: "string", enum: ["ripgrep", "builtin"] },
-      incomplete: { type: "boolean" },
-      notes: arrayOutput(stringSchema),
-    },
-    ["items", "returned", "truncated", "backend"],
-  );
-const batchItemSchema = objectOutput(
-  {
-    index: { type: "integer" },
-    command: { type: "string" },
-    status: { type: "string", enum: ["success", "failure", "skipped"] },
-    reason: { type: "string" },
-    ran: { type: "boolean" },
-    exitCode: { type: "integer" },
-    durationMs: { type: "number" },
-    stdout: { type: "string" },
-    stderr: { type: "string" },
-    outputTruncated: { type: "boolean" },
-  },
-  ["index", "command", "status", "ran"],
-);
-const batchResultSchema = objectOutput(
-  {
-    ok: { type: "boolean" },
-    onError: { type: "string", enum: ["continue", "stop"] },
-    summary: objectOutput(
-      {
-        total: { type: "integer" },
-        success: { type: "integer" },
-        failure: { type: "integer" },
-        skipped: { type: "integer" },
-      },
-      ["total", "success", "failure", "skipped"],
-    ),
-    items: arrayOutput(batchItemSchema),
-    truncated: { type: "boolean" },
-  },
-  ["ok", "onError", "summary", "items", "truncated"],
-);
 const timeoutMsSchema = {
   type: "integer",
   minimum: 1000,
@@ -180,23 +118,7 @@ const codeGraphTool: ToolDefinition = tool(
     maxFiles: { type: "integer", minimum: 1, maximum: 100, default: 10 },
     maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
   },
-  { type: "object" },
   ["query"],
-);
-
-const astGrepTool: ToolDefinition = tool(
-  "ast_grep_search",
-  "Search code structurally using ast-grep patterns rather than plain text. Use for syntax-aware matching; prefer codegraph_explore for call/data flow and impact analysis, and search_code for exact text or regex.",
-  {
-    pattern: { type: "string", minLength: 1, maxLength: 2000 },
-    lang: { type: "string", maxLength: 32 },
-    globs: { type: "array", items: stringSchema, maxItems: 20 },
-    context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
-    maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
-    maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
-  },
-  { type: "object", additionalProperties: true },
-  ["pattern"],
 );
 
 const baseTools: ToolDefinition[] = [
@@ -223,20 +145,6 @@ const baseTools: ToolDefinition[] = [
         default: READ_RANGE_DEFAULT_BYTES,
       },
     },
-    objectOutput(
-      {
-        path: stringSchema,
-        startLine: { type: "integer" },
-        endLine: { type: "integer" },
-        content: stringSchema,
-        truncated: { type: "boolean" },
-        eof: { type: "boolean" },
-        totalLines: { type: "integer" },
-        nextStartLine: { type: "integer" },
-        items: arrayOutput({ type: "object" }),
-      },
-      [],
-    ),
     ["path"],
   ),
   tool(
@@ -271,23 +179,6 @@ const baseTools: ToolDefinition[] = [
         },
       },
     },
-    objectOutput(
-      {
-        items: arrayOutput(
-          objectOutput(
-            {
-              kind: { type: "string", enum: ["write", "patch", "delete"] },
-              path: stringSchema,
-              changed: { type: "boolean" },
-              dryRun: { type: "boolean" },
-            },
-            ["kind", "path", "changed"],
-          ),
-        ),
-        dryRun: { type: "boolean" },
-      },
-      ["items", "dryRun"],
-    ),
     ["changes"],
   ),
   tool(
@@ -298,10 +189,6 @@ const baseTools: ToolDefinition[] = [
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    objectOutput({ items: arrayOutput(stringSchema), truncated: { type: "boolean" } }, [
-      "items",
-      "truncated",
-    ]),
     ["pattern"],
   ),
   tool(
@@ -325,42 +212,36 @@ const baseTools: ToolDefinition[] = [
           "Include globs such as *.ts, or exclude globs prefixed with ! such as !**/*.test.ts.",
       },
       context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
+      multiline: {
+        type: "boolean",
+        default: false,
+        description:
+          "Let the pattern span lines; with regex, '.' then also matches newlines. Works with both backends.",
+      },
       includeGenerated: { type: "boolean", default: false },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    searchEnvelope(searchMatchSchema),
     ["query"],
   ),
   tool(
     "find_symbol",
-    "Find likely definitions of a symbol by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Heuristic and case-sensitive; prefer serena_find_symbol or ast_grep_search when available. Returns {items, returned, truncated, backend}. Use read_range for context and find_references to trace usage.",
+    "Find likely definitions of a symbol by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Heuristic and case-sensitive. Returns {items, returned, truncated, backend}. Use read_range for context and find_references to trace usage.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    searchEnvelope(
-      objectOutput(
-        {
-          ...(searchMatchSchema.properties as Record<string, unknown>),
-          symbol: stringSchema,
-          kind: stringSchema,
-        },
-        ["path", "line", "column", "text", "symbol", "kind"],
-      ),
-    ),
     ["symbol"],
   ),
   tool(
     "find_references",
-    "Find whole-identifier occurrences of a symbol (case-sensitive text matching). This is lexical: it includes comments, strings and unrelated same-named identifiers; use serena_find_referencing_symbols for semantic references when available. Returns {items, returned, truncated, backend}.",
+    "Find whole-identifier occurrences of a symbol (case-sensitive text matching). This is lexical: it includes comments, strings and unrelated same-named identifiers. Returns {items, returned, truncated, backend}.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    searchEnvelope(searchMatchSchema),
     ["symbol"],
   ),
   tool(
@@ -369,7 +250,6 @@ const baseTools: ToolDefinition[] = [
     {
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    { type: "object", additionalProperties: true },
   ),
   tool(
     "validate",
@@ -381,15 +261,10 @@ const baseTools: ToolDefinition[] = [
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    { type: "object", additionalProperties: true },
   ),
-  tool(
-    "file_info",
-    "Return filesystem metadata for a project path.",
-    { path: pathSchema },
-    { type: "object", additionalProperties: true },
-    ["path"],
-  ),
+  tool("file_info", "Return filesystem metadata for a project path.", { path: pathSchema }, [
+    "path",
+  ]),
   tool(
     "run_package_scripts_batch",
     "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
@@ -414,7 +289,6 @@ const baseTools: ToolDefinition[] = [
       timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    batchResultSchema,
     ["scripts"],
   ),
   tool(
@@ -443,7 +317,6 @@ const baseTools: ToolDefinition[] = [
       timeoutMs: timeoutMsSchema,
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
-    batchResultSchema,
     ["commands"],
   ),
 ];
@@ -452,12 +325,10 @@ function tool(
   name: string,
   description: string,
   properties: Record<string, unknown>,
-  outputSchema: Record<string, unknown>,
   required: string[] = [],
 ): ToolDefinition {
   return {
     name,
-    title: name.replace(/_/g, " "),
     description,
     inputSchema: {
       type: "object",
@@ -465,7 +336,6 @@ function tool(
       ...(required.length ? { required } : {}),
       additionalProperties: false,
     },
-    outputSchema,
   };
 }
 
@@ -480,11 +350,9 @@ export function createMcpHandler(
   commandConfig: CommandConfig = {},
   telemetry: TelemetryConfig = { level: "none" },
   codeGraphIntegration?: CodeGraphIntegration,
-  serenaIntegration?: SerenaIntegration,
   analyticsEnabled = false,
 ): McpHandler {
   const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
-  const serena = serenaIntegration ?? new SerenaIntegration(root);
   const telemetryRecorder = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -526,10 +394,17 @@ export function createMcpHandler(
   let cachedTools: { expiresAt: number; value: ToolDefinition[] } | undefined;
   const getAvailableTools = async () => {
     if (cachedTools && cachedTools.expiresAt > Date.now()) return cachedTools.value;
-    const value = await availableTools(codeGraph, serena, analyticsEnabled);
+    const value = await availableTools(codeGraph, analyticsEnabled, commandConfig.tools);
     cachedTools = { expiresAt: Date.now() + DISCOVERY_CACHE_TTL_MS, value };
     return value;
   };
+  // When an integration appears, fails or recovers, refresh the cached tool list and tell
+  // subscribed clients so they never rely on a stale list.
+  const refreshTools = (): void => {
+    cachedTools = undefined;
+    notify({ type: "tools" });
+  };
+  codeGraph.onChange = refreshTools;
   const telemetryProjectPromise =
     telemetry.level === "detailed" || telemetry.level === "diagnostic"
       ? buildTelemetryProjectContext(root, codeGraph).catch(() => undefined)
@@ -594,6 +469,7 @@ export function createMcpHandler(
     let mcpSuccess = false;
     let runtime: import("./telemetry/types.js").TelemetryRuntimeContext | undefined;
     let telemetryRequestErrorCategory: string | undefined;
+    let toolListMetrics: { toolCount: number; toolSetHash: string } | undefined;
     const recordMcpRequest = (method = message?.method ?? "unknown") => {
       telemetryRecorder.record(
         {
@@ -606,6 +482,7 @@ export function createMcpHandler(
           ...(telemetryRequestErrorCategory
             ? { errorCategory: telemetryRequestErrorCategory }
             : {}),
+          ...(toolListMetrics ?? {}),
         },
         runtime,
         telemetryProject,
@@ -671,6 +548,14 @@ export function createMcpHandler(
         ? requestedVersion
         : LEGACY_PROTOCOL_VERSION;
       mcpSuccess = true;
+      const initializeCapability = capabilityModel({
+        tools: (await getAvailableTools()).map((item) => item.name),
+        codeGraph: await codeGraph.capability(),
+        analyticsEnabled,
+        allowedScripts,
+        allowedCommands,
+        blacklistedCommands,
+      });
       const initializeResponse = trackedJson({
         jsonrpc: "2.0",
         id: message.id,
@@ -679,13 +564,7 @@ export function createMcpHandler(
           // Only capabilities that are implemented for the legacy handshake.
           capabilities: { tools: {}, resources: {} },
           serverInfo: SERVER_INFO,
-          instructions: buildAgentInstructions(
-            allowedScripts,
-            allowedCommands,
-            blacklistedCommands,
-            await codeGraph.capability(),
-            analyticsEnabled,
-          ),
+          instructions: initializeCapability.instructions,
         },
       });
       recordMcpRequest();
@@ -725,26 +604,43 @@ export function createMcpHandler(
           return trackedJson({ jsonrpc: "2.0", id: message.id, result: {} });
         case "server/discover":
           mcpSuccess = true;
-          return trackedJson({
-            jsonrpc: "2.0",
-            id: message.id,
-            result: {
-              resultType: "complete",
-              supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
-              capabilities: capabilities(),
-              _meta: SERVER_INFO_META,
-              instructions: buildDiscoveryInstructions(
-                allowedScripts,
-                allowedCommands,
-                await codeGraph.capability(),
-              ),
+          {
+            const model = capabilityModel({
+              tools: (await getAvailableTools()).map((item) => item.name),
               codeGraph: await codeGraph.capability(),
-              ttlMs: DISCOVERY_CACHE_TTL_MS,
-              cacheScope: "private",
-            },
-          });
+              analyticsEnabled,
+              allowedScripts,
+              allowedCommands,
+              blacklistedCommands,
+            });
+            return trackedJson({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                resultType: "complete",
+                supportedVersions: SUPPORTED_PROTOCOL_VERSIONS,
+                capabilities: capabilities(),
+                _meta: SERVER_INFO_META,
+                instructions: model.instructions,
+                capabilityModel: model.document,
+                codeGraph: model.document.integrations.codegraph,
+                ttlMs: DISCOVERY_CACHE_TTL_MS,
+                cacheScope: "private",
+              },
+            });
+          }
         case "tools/list": {
-          const page = paginate(await getAvailableTools(), params.cursor);
+          const available = await getAvailableTools();
+          const page = paginate(available, params.cursor);
+          toolListMetrics = {
+            toolCount: available.length,
+            toolSetHash: telemetryHash(
+              available
+                .map((item) => item.name)
+                .sort()
+                .join(","),
+            ),
+          };
           mcpSuccess = true;
           return trackedJson({
             jsonrpc: "2.0",
@@ -799,7 +695,17 @@ export function createMcpHandler(
           const toolDefinition = (await getAvailableTools()).find((item) => item.name === toolName);
           if (!toolDefinition) {
             recordRejectedToolCall("unknown", "unknown_tool", params.arguments);
-            throw new Error(`Unknown tool: ${toolName}`);
+            const available = (await getAvailableTools()).map((item) => item.name);
+            const suggestions = nearestNames(String(toolName), available);
+            throw new Error(
+              isToolDisabled(String(toolName), commandConfig.tools)
+                ? `Tool '${toolName}' is disabled by this profile.`
+                : `Unknown tool: ${toolName}.${
+                    suggestions.length
+                      ? ` Closest tools: ${suggestions.join(", ")}.`
+                      : ` Available tools: ${available.join(", ")}.`
+                  }`,
+            );
           }
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
@@ -822,10 +728,28 @@ export function createMcpHandler(
             recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
             return jsonRpcError(message.id ?? null, -32020, headerError, 400);
           }
+          const argumentError = validateToolArguments(toolDefinition.inputSchema, argumentsValue);
+          if (argumentError) {
+            // Agent-friendly rejection: the caller sees the message and can correct the call,
+            // which is what `isError` is for; a protocol error would end the turn instead.
+            telemetryRequestErrorCategory = "invalid_input";
+            recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
+            mcpSuccess = true;
+            return trackedJson({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                resultType: "complete",
+                isError: true,
+                content: [{ type: "text", text: JSON.stringify({ error: argumentError }) }],
+                _meta: SERVER_INFO_META,
+              },
+            });
+          }
           sessionToolCallCount += 1;
           const startedAt = performance.now();
           try {
-            const result = await callTool(
+            const output = await callTool(
               toolName,
               argumentsValue,
               root,
@@ -839,11 +763,11 @@ export function createMcpHandler(
               notify,
               request.signal,
               codeGraph,
-              serena,
               analyticsEnabled,
             );
+            const result = toolResult(output.payload, output.text);
             const durationMs = performance.now() - startedAt;
-            const count = resultCount(result);
+            const count = resultCount(output.payload);
             const serializedResult = JSON.stringify(result);
             const outputBytes = Buffer.byteLength(serializedResult, "utf8");
             const estimatedOutputTokens = estimateTokens(serializedResult);
@@ -854,14 +778,14 @@ export function createMcpHandler(
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
             );
-            const metrics = toolTelemetryMetrics(toolName, result, seenOutputFingerprints);
-            const outcome = toolOutcome(result, count, metrics.truncated === true);
+            const metrics = toolTelemetryMetrics(toolName, output.payload, seenOutputFingerprints);
+            const outcome = toolOutcome(count, metrics.truncated === true);
             telemetryRecorder.record(
               {
                 event: "tool_call",
                 tool: toolName,
                 requestIdHash: telemetryHash(String(message.id)),
-                success: result.isError !== true,
+                success: true,
                 outcome,
                 durationMs,
                 inputBytes: Buffer.byteLength(JSON.stringify(argumentsValue), "utf8"),
@@ -990,6 +914,14 @@ export function createMcpHandler(
             );
           if (params.uri === INSTRUCTIONS_URI) {
             mcpSuccess = true;
+            const model = capabilityModel({
+              tools: (await getAvailableTools()).map((item) => item.name),
+              codeGraph: await codeGraph.capability(),
+              analyticsEnabled,
+              allowedScripts,
+              allowedCommands,
+              blacklistedCommands,
+            });
             return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
@@ -1000,9 +932,7 @@ export function createMcpHandler(
                     uri: INSTRUCTIONS_URI,
                     mimeType: "text/markdown",
                     text: buildAgentInstructions(
-                      allowedScripts,
-                      allowedCommands,
-                      blacklistedCommands,
+                      model.document,
                       await codeGraph.capability(),
                       analyticsEnabled,
                     ),
@@ -1016,6 +946,14 @@ export function createMcpHandler(
           }
           if (params.uri === CAPABILITIES_URI) {
             mcpSuccess = true;
+            const model = capabilityModel({
+              tools: (await getAvailableTools()).map((item) => item.name),
+              codeGraph: await codeGraph.capability(),
+              analyticsEnabled,
+              allowedScripts,
+              allowedCommands,
+              blacklistedCommands,
+            });
             return trackedJson({
               jsonrpc: "2.0",
               id: message.id,
@@ -1025,17 +963,7 @@ export function createMcpHandler(
                   {
                     uri: CAPABILITIES_URI,
                     mimeType: "application/json",
-                    text: JSON.stringify(
-                      buildAgentCapabilities(
-                        allowedScripts,
-                        allowedCommands,
-                        blacklistedCommands,
-                        await codeGraph.capability(),
-                        analyticsEnabled,
-                      ),
-                      null,
-                      2,
-                    ),
+                    text: JSON.stringify(model.document, null, 2),
                   },
                 ],
                 ttlMs: 0,
@@ -1143,9 +1071,13 @@ export function createMcpHandler(
               resultType: "complete",
               isError: true,
               content: [
-                { type: "text", text: error instanceof Error ? error.message : String(error) },
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    error: error instanceof Error ? error.message : String(error),
+                  }),
+                },
               ],
-              structuredContent: { error: error instanceof Error ? error.message : String(error) },
               _meta: SERVER_INFO_META,
             },
           },
@@ -1193,32 +1125,203 @@ export function createMcpHandler(
     }
     subscriptions.clear();
     void codeGraph.close();
-    void serena.close();
   };
 
   return handler;
 }
 
+/** Hints for clients (never a security control): which tools only read, and which may change things. */
+const READ_ONLY_TOOLS = new Set([
+  "project_context",
+  "file_info",
+  "read_range",
+  "find_files",
+  "search_code",
+  "find_symbol",
+  "find_references",
+  "codegraph_explore",
+  "telemetry_analytics",
+]);
+
+export function toolAnnotations(name: string): Record<string, unknown> {
+  if (READ_ONLY_TOOLS.has(name)) return { readOnlyHint: true, openWorldHint: false };
+  if (name === "apply_changes")
+    return {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    };
+  // validate, run_command_batch and run_package_scripts_batch run programs that may touch anything.
+  return { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
+}
+
+/** Plain Levenshtein distance, used only to suggest a tool name to a confused agent. */
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    let diagonal = previous[0] ?? 0;
+    previous[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const above = previous[j] ?? 0;
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      previous[j] = Math.min((previous[j] ?? 0) + 1, (previous[j - 1] ?? 0) + 1, diagonal + cost);
+      diagonal = above;
+    }
+  }
+  return previous[right.length] ?? right.length;
+}
+
+/** Up to three advertised tool names closest to a mistyped one. */
+export function nearestNames(name: string, available: string[], limit = 3): string[] {
+  const needle = name.toLowerCase();
+  const threshold = Math.max(2, Math.floor(needle.length / 3));
+  return available
+    .map((candidate) => ({
+      candidate,
+      distance: editDistance(needle, candidate.toLowerCase()),
+    }))
+    .filter((entry) => entry.distance <= threshold)
+    .sort((a, b) => a.distance - b.distance || a.candidate.localeCompare(b.candidate))
+    .slice(0, limit)
+    .map((entry) => entry.candidate);
+}
+
+type ArgumentSchema = Record<string, unknown>;
+
+function typeMatches(type: unknown, value: unknown): boolean {
+  switch (type) {
+    case "string":
+      return typeof value === "string";
+    case "integer":
+      return typeof value === "number" && Number.isInteger(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "boolean":
+      return typeof value === "boolean";
+    case "array":
+      return Array.isArray(value);
+    case "object":
+      return isRecord(value);
+    default:
+      return true;
+  }
+}
+
+/**
+ * Validates tool arguments against the advertised `inputSchema` before dispatch, so a bad call
+ * fails with a message naming the argument instead of a coercion artefact inside a tool.
+ */
+export function validateToolArguments(
+  schema: ArgumentSchema,
+  value: unknown,
+  path = "",
+): string | undefined {
+  const label = path || "arguments";
+  if (Array.isArray(schema.anyOf)) {
+    const errors = schema.anyOf.map((branch) =>
+      isRecord(branch) ? validateToolArguments(branch, value, path) : undefined,
+    );
+    if (errors.some((error) => error === undefined)) return undefined;
+    return (
+      errors.find((error) => error !== undefined) ?? `${label} does not match any allowed shape.`
+    );
+  }
+  if (schema.type !== undefined && !typeMatches(schema.type, value))
+    return `'${label}' must be ${schema.type === "integer" ? "an integer" : `a ${String(schema.type)}`}.`;
+  if (Array.isArray(schema.enum) && !schema.enum.includes(value))
+    return `'${label}' must be one of ${schema.enum.map(String).join(", ")}.`;
+
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.trim().length < schema.minLength)
+      return `'${label}' must be at least ${schema.minLength} characters.`;
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength)
+      return `'${label}' must be at most ${schema.maxLength} characters.`;
+    return undefined;
+  }
+
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum)
+      return `'${label}' must be at least ${schema.minimum}.`;
+    if (typeof schema.maximum === "number" && value > schema.maximum)
+      return `'${label}' must be at most ${schema.maximum}.`;
+    return undefined;
+  }
+
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems)
+      return `'${label}' needs at least ${schema.minItems} item(s).`;
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems)
+      return `'${label}' accepts at most ${schema.maxItems} item(s).`;
+    if (isRecord(schema.items))
+      for (const [index, entry] of value.entries()) {
+        const error = validateToolArguments(schema.items, entry, `${label}[${index}]`);
+        if (error) return error;
+      }
+    return undefined;
+  }
+
+  if (isRecord(value)) {
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const names = Object.keys(properties);
+    for (const required of Array.isArray(schema.required) ? schema.required : []) {
+      if (!(String(required) in value)) return `'${label}.${String(required)}' is required.`;
+    }
+    for (const [key, entry] of Object.entries(value)) {
+      const property = properties[key];
+      if (!isRecord(property)) {
+        if (schema.additionalProperties === false)
+          return names.length
+            ? `Unknown argument '${key}'. Valid arguments: ${names.join(", ")}.`
+            : `Unknown argument '${key}'. This tool takes no arguments.`;
+        continue;
+      }
+      const error = validateToolArguments(property, entry, path ? `${label}.${key}` : key);
+      if (error) return error;
+    }
+  }
+  return undefined;
+}
+
+/** True when the profile's tool selection removes this tool. */
+export function isToolDisabled(name: string, selection: CommandConfig["tools"]): boolean {
+  if (selection?.disabled?.includes(name)) return true;
+  const sets = new Set(selection?.disabledSets ?? []);
+  if (sets.has("codegraph") && name === "codegraph_explore") return true;
+  if (sets.has("analytics") && name === "telemetry_analytics") return true;
+  if (sets.has("filesystem") && ["read_range", "find_files", "file_info"].includes(name))
+    return true;
+  if (
+    sets.has("search") &&
+    ["search_code", "find_symbol", "find_references", "codegraph_explore"].includes(name)
+  )
+    return true;
+  if (sets.has("commands") && ["run_command_batch", "run_package_scripts_batch"].includes(name))
+    return true;
+  return false;
+}
+
 async function availableTools(
   codeGraph: CodeGraphIntegration,
-  serena: SerenaIntegration,
   analyticsEnabled = false,
+  selection: CommandConfig["tools"] = undefined,
 ): Promise<ToolDefinition[]> {
-  const capability = await codeGraph.capability();
-  const codeGraphTools =
-    capability.status === "available" ||
-    capability.status === "startup_failed" ||
-    capability.status === "runtime_failed"
-      ? [codeGraphTool]
-      : [];
-  const serenaTools = await serena.prepare();
-  return [
+  const disabled = new Set(selection?.disabled ?? []);
+  const disabledSets = new Set(selection?.disabledSets ?? []);
+  const isDisabled = (name: string): boolean => isToolDisabled(name, selection);
+  const capability =
+    !disabledSets.has("codegraph") && !disabled.has("codegraph_explore")
+      ? await codeGraph.capability()
+      : undefined;
+  const codeGraphTools = capability?.status === "available" ? [codeGraphTool] : [];
+  const candidates = [
     ...baseTools,
-    ...(isAstGrepAvailable() ? [astGrepTool] : []),
     ...codeGraphTools,
-    ...serenaTools.map(serenaToolDefinition),
     ...(analyticsEnabled ? [telemetryAnalyticsTool] : []),
   ];
+  return candidates
+    .filter((item) => !isDisabled(item.name))
+    .map((item) => ({ ...item, annotations: toolAnnotations(item.name) }));
 }
 
 const telemetryAnalyticsTool: ToolDefinition = tool(
@@ -1233,115 +1336,149 @@ const telemetryAnalyticsTool: ToolDefinition = tool(
     limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
     maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
   },
-  { type: "object", additionalProperties: true },
 );
 
-function serenaToolDefinition(item: SerenaTool): ToolDefinition {
-  return {
-    name: `serena_${item.name}`,
-    title: `Serena: ${item.title}`,
-    description: item.description,
-    inputSchema: item.inputSchema,
-    outputSchema: item.outputSchema ?? { type: "object", additionalProperties: true },
+interface CapabilityDocument {
+  version: string;
+  tools: string[];
+  resources: string[];
+  integrations: {
+    codegraph: { status: string; detail?: string; tools: string[] };
+  };
+  execution: {
+    allowedScripts: string[];
+    commands: string[];
+    blacklistedCommands: string[];
+  };
+  efficiency: {
+    preferred: Record<string, unknown>;
+    avoid: string[];
   };
 }
 
-function buildDiscoveryInstructions(
-  allowedScripts: string[],
-  allowedCommands: string[],
-  codeGraph: CodeGraphCapability,
-): string {
-  const scripts = allowedScripts.length ? allowedScripts.join(", ") : "none";
-  const commands = allowedCommands.length ? allowedCommands.join(", ") : "none";
-  const graph =
-    codeGraph.status === "available"
-      ? " For non-trivial code understanding, call codegraph_explore first for behavior, call/data flow, symbol relationships, or change impact; avoid duplicating results with grep/read loops."
-      : "";
-  const structuralSearch = isAstGrepAvailable()
-    ? " Use ast_grep_search for syntax-aware structural pattern matching; use search_code for exact text and codegraph_explore for call/data flow."
-    : "";
-  return `Use Agent Dir as the primary project interface. Minimize calls and output. Start with project_context; use find_files/search_code/find_symbol/find_references for targeted discovery, read_range for bounded context, and apply_changes for atomic edits. Use validate for diagnostics and allowed package scripts; use run_command_batch for allowlisted commands, including Git when allowed.${graph}${structuralSearch} Batch related operations. Avoid recursive listings, whole-file reads, full diffs, and repeated discovery. Allowed package scripts: ${scripts}. Allowed commands: ${commands}.`;
+interface CapabilityModel {
+  document: CapabilityDocument;
+  instructions: string;
 }
 
+const INLINE_LIST_LIMIT = 12;
+
+function inlineList(items: string[]): string {
+  if (items.length === 0) return "none";
+  if (items.length <= INLINE_LIST_LIMIT) return items.join(", ");
+  return `${items.slice(0, INLINE_LIST_LIMIT).join(", ")} and ${items.length - INLINE_LIST_LIMIT} more`;
+}
+
+function bulletList(items: string[]): string {
+  return items.length ? items.map((item) => `- ${item}`).join("\n") : "- none";
+}
+
+/** Preferred workflow and anti-patterns, shared by every capability surface. */
+function efficiencyModel(
+  codeGraphAvailable: boolean,
+  analyticsEnabled: boolean,
+): CapabilityDocument["efficiency"] {
+  return {
+    preferred: {
+      orientation: "project_context",
+      ...(codeGraphAvailable ? { structuralAnalysis: "codegraph_explore" } : {}),
+      focusedReading: "read_range",
+      discovery: ["find_files", "search_code"],
+      symbolNavigation: ["find_symbol", "find_references"],
+      reading: ["read_range"],
+      editing: ["apply_changes"],
+      validation: ["validate", "targeted package script"],
+      ...(analyticsEnabled ? { telemetryAnalytics: "telemetry_analytics" } : {}),
+    },
+    avoid: [
+      "recursive discovery when targeted search is enough",
+      "whole-file reads when a line range is enough",
+      "full-repository diffs when a path-scoped diff is enough",
+      "expensive validation when a targeted check answers the question",
+      "generic command execution when a dedicated Agent Dir tool exists, except allowlisted Git operations",
+      ...(codeGraphAvailable
+        ? ["repeated grep/read loops for structural questions already answered by CodeGraph"]
+        : []),
+    ],
+  };
+}
+
+/** The short guidance every client gets; long-form details live in the instructions resource. */
+function capabilityInstructions(document: CapabilityDocument): string {
+  const graphAvailable = document.integrations.codegraph.status === "available";
+  return `Use Agent Dir as the primary project interface: fewest calls, smallest output.
+
+- Orient, package, policy: project_context
+- Find files: find_files. Find text or regex: search_code
+- Definitions and usages: find_symbol, find_references${graphAvailable ? "\n- Behaviour, call flow, impact: codegraph_explore" : ""}
+- Read: read_range. Edit: apply_changes. Check: validate, then a targeted script
+- Scripts: run_package_scripts_batch. Commands: run_command_batch
+
+Search before reading, read only the range you need, batch related calls, and never repeat a discovery that already answered the question.
+
+Allowed scripts: ${inlineList(document.execution.allowedScripts)}
+Allowed commands: ${inlineList(document.execution.commands)}
+Blocked prefixes: ${inlineList(document.execution.blacklistedCommands)}`;
+}
+
+/**
+ * One capability model. `initialize`, `server/discover`, the `agent-dir://capabilities` resource
+ * and `project_context` all render it, so the four surfaces cannot disagree.
+ */
+function capabilityModel(input: {
+  tools: string[];
+  codeGraph: CodeGraphCapability;
+  analyticsEnabled: boolean;
+  allowedScripts: string[];
+  allowedCommands: string[];
+  blacklistedCommands: string[];
+}): CapabilityModel {
+  const graphAvailable = input.codeGraph.status === "available";
+  const document: CapabilityDocument = {
+    version: packageVersion,
+    tools: [...input.tools],
+    resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
+    integrations: {
+      codegraph: {
+        status: input.codeGraph.status,
+        ...(input.codeGraph.detail ? { detail: input.codeGraph.detail } : {}),
+        tools: graphAvailable ? ["codegraph_explore"] : [],
+      },
+    },
+    execution: {
+      allowedScripts: [...input.allowedScripts],
+      commands: [...input.allowedCommands],
+      blacklistedCommands: [...input.blacklistedCommands],
+    },
+    efficiency: efficiencyModel(graphAvailable, input.analyticsEnabled),
+  };
+  return { document, instructions: capabilityInstructions(document) };
+}
+
+/** Long-form instructions served from the `agent-dir://instructions` resource. */
 function buildAgentInstructions(
-  allowedScripts: string[],
-  allowedCommands: string[],
-  blacklistedCommands: string[],
+  document: CapabilityDocument,
   codeGraph: CodeGraphCapability,
   analyticsEnabled = false,
 ): string {
-  const scripts = allowedScripts.length
-    ? allowedScripts.map((item) => `- ${item}`).join("\n")
-    : "- none";
-  const commands = allowedCommands.length
-    ? allowedCommands.map((item) => `- ${item}`).join("\n")
-    : "- none";
-  const blacklist = blacklistedCommands.length
-    ? blacklistedCommands.map((item) => `- ${item}`).join("\n")
-    : "- none";
+  const scripts = bulletList(document.execution.allowedScripts);
+  const commands = bulletList(document.execution.commands);
+  const blacklist = bulletList(document.execution.blacklistedCommands);
   const codeGraphSection =
     codeGraph.status === "available" ||
     codeGraph.status === "startup_failed" ||
     codeGraph.status === "runtime_failed"
-      ? "\n\n## CodeGraph\n- CodeGraph is an optional code-intelligence backend for this project.\n- REQUIRED FIRST STEP for non-trivial code understanding: call `codegraph_explore` before grep/search/read loops to explain behavior, trace call/data flow, map symbol relationships, or assess change impact. - Treat returned source as already read; do not re-run searches without a concrete gap.\n- Agent Dir pins CodeGraph to this project root; do not attempt to select another project.\n- Current status: " +
+      ? "\n\n## CodeGraph\n- CodeGraph is an optional code-intelligence backend for this project.\n- For non-trivial code understanding, call `codegraph_explore` before grep/search/read loops to explain behavior, trace call/data flow, map symbol relationships, or assess change impact. - Treat returned source as already read; do not re-run searches without a concrete gap.\n- Agent Dir pins CodeGraph to this project root; do not attempt to select another project.\n- Current status: " +
         codeGraph.status +
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- For semantic navigation, use Serena tools first when available: serena_find_symbol for definitions and serena_find_referencing_symbols for callers/references; use supported Serena symbol-edit tools for targeted edits. If Serena returns no match or errors, verify the path/name and fall back to find_symbol/search_code.\n- Use ast_grep_search when syntax shape matters, not for literal text. Specify lang and narrow globs whenever possible; start with a small maxResults and expand only if needed.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with Serena and native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested package scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed package scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed package scripts:\n${scripts}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: Serena tools first when available; fall back to find_symbol/find_references/search_code on empty or failed results.\n- Structural syntax matching: ast_grep_search with explicit language and narrow globs.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted package script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
-}
-
-function buildAgentCapabilities(
-  allowedScripts: string[],
-  allowedCommands: string[],
-  blacklistedCommands: string[],
-  codeGraph: CodeGraphCapability,
-  analyticsEnabled = false,
-): Record<string, unknown> {
-  return {
-    version: packageVersion,
-    tools: [
-      ...baseTools.map((item) => item.name),
-      ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
-      ...(codeGraph.status === "available" ? ["codegraph_explore"] : []),
-      ...(analyticsEnabled ? ["telemetry_analytics"] : []),
-    ],
-    resources: [INSTRUCTIONS_URI, CAPABILITIES_URI],
-    execution: {
-      allowedScripts: [...allowedScripts],
-      commands: [...allowedCommands],
-      blacklistedCommands: [...blacklistedCommands],
-    },
-    efficiency: {
-      preferred: {
-        orientation: "project_context",
-        ...(codeGraph.status === "available" ? { structuralAnalysis: "codegraph_explore" } : {}),
-        ...(isAstGrepAvailable() ? { structuralSearch: "ast_grep_search" } : {}),
-        focusedReading: "read_range",
-        discovery: ["find_files", "search_code"],
-        symbolNavigation: ["find_symbol", "find_references"],
-        reading: ["read_range"],
-        editing: ["apply_changes"],
-        validation: ["validate", "targeted package script"],
-        ...(analyticsEnabled ? { telemetryAnalytics: "telemetry_analytics" } : {}),
-      },
-      avoid: [
-        "recursive discovery when targeted search is enough",
-        "whole-file reads when a line range is enough",
-        "full-repository diffs when a path-scoped diff is enough",
-        "expensive validation when a targeted check answers the question",
-        "generic command execution when a dedicated Agent Dir tool exists, except allowlisted Git operations",
-        ...(codeGraph.status === "available"
-          ? ["repeated grep/read loops for structural questions already answered by CodeGraph"]
-          : []),
-      ],
-    },
-  };
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested package scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed package scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed package scripts:\n${scripts}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: find_symbol, then find_references; fall back to search_code on empty or failed results.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted package script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function capabilities(): Record<string, unknown> {
   return {
-    tools: {},
+    tools: { listChanged: true },
     resources: { listChanged: true, subscribe: true },
     extensions: { "io.modelcontextprotocol/skills": { directoryRead: true } },
   };
@@ -1361,16 +1498,10 @@ async function callTool(
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
-  serena?: SerenaIntegration,
   analyticsEnabled = false,
-): Promise<Record<string, unknown>> {
-  let structuredContent: unknown;
+): Promise<ToolCallOutput> {
+  let payload: Record<string, unknown> = {};
   let contentText: string | undefined;
-  if (name.startsWith("serena_")) {
-    if (!serena) throw new Error("Serena integration is unavailable.");
-    const result = await serena.call(name.slice("serena_".length), args);
-    return boundCodeGraphResult(result, outputBytesArg(args.maxBytes));
-  }
   if (name === "codegraph_explore") {
     if (!codeGraph) throw new Error("CodeGraph integration is unavailable.");
     if (typeof args.query !== "string" || args.query.trim().length === 0)
@@ -1385,7 +1516,7 @@ async function callTool(
       args.query,
       args.maxFiles === undefined ? 10 : Number(args.maxFiles),
     );
-    return boundCodeGraphResult(result, maxBytes);
+    return { payload: boundCodeGraphResult(result, maxBytes) };
   }
   if (name === "telemetry_analytics") {
     if (!analyticsEnabled)
@@ -1523,25 +1654,9 @@ async function callTool(
         })),
       };
     }
-    return completeToolResult(fitAnalyticsResult(result, outputBytesArg(args.maxBytes)));
+    return { payload: fitAnalyticsResult(result, outputBytesArg(args.maxBytes)) };
   }
   switch (name) {
-    case "ast_grep_search": {
-      if (typeof args.pattern !== "string") throw new Error("pattern must be a string.");
-      structuredContent = await runAstGrep(
-        root,
-        {
-          pattern: args.pattern,
-          ...(typeof args.lang === "string" ? { lang: args.lang } : {}),
-          ...(Array.isArray(args.globs) ? { globs: args.globs as string[] } : {}),
-          ...(args.context === undefined ? {} : { context: Number(args.context) }),
-          ...(args.maxResults === undefined ? {} : { maxResults: Number(args.maxResults) }),
-          ...(args.maxBytes === undefined ? {} : { maxBytes: Number(args.maxBytes) }),
-        },
-        signal,
-      );
-      break;
-    }
     case "read_range": {
       const maxBytes = outputBytesArg(args.maxBytes, READ_RANGE_DEFAULT_BYTES);
       const filePath = String(args.path);
@@ -1563,7 +1678,7 @@ async function callTool(
           results.push(result);
           remaining -= Buffer.byteLength(result.content, "utf8") + 200;
         }
-        structuredContent = { items: results, truncated: results.some((item) => item.truncated) };
+        payload = { items: results, truncated: results.some((item) => item.truncated) };
         contentText = results.map(formatRangeText).join("\n\n");
       } else {
         if (args.startLine === undefined || args.endLine === undefined)
@@ -1575,7 +1690,7 @@ async function callTool(
           Number(args.endLine),
           Math.max(1, maxBytes - 256),
         );
-        structuredContent = result;
+        payload = { ...result };
         contentText = formatRangeText(result);
       }
       break;
@@ -1616,7 +1731,7 @@ async function callTool(
       const before = new Map<string, string[]>();
       for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
       const applied = await applyFileChanges(root, changes, dryRun, pathProtection);
-      structuredContent = {
+      payload = {
         items: applied.map((item) => {
           if (!isRecord(item)) return item;
           const { content: _content, previousContent: _previousContent, ...summary } = item;
@@ -1635,7 +1750,7 @@ async function callTool(
       const maxResults = numberArg(args.maxResults, 200, 1000);
       const found = await findFiles(root, String(args.pattern), maxResults);
       const bounded = boundedItems(found.files, outputBytesArg(args.maxBytes));
-      structuredContent = {
+      payload = {
         items: bounded.items,
         truncated: bounded.truncated || found.truncated,
       };
@@ -1644,29 +1759,36 @@ async function callTool(
     case "search_code": {
       const paths = optionalStringArray(args.paths, "paths", 20);
       const globs = optionalStringArray(args.globs, "globs", 20);
-      structuredContent = await searchCode(root, String(args.query), {
-        regex: args.regex === true,
-        caseSensitive: args.caseSensitive === true,
-        includeGenerated: args.includeGenerated === true,
-        context: intArg(args.context, 0, 0, 5, "context"),
-        maxResults: numberArg(args.maxResults, 200, 1000),
-        maxBytes: outputBytesArg(args.maxBytes),
-        ...(paths ? { paths } : {}),
-        ...(globs ? { globs } : {}),
-      });
+      payload = {
+        ...(await searchCode(root, String(args.query), {
+          regex: args.regex === true,
+          caseSensitive: args.caseSensitive === true,
+          includeGenerated: args.includeGenerated === true,
+          multiline: args.multiline === true,
+          context: intArg(args.context, 0, 0, 5, "context"),
+          maxResults: numberArg(args.maxResults, 200, 1000),
+          maxBytes: outputBytesArg(args.maxBytes),
+          ...(paths ? { paths } : {}),
+          ...(globs ? { globs } : {}),
+        })),
+      };
       break;
     }
     case "find_symbol":
-      structuredContent = await findSymbol(root, String(args.symbol), {
-        maxResults: numberArg(args.maxResults, 100, 500),
-        maxBytes: outputBytesArg(args.maxBytes),
-      });
+      payload = {
+        ...(await findSymbol(root, String(args.symbol), {
+          maxResults: numberArg(args.maxResults, 100, 500),
+          maxBytes: outputBytesArg(args.maxBytes),
+        })),
+      };
       break;
     case "find_references":
-      structuredContent = await findReferences(root, String(args.symbol), {
-        maxResults: numberArg(args.maxResults, 200, 1000),
-        maxBytes: outputBytesArg(args.maxBytes),
-      });
+      payload = {
+        ...(await findReferences(root, String(args.symbol), {
+          maxResults: numberArg(args.maxResults, 200, 1000),
+          maxBytes: outputBytesArg(args.maxBytes),
+        })),
+      };
       break;
     case "project_context": {
       const overview = await projectOverview(root);
@@ -1688,6 +1810,7 @@ async function callTool(
         // Package metadata is optional; project context remains useful without it.
       }
       const maxBytes = outputBytesArg(args.maxBytes);
+      const graphAvailable = (await codeGraph?.capability())?.status === "available";
       const bounded = truncateText(
         JSON.stringify({
           ...overview,
@@ -1697,11 +1820,12 @@ async function callTool(
             commands: [...allowedCommands],
             blacklistedCommands: [...blacklistedCommands],
           },
+          efficiency: efficiencyModel(graphAvailable, analyticsEnabled),
           search: detectSearchBackend(),
         }),
         Math.max(1, maxBytes - 128),
       );
-      structuredContent = bounded.truncated
+      payload = bounded.truncated
         ? { result: bounded.text, truncated: true }
         : JSON.parse(bounded.text);
       break;
@@ -1753,7 +1877,7 @@ async function callTool(
               },
             )
           : undefined;
-      structuredContent = {
+      payload = {
         level,
         ok: diagnosticsOk && (batch?.ok ?? true),
         diagnostics: {
@@ -1770,29 +1894,31 @@ async function callTool(
       break;
     }
     case "file_info":
-      structuredContent = await fileInfo(root, String(args.path));
+      payload = await fileInfo(root, String(args.path));
       break;
     case "run_package_scripts_batch": {
       const requested = scriptRequests(args.scripts);
       const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (requested.length > 10)
         throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
-      structuredContent = await runBatch(
-        requested.map(({ script, args: scriptArgs }) => ({
-          label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
-          preflight: async () =>
-            (await packageScriptProblem(root, script, allowedScripts)) ??
-            packageScriptArgsProblem(script, scriptArgs, argumentScripts),
-          execute: () =>
-            packageScriptCapture(root, script, {
-              timeoutMs,
-              packageManager,
-              ...(scriptArgs?.length ? { args: scriptArgs } : {}),
-              ...(signal ? { signal } : {}),
-            }),
-        })),
-        { onError: batchOnError(args.onError, "stop"), maxBytes: outputBytesArg(args.maxBytes) },
-      );
+      payload = {
+        ...(await runBatch(
+          requested.map(({ script, args: scriptArgs }) => ({
+            label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
+            preflight: async () =>
+              (await packageScriptProblem(root, script, allowedScripts)) ??
+              packageScriptArgsProblem(script, scriptArgs, argumentScripts),
+            execute: () =>
+              packageScriptCapture(root, script, {
+                timeoutMs,
+                packageManager,
+                ...(scriptArgs?.length ? { args: scriptArgs } : {}),
+                ...(signal ? { signal } : {}),
+              }),
+          })),
+          { onError: batchOnError(args.onError, "stop"), maxBytes: outputBytesArg(args.maxBytes) },
+        )),
+      };
       break;
     }
     case "run_command_batch": {
@@ -1800,41 +1926,43 @@ async function callTool(
       const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (commands.length > 10)
         throw new Error("run_command_batch accepts at most 10 commands per call.");
-      structuredContent = await runBatch(
-        commands.map((item) => {
-          const command = typeof item.command === "string" ? item.command : "";
-          const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
-          const okExitCodes = okExitCodesArg(item.okExitCodes);
-          return {
-            label: [command, ...commandArgs.map(String)].join(" "),
-            ...(okExitCodes ? { okExitCodes } : {}),
-            preflight: () =>
-              typeof item.command !== "string"
-                ? "command must be a string."
-                : checkCommand(root, command, commandArgs, {
-                    allowedCommands,
-                    blacklistedCommands,
-                    allowedScripts,
-                    ...(commandPolicy ? { policy: commandPolicy } : {}),
-                  }),
-            execute: () =>
-              spawnCapture(root, command, commandArgs, {
-                timeoutMs,
-                ...(signal ? { signal } : {}),
-              }),
-          };
-        }),
-        {
-          onError: batchOnError(args.onError, "continue"),
-          maxBytes: outputBytesArg(args.maxBytes),
-        },
-      );
+      payload = {
+        ...(await runBatch(
+          commands.map((item) => {
+            const command = typeof item.command === "string" ? item.command : "";
+            const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
+            const okExitCodes = okExitCodesArg(item.okExitCodes);
+            return {
+              label: [command, ...commandArgs.map(String)].join(" "),
+              ...(okExitCodes ? { okExitCodes } : {}),
+              preflight: () =>
+                typeof item.command !== "string"
+                  ? "command must be a string."
+                  : checkCommand(root, command, commandArgs, {
+                      allowedCommands,
+                      blacklistedCommands,
+                      allowedScripts,
+                      ...(commandPolicy ? { policy: commandPolicy } : {}),
+                    }),
+              execute: () =>
+                spawnCapture(root, command, commandArgs, {
+                  timeoutMs,
+                  ...(signal ? { signal } : {}),
+                }),
+            };
+          }),
+          {
+            onError: batchOnError(args.onError, "continue"),
+            maxBytes: outputBytesArg(args.maxBytes),
+          },
+        )),
+      };
       break;
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
-  return completeToolResult(structuredContent, contentText);
+  return contentText === undefined ? { payload } : { payload, text: contentText };
 }
 
 const MCP_PARAM_PREFIX = "Mcp-Param-";
@@ -1961,12 +2089,16 @@ function mcpHeaderValuesEqual(
 const ANALYTICS_TRUNCATION_NOTE =
   "Result exceeded maxBytes; narrow by profile/session/time range or lower limit.";
 
-/** Keeps analytics output valid structured data: trims arrays or detail keys, never cuts JSON text. */
+/**
+ * Keeps analytics output valid structured data: trims arrays or detail keys, never cuts JSON text.
+ * The budget is measured on the whole response envelope, because that is what the client pays for.
+ */
 function fitAnalyticsResult(
   result: Record<string, unknown>,
   maxBytes: number,
 ): Record<string, unknown> {
-  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const size = (value: Record<string, unknown>) =>
+    Buffer.byteLength(JSON.stringify(toolResult(value)), "utf8");
   if (size(result) <= maxBytes) return { ...result, truncated: false };
   for (const key of ["events", "sessions"] as const) {
     const items = result[key];
@@ -2007,11 +2139,21 @@ function fitAnalyticsResult(
   };
 }
 
-function completeToolResult(structuredContent: unknown, text?: string): Record<string, unknown> {
+/**
+ * One representation per result. MCP requires a `content` block and treats `structuredContent`
+ * as an optional duplicate; sending both doubled every tool response, so the payload is emitted
+ * once as compact JSON (or as pre-rendered text when the tool produces a better reading form).
+ */
+interface ToolCallOutput {
+  payload: Record<string, unknown>;
+  /** Pre-rendered reading form; omitted tools fall back to compact JSON. */
+  text?: string;
+}
+
+function toolResult(payload: Record<string, unknown>, text?: string): Record<string, unknown> {
   return {
     resultType: "complete",
-    content: [{ type: "text", text: text ?? JSON.stringify(structuredContent) }],
-    structuredContent,
+    content: [{ type: "text", text: text ?? JSON.stringify(payload) }],
     _meta: SERVER_INFO_META,
   };
 }
@@ -2107,7 +2249,7 @@ function estimateTokens(value: string): number {
 
 function toolTelemetryMetrics(
   toolName: string,
-  result: Record<string, unknown>,
+  payload: Record<string, unknown>,
   seenOutputFingerprints: Set<string>,
 ): {
   affectedFiles?: number;
@@ -2119,20 +2261,6 @@ function toolTelemetryMetrics(
   uniqueFileCount?: number;
   files?: Array<{ pathHash: string; contentHash?: string; bytes: number }>;
 } {
-  const structured = result.structuredContent;
-  if (!Array.isArray(structured) && !isRecord(structured)) {
-    // Integration results (CodeGraph, Serena) carry no structured content; still measure them.
-    const json = JSON.stringify(result);
-    const fingerprint = telemetryHash(json);
-    const bytes = Buffer.byteLength(json, "utf8");
-    const duplicate = seenOutputFingerprints.has(fingerprint) ? bytes : 0;
-    seenOutputFingerprints.add(fingerprint);
-    return {
-      outputFingerprint: fingerprint,
-      duplicateOutputBytes: duplicate,
-      ...(result.truncated === true ? { truncated: true } : {}),
-    };
-  }
   const paths = new Set<string>();
   const files = new Map<string, { pathHash: string; contentHash?: string; bytes: number }>();
   let truncated = false;
@@ -2161,9 +2289,9 @@ function toolTelemetryMetrics(
     if (value.nextCursor !== undefined) paginated = true;
     for (const child of Object.values(value)) visit(child);
   };
-  visit(structured);
-  if (result.truncated === true) truncated = true;
-  const outputJson = JSON.stringify(result);
+  visit(payload);
+  if (payload.truncated === true) truncated = true;
+  const outputJson = JSON.stringify(payload);
   const outputFingerprint = telemetryHash(outputJson);
   const outputBytes = Buffer.byteLength(outputJson, "utf8");
   const duplicateOutputBytes = seenOutputFingerprints.has(outputFingerprint) ? outputBytes : 0;
@@ -2183,11 +2311,9 @@ function toolTelemetryMetrics(
 }
 
 function toolOutcome(
-  result: Record<string, unknown>,
   count: number | undefined,
   truncated: boolean,
 ): "ok" | "empty" | "truncated" | "error" {
-  if (result.isError === true) return "error";
   if (truncated) return "truncated";
   if (count === 0) return "empty";
   return "ok";
@@ -2313,10 +2439,9 @@ function okExitCodesArg(value: unknown): number[] | undefined {
   return value as number[];
 }
 
-function resultCount(result: Record<string, unknown>): number | undefined {
-  const structured = result.structuredContent;
-  if (isRecord(structured) && Array.isArray(structured.items)) return structured.items.length;
-  return Array.isArray(structured) ? structured.length : undefined;
+function resultCount(payload: Record<string, unknown>): number | undefined {
+  if (Array.isArray(payload.items)) return payload.items.length;
+  return undefined;
 }
 
 function classifyTelemetryError(error: unknown): string {

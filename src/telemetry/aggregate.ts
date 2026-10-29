@@ -168,11 +168,7 @@ const SEARCH_TOOLS = new Set([
   "search_code",
   "find_symbol",
   "find_references",
-  "ast_grep_search",
   "codegraph_explore",
-  "serena_search_for_pattern",
-  "serena_find_symbol",
-  "serena_find_referencing_symbols",
 ]);
 
 type ToolCallEvent = Extract<TelemetryEnvelope["event"], { event: "tool_call" }>;

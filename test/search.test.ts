@@ -256,6 +256,7 @@ test("ripgrep and the built-in backend return identical results", {
       { query: "ne+dle", regex: true },
       { query: "needle", paths: ["src"], globs: ["!Case.ts"] },
       { query: "needle", includeGenerated: true },
+      { query: "export const needle = 1;.*const other", regex: true, multiline: true },
     ]) {
       const { query, ...rest } = options;
       const builtin = await searchCode(root, query, { ...rest, backend: "builtin" });

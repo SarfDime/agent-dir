@@ -169,6 +169,24 @@ export interface CommandCheckContext {
   policy?: CommandPolicyConfig;
 }
 
+/** Built-in tools that replace general search and read executables. */
+const BUILT_IN_ALTERNATIVES: Record<string, string> = {
+  grep: "search_code",
+  egrep: "search_code",
+  fgrep: "search_code",
+  rg: "search_code",
+  ag: "search_code",
+  ack: "search_code",
+  cat: "read_range",
+  head: "read_range",
+  tail: "read_range",
+  less: "read_range",
+  more: "read_range",
+  find: "find_files",
+  fd: "find_files",
+  ls: "find_files or project_context",
+};
+
 /** Validates one command against the profile; returns a denial reason or undefined. */
 export function checkCommand(
   root: string,
@@ -177,8 +195,14 @@ export function checkCommand(
   context: CommandCheckContext,
 ): string | undefined {
   if (typeof command !== "string" || !SAFE_NAME.test(command)) return "Invalid command name.";
-  if (!context.allowedCommands.includes(command))
-    return `Command '${command}' is not allowed by this profile.`;
+  if (!context.allowedCommands.includes(command)) {
+    const alternative = BUILT_IN_ALTERNATIVES[command];
+    return `Command '${command}' is not allowed by this profile.${
+      alternative
+        ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
+        : ""
+    }`;
+  }
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
     return "Command arguments must be strings.";
   if (isCommandBlacklisted(command, args, context.blacklistedCommands ?? []))

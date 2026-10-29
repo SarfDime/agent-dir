@@ -1,9 +1,10 @@
-import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { commandEnvironment, processTreeSpawnOptions, terminateProcessTree } from "./commands.js";
+import { commandEnvironment } from "./commands.js";
 import { safePath } from "./files.js";
 import { matchesGlob } from "./glob.js";
+import { RipgrepFallback, searchBuiltin, searchRipgrep } from "./search-backends.js";
 import { listProjectFiles } from "./walk.js";
 
 /**
@@ -25,6 +26,8 @@ export interface SearchRequest {
   context: number;
   maxResults: number;
   includeGenerated: boolean;
+  /** Let the pattern match across line boundaries (`.` then also matches newlines). */
+  multiline?: boolean;
   /** Optional filter on a candidate hit: the full line and the 0-based match index. */
   accept?: (line: string, index: number) => boolean;
 }
@@ -32,6 +35,8 @@ export interface SearchRequest {
 export interface RawMatch {
   path: string;
   line: number;
+  /** Last line of the match; equals `line` for single-line matches. */
+  endLine: number;
   /** 1-based column in UTF-16 units. */
   column: number;
   raw: string;
@@ -49,8 +54,6 @@ export interface SearchOutcome {
 }
 
 const MAX_FILE_BYTES = 1_000_000;
-const RG_BATCH = 300;
-const RG_TIMEOUT_MS = 30_000;
 
 const GENERATED_FILES = [
   "package-lock.json",
@@ -176,260 +179,6 @@ async function searchableFiles(root: string, files: string[]): Promise<string[]>
     keep.push(...results);
   }
   return files.filter((_, index) => keep[index]);
-}
-
-// ---------------------------------------------------------------- built-in backend
-
-const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)\s*(?:[+*]|\{\d+,\d*\})/;
-
-function compileBuiltinRegex(query: string, caseSensitive: boolean): RegExp {
-  if (query.length > 2000) throw new Error("Regex pattern is too long (limit 2000 characters).");
-  if (NESTED_QUANTIFIER.test(query))
-    throw new Error(
-      "Regex rejected: nested quantifiers can cause catastrophic backtracking. Simplify the pattern, or install ripgrep (recommended), which searches in linear time.",
-    );
-  return new RegExp(query, caseSensitive ? "g" : "gi");
-}
-
-function firstAcceptedHit(
-  line: string,
-  request: SearchRequest,
-  matcher: RegExp | undefined,
-  needle: string,
-): number {
-  if (matcher) {
-    matcher.lastIndex = 0;
-    for (let hit = matcher.exec(line); hit !== null; hit = matcher.exec(line)) {
-      if (!request.accept || request.accept(line, hit.index)) return hit.index;
-      if (hit[0].length === 0) matcher.lastIndex += 1;
-    }
-    return -1;
-  }
-  const haystack = request.caseSensitive ? line : line.toLowerCase();
-  for (let from = 0; ; ) {
-    const index = haystack.indexOf(needle, from);
-    if (index === -1) return -1;
-    if (!request.accept || request.accept(line, index)) return index;
-    from = index + 1;
-  }
-}
-
-async function searchBuiltin(
-  root: string,
-  request: SearchRequest,
-  files: string[],
-  limit: number,
-): Promise<RawMatch[]> {
-  const matcher = request.regex
-    ? compileBuiltinRegex(request.query, request.caseSensitive)
-    : undefined;
-  const needle = request.caseSensitive ? request.query : request.query.toLowerCase();
-  const matches: RawMatch[] = [];
-  const resolvedRoot = await fs.realpath(root);
-  for (const [position, relative] of files.entries()) {
-    if (position % 50 === 49) await new Promise((resolve) => setImmediate(resolve));
-    let content: string;
-    try {
-      content = await fs.readFile(await safePath(resolvedRoot, relative), "utf8");
-    } catch {
-      continue;
-    }
-    if (content.includes("\0")) continue;
-    const lines = content.split(/\r?\n/);
-    if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-    for (let index = 0; index < lines.length; index += 1) {
-      const line = lines[index] ?? "";
-      const column = firstAcceptedHit(line, request, matcher, needle);
-      if (column === -1) continue;
-      matches.push({
-        path: relative,
-        line: index + 1,
-        column: column + 1,
-        raw: line,
-        before: lines.slice(Math.max(0, index - request.context), index),
-        after: lines.slice(index + 1, index + 1 + request.context),
-      });
-      if (matches.length >= limit) return matches;
-    }
-  }
-  return matches;
-}
-
-// ---------------------------------------------------------------- ripgrep backend
-
-class RipgrepFallback extends Error {}
-
-interface RgText {
-  text?: string;
-  bytes?: string;
-}
-
-function rgText(value: RgText | undefined): string {
-  if (!value) return "";
-  if (value.text !== undefined) return value.text;
-  return value.bytes ? Buffer.from(value.bytes, "base64").toString("utf8") : "";
-}
-
-interface RgFile {
-  lines: Map<number, string>;
-  hits: Array<{ line: number; column: number; raw: string }>;
-}
-
-function finishFile(relative: string, file: RgFile, request: SearchRequest): RawMatch[] {
-  return file.hits.map((hit) => {
-    const before: string[] = [];
-    const after: string[] = [];
-    for (let offset = request.context; offset >= 1; offset -= 1) {
-      const text = file.lines.get(hit.line - offset);
-      if (text !== undefined) before.push(text);
-    }
-    for (let offset = 1; offset <= request.context; offset += 1) {
-      const text = file.lines.get(hit.line + offset);
-      if (text !== undefined) after.push(text);
-    }
-    return { path: relative, line: hit.line, column: hit.column, raw: hit.raw, before, after };
-  });
-}
-
-function runRipgrepBatch(
-  root: string,
-  request: SearchRequest,
-  batch: string[],
-  remaining: number,
-  deadline: number,
-): Promise<{ matches: RawMatch[]; timedOut: boolean }> {
-  return new Promise((resolve, reject) => {
-    const args = [
-      "--json",
-      "--no-config",
-      "--sort",
-      "path",
-      "--max-filesize",
-      "1M",
-      request.caseSensitive ? "-s" : "-i",
-    ];
-    if (!request.regex) args.push("-F");
-    if (request.context > 0) args.push("-C", String(request.context));
-    args.push("-e", request.query, "--", ...batch);
-
-    const child: ChildProcess = spawn("rg", args, {
-      cwd: root,
-      shell: false,
-      env: commandEnvironment(),
-      ...processTreeSpawnOptions(),
-    });
-    const matches: RawMatch[] = [];
-    let pending = "";
-    let stderr = "";
-    let current: { path: string; file: RgFile } | undefined;
-    let stoppedEarly = false;
-    let timedOut = false;
-    let settled = false;
-
-    const finish = (error?: Error): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (error) reject(error);
-      else resolve({ matches, timedOut });
-    };
-    const stop = (): void => {
-      stoppedEarly = true;
-      terminateProcessTree(child);
-    };
-    const timer = setTimeout(
-      () => {
-        timedOut = true;
-        stop();
-      },
-      Math.max(1000, deadline - Date.now()),
-    );
-
-    const handle = (line: string): void => {
-      if (!line || stoppedEarly) return;
-      let event: { type: string; data: Record<string, unknown> };
-      try {
-        event = JSON.parse(line) as typeof event;
-      } catch {
-        return;
-      }
-      const data = event.data as {
-        path?: RgText;
-        lines?: RgText;
-        line_number?: number;
-        binary_offset?: number | null;
-        submatches?: Array<{ start: number }>;
-      };
-      if (event.type === "begin") {
-        current = { path: rgText(data.path), file: { lines: new Map(), hits: [] } };
-      } else if ((event.type === "match" || event.type === "context") && current) {
-        const text = rgText(data.lines).replace(/\r?\n$/, "");
-        const lineNumber = data.line_number ?? 0;
-        current.file.lines.set(lineNumber, text);
-        if (event.type === "match") {
-          const bytes = Buffer.from(text);
-          for (const submatch of data.submatches ?? []) {
-            const index = bytes.subarray(0, submatch.start).toString("utf8").length;
-            if (request.accept && !request.accept(text, index)) continue;
-            current.file.hits.push({ line: lineNumber, column: index + 1, raw: text });
-            break;
-          }
-        }
-      } else if (event.type === "end" && current) {
-        // Binary files are skipped wholesale so both backends agree.
-        if (data.binary_offset === undefined || data.binary_offset === null) {
-          matches.push(...finishFile(current.path, current.file, request));
-        }
-        current = undefined;
-        if (matches.length >= remaining) stop();
-      }
-    };
-
-    child.stdout?.on("data", (chunk: Buffer) => {
-      pending += chunk.toString("utf8");
-      let newline = pending.indexOf("\n");
-      while (newline !== -1) {
-        handle(pending.slice(0, newline));
-        pending = pending.slice(newline + 1);
-        newline = pending.indexOf("\n");
-      }
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      if (stderr.length < 4000) stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => finish(new RipgrepFallback(error.message)));
-    child.on("close", (code) => {
-      if (pending) handle(pending);
-      if (
-        !stoppedEarly &&
-        code === 2 &&
-        /regex parse error|error parsing|regex|unrecognized/i.test(stderr)
-      )
-        finish(new RipgrepFallback(stderr.trim().split("\n")[0] ?? "ripgrep rejected the pattern"));
-      else finish();
-    });
-  });
-}
-
-async function searchRipgrep(
-  root: string,
-  request: SearchRequest,
-  files: string[],
-  limit: number,
-): Promise<{ matches: RawMatch[]; timedOut: boolean }> {
-  const deadline = Date.now() + RG_TIMEOUT_MS;
-  const matches: RawMatch[] = [];
-  let timedOut = false;
-  for (let start = 0; start < files.length && matches.length < limit; start += RG_BATCH) {
-    const batch = files.slice(start, start + RG_BATCH);
-    const result = await runRipgrepBatch(root, request, batch, limit - matches.length, deadline);
-    matches.push(...result.matches);
-    if (result.timedOut) {
-      timedOut = true;
-      break;
-    }
-  }
-  return { matches: matches.slice(0, limit), timedOut };
 }
 
 // ---------------------------------------------------------------- entry point

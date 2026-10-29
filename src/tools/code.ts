@@ -5,6 +5,8 @@ import { listProjectFiles } from "./walk.js";
 export interface SearchItem {
   path: string;
   line: number;
+  /** Present when the match spans several lines. */
+  endLine?: number;
   column: number;
   text: string;
   before?: string[];
@@ -37,6 +39,7 @@ export interface SearchCodeOptions {
   maxResults?: number;
   maxBytes?: number;
   includeGenerated?: boolean;
+  multiline?: boolean;
   backend?: SearchBackend;
 }
 
@@ -82,6 +85,7 @@ function fitItems<T extends SearchItem>(items: T[], maxBytes: number): { kept: T
 function toItem(match: {
   path: string;
   line: number;
+  endLine: number;
   column: number;
   raw: string;
   before: string[];
@@ -93,6 +97,7 @@ function toItem(match: {
     column: match.column,
     text: match.raw.trim(),
   };
+  if (match.endLine > match.line) item.endLine = match.endLine;
   if (match.before.length)
     item.before = match.before.map((line) => truncateUtf8(line.trim(), MAX_CONTEXT_BYTES));
   if (match.after.length)
@@ -139,6 +144,7 @@ export function searchCode(
       context: Math.min(5, Math.max(0, options.context ?? 0)),
       maxResults: options.maxResults ?? 200,
       includeGenerated: options.includeGenerated ?? false,
+      ...(options.multiline ? { multiline: true } : {}),
     },
     {
       ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
@@ -174,7 +180,7 @@ const MODIFIERS =
 
 /**
  * Definition patterns for common languages (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift,
- * Ruby, PHP). They are heuristics; use serena_find_symbol or ast_grep_search for precision.
+ * Ruby, PHP). They are lexical heuristics, not a parser.
  * Written to be valid in both JavaScript and Rust regex syntax.
  */
 function symbolPattern(symbol: string): string {

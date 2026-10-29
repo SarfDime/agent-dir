@@ -28,7 +28,7 @@ agent-dir . --random --tunnel wormhole
 
 ## Profiles
 
-Profiles store the project directory, port, tunnel settings, allowed package scripts, allowed executables, and blocked command prefixes.
+Profiles store the project directory, port, tunnel settings, allowed package scripts, allowed executables, blocked command prefixes, and optional MCP tool exclusions.
 
 ```bash
 agent-dir config add my-project \
@@ -66,6 +66,10 @@ Profile configuration is stored at `~/.config/agent-dir/config.json`, outside th
   "directory": "~/src/my-project",
   "port": 3002,
   "packageManager": "pnpm",
+  "tools": {
+    "disabledSets": ["codegraph"],
+    "disabled": ["telemetry_analytics"]
+  },
   "scripts": {
     "allowedScripts": ["typecheck", "lint", "test"]
   },
@@ -80,6 +84,10 @@ Profile configuration is stored at `~/.config/agent-dir/config.json`, outside th
   }
 }
 ```
+
+Use `tools.disabled` to exclude exact MCP tool names and `tools.disabledSets` to exclude groups. Supported groups are `codegraph`, `analytics`, `filesystem`, `search`, and `commands`. Excluded tools are omitted from `tools/list` and rejected if a client attempts to call them. Tool names are the names exposed by MCP (for example, `codegraph_explore` or `read_range`).
+
+Profiles written before Serena and ast-grep were removed may still contain `serena` or `ast_grep` in `disabledSets`, or `serena_*` and `ast_grep_search` in `disabled`. Those entries are accepted and stripped at load time with a warning; both integrations no longer exist.
 
 The Cloudflare connector token is separate from the Agent Dir MCP Bearer token. Avoid passing secrets as command-line arguments because they may appear in shell history or process listings; prefer the interactive prompt when possible.
 

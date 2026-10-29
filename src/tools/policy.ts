@@ -64,6 +64,27 @@ export function mutatingScriptsWarning(scripts: string[]): string | undefined {
   return `These allowed scripts appear to modify files: ${names.join(", ")}. They run outside apply_changes, so protected-path checks do not apply to what they write.`;
 }
 
+const GENERAL_SEARCH_COMMANDS = [
+  "grep",
+  "egrep",
+  "fgrep",
+  "rg",
+  "ag",
+  "ack",
+  "cat",
+  "head",
+  "tail",
+  "find",
+  "fd",
+];
+
+/** Recommends the built-in tools when a profile allows general search or read executables. */
+export function generalSearchWarning(commands: string[]): string | undefined {
+  const names = commands.filter((command) => GENERAL_SEARCH_COMMANDS.includes(command));
+  if (names.length === 0) return undefined;
+  return `Allowing ${names.join(", ")} lets agents read files outside the project root, and search_code, find_files and read_range already cover them with bounded, .gitignore-aware results that stay inside the project. Consider removing them from the allowed commands.`;
+}
+
 const GLOBAL_VALUE_OPTIONS: Record<string, string[]> = {
   git: [
     "-C",

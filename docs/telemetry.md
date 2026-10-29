@@ -24,6 +24,8 @@ configuration → session → event
 
 One MCP/JSON-RPC request handled by Agent Dir. Its duration covers the request from entry through response/error handling.
 
+For `tools/list`, the event also records `toolCount` and `toolSetHash` (a keyed hash of the sorted tool names). Use them before comparing `responseBytes` across time: an integration appearing or disappearing changes the list without any code change, which is otherwise easy to misread as a schema regression.
+
 ### tool_call
 
 One Agent Dir tool execution inside an MCP request. Tool metrics are the best measure of individual Agent Dir capability reliability. Tool events include UTF-8 input/output byte counts, a rough token-size estimate (`ceil(bytes / 4)`), hashed request/input/output fingerprints, output repetition within the current process session, and bounded per-file metadata. File metadata contains hashes of paths and returned file text plus byte counts; it does not contain the paths or text themselves. A matching output fingerprint means the serialized tool result was identical, not that Claude necessarily re-read or billed those bytes again.

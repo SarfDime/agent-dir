@@ -8,7 +8,12 @@ import { migrateLegacyProfiles } from "../src/config.js";
 import { createMcpHandler } from "../src/mcp.js";
 import { type BatchTask, runBatch } from "../src/tools/batch.js";
 import { checkCommand, isCommandBlacklisted, spawnCapture } from "../src/tools/commands.js";
-import { evaluateCommandPolicy, isCommandPolicy, mutatingScripts } from "../src/tools/policy.js";
+import {
+  evaluateCommandPolicy,
+  generalSearchWarning,
+  isCommandPolicy,
+  mutatingScripts,
+} from "../src/tools/policy.js";
 import type { AgentConfig } from "../src/types.js";
 
 const ROOT = process.cwd();
@@ -294,21 +299,21 @@ const META = {
   "io.modelcontextprotocol/clientInfo": { name: "batch-test", version: "1.0.0" },
 };
 
+type BatchPayload = {
+  ok: boolean;
+  summary: { success: number; failure: number; skipped: number };
+  items: Array<{ status: string; ran: boolean; reason?: string; command: string }>;
+};
+
 type BatchBody = {
-  result: {
-    structuredContent: {
-      ok: boolean;
-      summary: { success: number; failure: number; skipped: number };
-      items: Array<{ status: string; ran: boolean; reason?: string; command: string }>;
-    };
-  };
+  result: { content: Array<{ text: string }> };
 };
 
 async function callBatch(
   handler: ReturnType<typeof createMcpHandler>,
   name: string,
   args: Record<string, unknown>,
-): Promise<BatchBody["result"]["structuredContent"]> {
+): Promise<BatchPayload> {
   const response = await handler(
     new Request("http://localhost/mcp", {
       method: "POST",
@@ -322,7 +327,7 @@ async function callBatch(
     }),
   );
   const body = (await response.json()) as BatchBody;
-  return body.result.structuredContent;
+  return JSON.parse(body.result.content[0]?.text ?? "{}") as BatchPayload;
 }
 
 test("run_command_batch applies guardrails per item and reports every status", async () => {
@@ -442,7 +447,7 @@ test("batch tools accept a per-call timeout and reject out-of-range values", asy
       result: { isError?: boolean; content: Array<{ text: string }> };
     };
     assert.equal(body.result.isError, true);
-    assert.match(body.result.content[0]?.text ?? "", /timeoutMs must be/);
+    assert.match(body.result.content[0]?.text ?? "", /timeoutMs' must be at least 1000/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -487,6 +492,27 @@ test("package scripts accept arguments only when the profile allows them", async
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("rejected search and read commands point to the built-in tools", () => {
+  const context = { allowedCommands: ["git"] };
+  assert.match(checkCommand(ROOT, "grep", [], context) ?? "", /Use search_code instead/);
+  assert.match(checkCommand(ROOT, "rg", [], context) ?? "", /Use search_code instead/);
+  assert.match(checkCommand(ROOT, "cat", [], context) ?? "", /Use read_range instead/);
+  assert.match(checkCommand(ROOT, "find", [], context) ?? "", /Use find_files instead/);
+  assert.match(checkCommand(ROOT, "ls", [], context) ?? "", /find_files or project_context/);
+  assert.equal(
+    checkCommand(ROOT, "curl", [], context),
+    "Command 'curl' is not allowed by this profile.",
+  );
+});
+
+test("allowing general search executables produces a recommendation", () => {
+  assert.match(
+    generalSearchWarning(["git", "grep", "cat"]) ?? "",
+    /grep, cat lets agents read files outside the project root/,
+  );
+  assert.equal(generalSearchWarning(["git", "npm"]), undefined);
 });
 
 test("scripts that rewrite files are identified for warnings", () => {

@@ -9,7 +9,6 @@ import { parseArgs } from "node:util";
 import { CodeGraphIntegration } from "../src/codegraph.js";
 import { configPath, loadConfig, mergeProfile, saveConfig } from "../src/config.js";
 import { printBanner, printHelp, printRequestHeader } from "../src/logging.js";
-import { SerenaIntegration } from "../src/serena.js";
 import { startServer } from "../src/server.js";
 import { hasConfigFile, runFirstTimeSetup, shouldOfferSetup } from "../src/setup.js";
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
@@ -25,8 +24,7 @@ import {
   TELEMETRY_RETENTION_BYTES,
   TELEMETRY_RETENTION_DAYS,
 } from "../src/telemetry/storage.js";
-import { isAstGrepAvailable } from "../src/tools/astgrep.js";
-import { mutatingScriptsWarning } from "../src/tools/policy.js";
+import { generalSearchWarning, mutatingScriptsWarning } from "../src/tools/policy.js";
 import { describeSearchBackend, detectSearchBackend } from "../src/tools/search.js";
 import { startTunnel } from "../src/tunnel.js";
 import type { CommandConfig, Profile, TunnelResult } from "../src/types.js";
@@ -543,6 +541,8 @@ if (allowedScripts) {
   const warning = mutatingScriptsWarning(allowedScripts);
   if (warning) console.error(`\u26a0 ${warning}`);
 }
+const searchWarning = generalSearchWarning(commandConfig.commands ?? []);
+if (searchWarning) console.error(`\u2139 ${searchWarning}`);
 if (commandConfig.protectedPaths?.extra?.length)
   bannerOptions.protectedPaths = commandConfig.protectedPaths.extra;
 bannerOptions.search = describeSearchBackend();
@@ -555,13 +555,15 @@ if (commandConfig.blacklistedCommands?.length) {
   bannerOptions.blacklistedCommands = commandConfig.blacklistedCommands;
 }
 
+const disabledTools = new Set(commandConfig.tools?.disabled ?? []);
+const disabledToolSets = new Set(commandConfig.tools?.disabledSets ?? []);
 const codeGraph = new CodeGraphIntegration(directory);
-const codeGraphCapability = await codeGraph.prepare();
-if (codeGraphCapability.tool) bannerOptions.codeGraph = true;
-const serena = new SerenaIntegration(directory);
-const serenaTools = await serena.prepare();
-if (serenaTools.length) bannerOptions.serena = serenaTools.map((item) => item.name);
-if (isAstGrepAvailable()) bannerOptions.astGrep = true;
+if (!disabledToolSets.has("codegraph") && !disabledTools.has("codegraph_explore")) {
+  const codeGraphCapability = await codeGraph.prepare();
+  if (codeGraphCapability.tool) bannerOptions.codeGraph = true;
+}
+bannerOptions.disabledTools = [...disabledTools];
+bannerOptions.disabledToolSets = [...disabledToolSets];
 if (values.analytics) bannerOptions.analytics = true;
 printBanner(bannerOptions);
 
@@ -572,7 +574,6 @@ const server = await startServer({
   token,
   commandConfig,
   codeGraph,
-  serena,
   analytics: values.analytics === true,
   telemetry: {
     ...(config.telemetry ?? { level: "none" }),
@@ -581,7 +582,7 @@ const server = await startServer({
     persist: true,
   },
 }).catch(async (error: unknown) => {
-  await Promise.all([codeGraph.close(), serena.close()]);
+  await Promise.all([codeGraph.close()]);
   throw error;
 });
 let tunnelResult: TunnelResult | undefined;

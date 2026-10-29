@@ -103,7 +103,6 @@ test("read_range returns plain text, structured data and supports several ranges
         result: {
           isError?: boolean;
           content: Array<{ text: string }>;
-          structuredContent: Record<string, unknown>;
         };
       };
     };
@@ -113,8 +112,6 @@ test("read_range returns plain text, structured data and supports several ranges
       single.result.content[0]?.text,
       "f.txt lines 2-3 of 10\nline 2\nline 3\n[continue with startLine=4]",
     );
-    assert.equal(single.result.structuredContent.content, "line 2\nline 3");
-    assert.equal(single.result.structuredContent.nextStartLine, 4);
 
     const multi = await call({
       path: "f.txt",
@@ -123,16 +120,11 @@ test("read_range returns plain text, structured data and supports several ranges
         { startLine: 9, endLine: 10 },
       ],
     });
-    const items = multi.result.structuredContent.items as Array<{ content: string; eof: boolean }>;
-    assert.deepEqual(
-      items.map((item) => item.content),
-      ["line 1\nline 2", "line 9\nline 10"],
-    );
-    assert.equal(items[1]?.eof, true);
     assert.match(
       multi.result.content[0]?.text ?? "",
-      /lines 1-2 of 10[\s\S]*lines 9-10 of 10 \(end of file\)/,
+      /lines 1-2 of 10[\s\S]*line 1\nline 2[\s\S]*lines 9-10 of 10 \(end of file\)[\s\S]*line 9\nline 10/,
     );
+    assert.doesNotMatch(multi.result.content[0]?.text ?? "", /\{"items"/);
 
     const missing = await call({ path: "f.txt" });
     assert.equal(missing.result.isError, true);

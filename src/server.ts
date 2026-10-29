@@ -23,10 +23,9 @@ export function startServer({
   commandConfig = {},
   telemetry = { level: "none" },
   codeGraph,
-  serena,
   analytics = false,
 }: ServerOptions): Promise<ServerHandle> {
-  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, serena, analytics);
+  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, analytics);
   const httpTelemetry = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -212,7 +211,7 @@ export function startServer({
           try {
             await new Promise<void>((done) => server.close(() => done()));
           } finally {
-            await Promise.all([codeGraph?.close(), serena?.close()]);
+            await Promise.all([codeGraph?.close()]);
           }
         },
       }),
@@ -383,6 +382,21 @@ function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Tool results carry their payload once, as a text block: read it back for request labels. */
+function appliedChanges(result: Record<string, unknown> | undefined): unknown[] {
+  const content = result?.content;
+  const text = Array.isArray(content)
+    ? content.find((item) => isRecordValue(item) && item.type === "text")
+    : undefined;
+  if (!isRecordValue(text) || typeof text.text !== "string") return [];
+  try {
+    const payload: unknown = JSON.parse(text.text);
+    return isRecordValue(payload) && Array.isArray(payload.items) ? payload.items : [];
+  } catch {
+    return [];
+  }
+}
+
 async function getResponseErrorDetail(response: Response): Promise<string | undefined> {
   if (response.status < 400) return undefined;
   try {
@@ -475,7 +489,7 @@ export function getMcpLog(
           const response = isRecordValue(responseBody) ? responseBody : undefined;
           const result = response && isRecordValue(response.result) ? response.result : undefined;
           if (result?.isError === true || response?.error !== undefined) return "change failed";
-          const applied = Array.isArray(result?.structuredContent) ? result.structuredContent : [];
+          const applied = appliedChanges(result);
           if (applied.length) {
             const entries = applied
               .filter(

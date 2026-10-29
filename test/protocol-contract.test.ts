@@ -181,7 +181,7 @@ test("tools/list output schemas are objects (required by 2025-11-25)", {
   });
 });
 
-test("tools/call returns content and structured content at both protocol versions", async () => {
+test("tools/call returns one text payload at both protocol versions", async () => {
   await withServer(async (port) => {
     for (const version of VERSIONS) {
       const { status, body } = await rpc(port, version, "tools/call", {
@@ -191,7 +191,8 @@ test("tools/call returns content and structured content at both protocol version
       assert.equal(status, 200, `${version}: ${JSON.stringify(body)}`);
       assert.notEqual(body.result.isError, true);
       assert.equal(body.result.content[0].type, "text");
-      assert.equal(typeof body.result.structuredContent, "object");
+      assert.equal(body.result.structuredContent, undefined);
+      assert.equal(typeof JSON.parse(String(body.result.content[0].text)), "object");
       if (version === MODERN) assert.equal(body.result.resultType, "complete");
     }
   });
@@ -254,5 +255,51 @@ test("subscriptions/listen streams correctly framed SSE events over HTTP", async
     JSON.parse(second.slice("data: ".length).trim());
 
     controller.abort();
+  });
+});
+
+test("tools carry annotations so clients can tell reads from writes", async () => {
+  await withServer(async (port) => {
+    for (const version of VERSIONS) {
+      const { body } = await rpc(port, version, "tools/list");
+      const byName = Object.fromEntries(
+        (body.result.tools as Json[]).map((tool) => [tool.name, tool]),
+      );
+      assert.deepEqual(byName.read_range?.annotations, {
+        readOnlyHint: true,
+        openWorldHint: false,
+      });
+      assert.deepEqual(byName.search_code?.annotations, {
+        readOnlyHint: true,
+        openWorldHint: false,
+      });
+      assert.equal(byName.apply_changes?.annotations?.destructiveHint, true);
+      assert.equal(byName.apply_changes?.annotations?.readOnlyHint, false);
+      assert.equal(byName.run_command_batch?.annotations?.openWorldHint, true);
+      for (const tool of Object.values(byName) as Json[]) {
+        assert.equal(typeof tool.annotations?.readOnlyHint, "boolean", String(tool.name));
+      }
+    }
+  });
+});
+
+test("calling an unknown tool lists the valid names", async () => {
+  await withServer(async (port) => {
+    for (const version of VERSIONS) {
+      const { body } = await rpc(port, version, "tools/call", {
+        name: "grep_files",
+        arguments: {},
+      });
+      assert.equal(body.result.isError, true);
+      const text = body.result.content[0].text as string;
+      assert.match(text, /Unknown tool: grep_files\. Available tools: .*read_range/);
+    }
+  });
+});
+
+test("discover advertises tool list change notifications that the server can send", async () => {
+  await withServer(async (port) => {
+    const { body } = await rpc(port, MODERN, "server/discover");
+    assert.equal(body.result.capabilities.tools.listChanged, true);
   });
 });

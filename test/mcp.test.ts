@@ -40,7 +40,7 @@ test("telemetry analytics is only exposed when explicitly enabled", async () => 
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-analytics-"));
   try {
     for (const enabled of [false, true]) {
-      const handler = createMcpHandler(root, {}, { level: "none" }, undefined, undefined, enabled);
+      const handler = createMcpHandler(root, {}, { level: "none" }, undefined, enabled);
       const response = await handler(
         new Request("http://localhost/mcp", {
           method: "POST",
@@ -84,15 +84,19 @@ test("telemetry analytics is only exposed when explicitly enabled", async () => 
             isError?: boolean;
             resultType?: string;
             content?: Array<{ type: string; text: string }>;
-            structuredContent?: { mode?: string; matchedEvents?: number; truncated?: boolean };
           };
         };
         const analyticsResult = analyticsBody.result;
         assert.equal(analyticsResult?.isError, undefined, JSON.stringify(analyticsBody));
         assert.equal(analyticsResult?.resultType, "complete");
         assert.equal(analyticsResult?.content?.[0]?.type, "text");
-        assert.equal(analyticsResult?.structuredContent?.mode, "summary");
-        assert.equal(typeof analyticsResult?.structuredContent?.matchedEvents, "number");
+        const analyticsPayload = JSON.parse(analyticsResult?.content?.[0]?.text ?? "{}") as {
+          mode?: string;
+          matchedEvents?: number;
+          truncated?: boolean;
+        };
+        assert.equal(analyticsPayload.mode, "summary");
+        assert.equal(typeof analyticsPayload.matchedEvents, "number");
         for (const mode of ["summary", "sessions", "events"]) {
           const small = await handler(
             new Request("http://localhost/mcp", {
@@ -119,12 +123,16 @@ test("telemetry analytics is only exposed when explicitly enabled", async () => 
           const smallBody = (await small.json()) as {
             result?: {
               content?: Array<{ text: string }>;
-              structuredContent?: { mode?: string; preview?: unknown; truncated?: boolean };
             };
           };
-          assert.equal(smallBody.result?.structuredContent?.mode, mode);
-          assert.equal(smallBody.result?.structuredContent?.preview, undefined);
-          assert.equal(typeof smallBody.result?.structuredContent?.truncated, "boolean");
+          const smallPayload = JSON.parse(smallBody.result?.content?.[0]?.text ?? "{}") as {
+            mode?: string;
+            preview?: unknown;
+            truncated?: boolean;
+          };
+          assert.equal(smallPayload.mode, mode);
+          assert.equal(smallPayload.preview, undefined);
+          assert.equal(typeof smallPayload.truncated, "boolean");
         }
       }
       handler.closeSubscriptions();
@@ -209,7 +217,7 @@ test("MCP telemetry records command, session, and detailed project context", asy
           method: "tools/call",
           params: {
             name: "run_command_batch",
-            arguments: { commands: ["git status --short"] },
+            arguments: { commands: [{ command: "git", args: ["status", "--short"] }] },
             _meta: META,
           },
         }),
@@ -309,29 +317,25 @@ test("modern MCP discovery is stateless and advertises skills", async () => {
   }
 });
 
-test("modern tools expose output schemas and structured content", async () => {
+test("modern tools send one payload and no redundant schema metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {
     await fsWriteFile(path.join(root, "hello.txt"), "hello");
     const list = await request(root, 1, "tools/list");
     const tools = (list.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
     const readTool = tools.find((tool) => tool.name === "read_range");
-    assert.ok(readTool?.outputSchema);
+    assert.equal(readTool?.outputSchema, undefined);
+    assert.equal(readTool?.title, undefined);
     const call = await request(root, 2, "tools/call", {
       name: "read_range",
       arguments: { path: "hello.txt", startLine: 1, endLine: 1 },
     });
     const result = call.result as Record<string, unknown>;
     assert.equal(result.resultType, "complete");
-    assert.deepEqual(result.structuredContent, {
-      path: "hello.txt",
-      startLine: 1,
-      endLine: 1,
-      content: "hello",
-      truncated: false,
-      eof: true,
-      totalLines: 1,
-    });
+    assert.equal(result.structuredContent, undefined);
+    const content = result.content as Array<{ type: string; text: string }>;
+    assert.equal(content[0]?.type, "text");
+    assert.match(content[0]?.text ?? "", /hello/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

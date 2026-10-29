@@ -111,13 +111,19 @@ async function validate(
     result: {
       isError?: boolean;
       content: Array<{ text: string }>;
-      structuredContent: ValidateData;
     };
   };
+  const text = body.result.content[0]?.text ?? "";
+  let data: ValidateData;
+  try {
+    data = JSON.parse(text) as ValidateData;
+  } catch {
+    data = { ok: false, scriptsRequested: [] };
+  }
   return {
     ...(body.result.isError ? { isError: true } : {}),
-    text: body.result.content[0]?.text ?? "",
-    data: body.result.structuredContent,
+    text,
+    data,
   };
 }
 
@@ -140,7 +146,7 @@ test("validate rejects unknown levels and explains the diagnostics-only limits",
     );
     const bad = await validate(handler, { level: "everything" });
     assert.equal(bad.isError, true);
-    assert.match(bad.text, /level must be/);
+    assert.match(bad.text, /level' must be one of/);
 
     const ignored = await validate(handler, { scripts: ["check"] });
     assert.match(ignored.data.note ?? "", /scripts were ignored/);

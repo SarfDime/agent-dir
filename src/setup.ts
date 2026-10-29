@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { configPath, saveConfig } from "./config.js";
-import { mutatingScriptsWarning } from "./tools/policy.js";
+import { generalSearchWarning, mutatingScriptsWarning } from "./tools/policy.js";
 import type { AgentConfig, PackageManager, Profile } from "./types.js";
 
 export async function hasConfigFile(): Promise<boolean> {
@@ -162,6 +162,8 @@ export async function runFirstTimeSetup(
       `Allowed ${packageManager} scripts (comma-separated, blank for none)`,
     );
     const commands = await optionalList(rl, "Allowed commands (comma-separated, blank for none)");
+    const searchWarning = generalSearchWarning(commands);
+    if (searchWarning) console.log(dim(`  \u2139 ${searchWarning}`));
     const scriptWarning = mutatingScriptsWarning(allowedScripts);
     if (scriptWarning) console.log(dim(`  \u26a0 ${scriptWarning}`));
     const protectedPaths = await optionalList(

@@ -29,6 +29,12 @@ export interface TelemetryMcpRequestEvent {
   responseBytes?: number;
   estimatedResponseTokens?: number;
   errorCategory?: string;
+  /**
+   * `tools/list` only: how many tools were advertised and a stable hash of their names, so a size
+   * change can be attributed to a code change or to a tool appearing/disappearing.
+   */
+  toolCount?: number;
+  toolSetHash?: string;
 }
 
 export interface TelemetryFileMetric {

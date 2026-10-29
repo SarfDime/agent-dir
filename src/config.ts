@@ -5,6 +5,7 @@ import { isTelemetryLevel } from "./telemetry/config.js";
 import { isCommandPolicy } from "./tools/policy.js";
 import { isPathProtectionConfig } from "./tools/protected-paths.js";
 import type { AgentConfig, CommandConfig, Profile } from "./types.js";
+import { LEGACY_TOOL_SETS } from "./types.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "agent-dir");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
@@ -45,6 +46,25 @@ export function migrateLegacyProfiles(
         `\u26a0 Profile '${name}' uses the old 'npm.allowedScripts' key; treating it as 'scripts.allowedScripts'. Update the profile to remove this warning.`,
       );
     }
+  }
+  for (const [name, profile] of Object.entries(config.profiles)) {
+    const tools = profile.tools;
+    if (!tools) continue;
+    const legacySets = LEGACY_TOOL_SETS as readonly string[];
+    const removedSets = (tools.disabledSets ?? []).filter((item) => legacySets.includes(item));
+    const removedTools = (tools.disabled ?? []).filter(
+      (item) => item.startsWith("serena_") || item === "ast_grep_search",
+    );
+    if (removedSets.length === 0 && removedTools.length === 0) continue;
+    if (tools.disabledSets)
+      tools.disabledSets = tools.disabledSets.filter((item) => !legacySets.includes(item));
+    if (tools.disabled)
+      tools.disabled = tools.disabled.filter(
+        (item) => !item.startsWith("serena_") && item !== "ast_grep_search",
+      );
+    warn(
+      `\u26a0 Profile '${name}' references removed tool sets or tools (${[...removedSets, ...removedTools].join(", ")}); Serena and ast-grep are no longer available. Removing these entries.`,
+    );
   }
   return config;
 }
@@ -163,5 +183,25 @@ function isProfile(value: unknown): value is Profile {
   if (profile.commandPolicy !== undefined && !isCommandPolicy(profile.commandPolicy)) return false;
   if (profile.protectedPaths !== undefined && !isPathProtectionConfig(profile.protectedPaths))
     return false;
+  if (profile.tools !== undefined) {
+    if (!profile.tools || typeof profile.tools !== "object") return false;
+    const tools = profile.tools as Record<string, unknown>;
+    if (
+      tools.disabled !== undefined &&
+      (!Array.isArray(tools.disabled) ||
+        tools.disabled.some((item) => typeof item !== "string" || !item.trim()))
+    )
+      return false;
+    const validSets = [
+      ...["codegraph", "analytics", "filesystem", "search", "commands"],
+      ...LEGACY_TOOL_SETS,
+    ];
+    if (
+      tools.disabledSets !== undefined &&
+      (!Array.isArray(tools.disabledSets) ||
+        tools.disabledSets.some((item) => typeof item !== "string" || !validSets.includes(item)))
+    )
+      return false;
+  }
   return true;
 }
