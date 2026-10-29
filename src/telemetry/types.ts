@@ -2,11 +2,57 @@ export const TELEMETRY_LEVELS = ["none", "anonymous", "basic", "detailed", "diag
 
 export type TelemetryLevel = (typeof TELEMETRY_LEVELS)[number];
 
+/**
+ * Canonical error categories. The privacy allowlist and the classifier both derive from this list,
+ * so a new category cannot be emitted without being accepted by the sanitizer.
+ */
+export const TELEMETRY_ERROR_CATEGORIES = [
+  "authentication",
+  "authorization",
+  "invalid_input",
+  "not_found",
+  "policy_denied",
+  "conflict",
+  "timeout",
+  "execution",
+  "internal",
+  "startup",
+  "unknown",
+  "unknown_tool",
+  "unavailable_integration",
+] as const;
+
+export type TelemetryErrorCategory = (typeof TELEMETRY_ERROR_CATEGORIES)[number];
+
+/** Canonical tool outcomes; `toolOutcome` returns one of these. */
+export const TOOL_OUTCOMES = ["ok", "empty", "truncated", "error"] as const;
+
+export type ToolOutcome = (typeof TOOL_OUTCOMES)[number];
+
+/** Canonical `argShape` booleans. The sanitizer iterates this same list. */
+export const ARG_SHAPE_KEYS = [
+  "regex",
+  "caseSensitive",
+  "paths",
+  "globs",
+  "context",
+  "multiline",
+  "ranges",
+  "queries",
+  "dryRun",
+  "okExitCodes",
+  "limit",
+] as const;
+
+export type ArgShape = Partial<Record<(typeof ARG_SHAPE_KEYS)[number], boolean>>;
+
 export interface TelemetryConfig {
   level: TelemetryLevel;
   configId?: string;
   persist?: boolean;
   sessionId?: string;
+  /** Minimum time between periodic session summaries (default 60 s); the last one wins. */
+  sessionSnapshotMs?: number;
 }
 
 export interface TelemetryHttpRequestEvent {
@@ -26,7 +72,15 @@ export interface TelemetryMcpRequestEvent {
   durationMs: number;
   responseBytes?: number;
   estimatedResponseTokens?: number;
-  errorCategory?: string;
+  errorCategory?: TelemetryErrorCategory;
+  /**
+   * `tools/list` only: how many tools were advertised and a stable hash of their names, so a size
+   * change can be attributed to a code change or to a tool appearing/disappearing.
+   */
+  toolCount?: number;
+  toolSetHash?: string;
+  /** Which guidance variant `initialize`/`server/discover` returned, for A/B comparison. */
+  guidanceVariant?: string;
 }
 
 export interface TelemetryFileMetric {
@@ -57,17 +111,33 @@ export interface TelemetryToolEvent {
   affectedFiles?: number;
   truncated?: boolean;
   paginated?: boolean;
-  errorCategory?: string;
+  /** Batch tools only: items reported as `skipped` (never started). */
+  skippedCount?: number;
+  /** Integration-backed tool only, with the integration status at call time. */
+  integration?: string;
+  integrationStatus?: string;
+  /**
+   * Which optional arguments the caller actually used. Booleans only: this is for guidance and
+   * workflow experiments, never for inspecting the arguments themselves.
+   */
+  argShape?: ArgShape;
+  /** Normalized result classification: ok, empty, truncated or error. */
+  outcome?: ToolOutcome;
+  /** `read_range` only: total lines requested, so large reads are visible in aggregates. */
+  readLines?: number;
+  errorCategory?: TelemetryErrorCategory;
 }
 
 export interface TelemetryCommandEvent {
   event: "command_call";
   commandFamily: string;
+  /** Allowlisted executable names only; never arguments. */
+  executables?: string[];
   operation?: string;
   success: boolean;
   durationMs: number;
   outputBytes?: number;
-  errorCategory?: string;
+  errorCategory?: TelemetryErrorCategory;
 }
 
 export interface TelemetryTunnelEvent {
@@ -77,7 +147,7 @@ export interface TelemetryTunnelEvent {
   attempt?: number;
   attempts?: number;
   durationMs?: number;
-  reasonCategory?: string;
+  reasonCategory?: TelemetryErrorCategory;
 }
 
 export interface TelemetrySessionEvent {
@@ -105,6 +175,7 @@ export interface TelemetryRuntimeContext {
   arch: string;
   mcpClientName?: string;
   mcpClientVersion?: string;
+  mcpProtocolVersion?: string;
   nodeVersion?: string;
   distroId?: string;
   distroName?: string;

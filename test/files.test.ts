@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
 import { searchCode } from "../src/tools/code.js";
-import { applyFileChanges, listFiles, readFile, readRange } from "../src/tools/files.js";
+import { applyFileChanges, listFiles, readFile } from "../src/tools/files.js";
+import { readRange } from "../src/tools/read.js";
 
 test("MCP authentication accepts Bearer and query-string tokens", () => {
   const bearer = new Request("https://example.test/mcp", {
@@ -57,7 +58,7 @@ test("filesystem access and code search stay inside project root", async () => {
 
     assert.equal(await readFile(root, "hello.txt"), "hello");
     assert.ok((await listFiles(root)).some((item) => item.path === "nested/deep/new.txt"));
-    assert.deepEqual(await searchCode(root, "insideSecret"), [
+    assert.deepEqual((await searchCode(root, "insideSecret")).items, [
       { path: "sample.ts", line: 1, column: 14, text: "export const insideSecret = true;" },
     ]);
     await assert.rejects(
@@ -80,7 +81,7 @@ test("filesystem access and code search stay inside project root", async () => {
           applyFileChanges(root, [{ kind: "write", path: "escape/new.txt", content: "blocked" }]),
         /Path escapes the exposed project directory\./,
       );
-      assert.deepEqual(await searchCode(root, "outsideSecret"), []);
+      assert.deepEqual((await searchCode(root, "outsideSecret")).items, []);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }

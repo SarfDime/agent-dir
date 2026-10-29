@@ -176,6 +176,13 @@ export function printHelp(): void {
   writeLine("      --scripts <scripts>    Comma-separated allowed package scripts");
   writeLine("      --command <commands>   Comma-separated allowed commands");
   writeLine("      --blacklist <commands> Comma-separated blocked command prefixes");
+  writeLine(
+    "      --allow-origin <origins> Comma-separated browser origins allowed to call /mcp (web agents)",
+  );
+  writeLine("      --protect <paths>      Comma-separated extra paths agents may not edit (globs)");
+  writeLine(
+    "      --unprotect <paths>    Comma-separated paths that stay editable despite defaults",
+  );
   writeLine("      --token <token>        Explicit Bearer token");
   writeLine("      --analytics            Expose local telemetry analytics through MCP (opt-in)");
   writeLine("      --no-tunnel            Disable tunneling");
@@ -214,10 +221,12 @@ export function printBanner(options: {
   packageManager?: "npm" | "pnpm" | "yarn" | "bun";
   commands?: string[];
   blacklistedCommands?: string[];
+  protectedPaths?: string[];
+  search?: string;
   codeGraph?: boolean;
-  astGrep?: boolean;
-  serena?: string[];
   analytics?: boolean;
+  disabledTools?: string[];
+  disabledToolSets?: string[];
 }): void {
   writeLine("");
   writeLine(
@@ -261,6 +270,15 @@ export function printBanner(options: {
         BRIGHT_CYAN,
       ),
     );
+  writeLine(
+    boxContent(`${color("SEARCH", BRIGHT_YELLOW)}   ${options.search ?? "built-in"}`, BRIGHT_CYAN),
+  );
+  writeLine(
+    boxContent(
+      `${color("PROTECT", BRIGHT_YELLOW)}  ${[".git", ".env*", ".npmrc", ...(options.protectedPaths ?? [])].join(", ")}`,
+      BRIGHT_CYAN,
+    ),
+  );
   writeLine(boxBottom(BRIGHT_CYAN));
   writeLine("");
   writeLine(boxTop("MCP ENDPOINT", BRIGHT_MAGENTA));
@@ -273,24 +291,43 @@ export function printBanner(options: {
   writeLine(boxBottom(BRIGHT_MAGENTA));
   writeLine("");
   writeLine(boxTop("AVAILABLE TOOLS", BRIGHT_BLUE));
-  const toolRows = [
-    color(toolLabel("project_context"), BRIGHT_CYAN),
-    color(toolLabel("find_files"), CYAN),
-    color(toolLabel("search_code"), BRIGHT_CYAN),
-    color(toolLabel("find_symbol"), GREEN),
-    color(toolLabel("find_references"), GREEN),
-    color(toolLabel("read_range"), GREEN),
-    color(toolLabel("apply_changes"), BRIGHT_MAGENTA),
-    color(toolLabel("validate"), BRIGHT_YELLOW),
-    color(toolLabel("run_package_scripts_batch"), BRIGHT_BLUE),
-    color(toolLabel("run_command_batch"), BRIGHT_CYAN),
-    color(toolLabel("file_info"), YELLOW),
-  ];
-  if (options.codeGraph) toolRows.push(color(toolLabel("codegraph_explore"), BRIGHT_MAGENTA));
-  if (options.astGrep) toolRows.push(color(toolLabel("ast_grep_search"), BRIGHT_GREEN));
-  for (const name of options.serena ?? [])
-    toolRows.push(color(toolLabel(`serena_${name}`), BRIGHT_YELLOW));
-  if (options.analytics) toolRows.push(color(toolLabel("telemetry_analytics"), BRIGHT_GREEN));
+  const disabled = new Set(options.disabledTools ?? []);
+  const disabledSets = new Set(options.disabledToolSets ?? []);
+  const isDisabled = (name: string): boolean => {
+    if (disabled.has(name)) return true;
+    if (disabledSets.has("codegraph") && name === "codegraph_explore") return true;
+    if (disabledSets.has("analytics") && name === "telemetry_analytics") return true;
+    if (disabledSets.has("filesystem") && ["read_range", "find_files", "file_info"].includes(name))
+      return true;
+    if (
+      disabledSets.has("search") &&
+      ["search_code", "find_symbol", "find_references", "codegraph_explore"].includes(name)
+    )
+      return true;
+    if (
+      disabledSets.has("commands") &&
+      ["run_command_batch", "run_package_scripts_batch"].includes(name)
+    )
+      return true;
+    return false;
+  };
+  const toolRows: string[] = [];
+  const addTool = (name: string, style: string): void => {
+    if (!isDisabled(name)) toolRows.push(color(toolLabel(name), style));
+  };
+  addTool("project_context", BRIGHT_CYAN);
+  addTool("find_files", CYAN);
+  addTool("search_code", BRIGHT_CYAN);
+  addTool("find_symbol", GREEN);
+  addTool("find_references", GREEN);
+  addTool("read_range", GREEN);
+  addTool("apply_changes", BRIGHT_MAGENTA);
+  addTool("validate", BRIGHT_YELLOW);
+  addTool("run_package_scripts_batch", BRIGHT_BLUE);
+  addTool("run_command_batch", BRIGHT_CYAN);
+  addTool("file_info", YELLOW);
+  if (options.codeGraph) addTool("codegraph_explore", BRIGHT_MAGENTA);
+  if (options.analytics) addTool("telemetry_analytics", BRIGHT_GREEN);
   printGrid(toolRows, 2);
   writeLine(boxBottom(BRIGHT_BLUE));
   writeLine("");

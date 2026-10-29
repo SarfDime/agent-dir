@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { configPath, saveConfig } from "./config.js";
+import { generalSearchWarning, mutatingScriptsWarning } from "./tools/policy.js";
 import type { AgentConfig, PackageManager, Profile } from "./types.js";
 
 export async function hasConfigFile(): Promise<boolean> {
@@ -161,6 +162,14 @@ export async function runFirstTimeSetup(
       `Allowed ${packageManager} scripts (comma-separated, blank for none)`,
     );
     const commands = await optionalList(rl, "Allowed commands (comma-separated, blank for none)");
+    const searchWarning = generalSearchWarning(commands);
+    if (searchWarning) console.log(dim(`  \u2139 ${searchWarning}`));
+    const scriptWarning = mutatingScriptsWarning(allowedScripts);
+    if (scriptWarning) console.log(dim(`  \u26a0 ${scriptWarning}`));
+    const protectedPaths = await optionalList(
+      rl,
+      "Extra protected paths agents may not edit (globs, comma-separated, blank for none; .git, .env* and .npmrc are always protected)",
+    );
 
     console.log("");
     console.log(`${section("◆")} ${section(bold("Telemetry"))}`);
@@ -170,8 +179,10 @@ export async function runFirstTimeSetup(
       dim("Telemetry is optional and stays local on this machine."),
       dim("It helps us understand usage, failures, and reliability improvements."),
       dim("Standard levels avoid file contents, command arguments, tokens, and project paths."),
-      dim("Diagnostic mode records bounded raw tool inputs/outputs and identifying metadata."),
-      dim("It may contain source code or other sensitive project data; it stays local."),
+      dim("Diagnostic mode is for debugging only: it records host/user names and project paths,"),
+      dim(
+        "which can be sensitive; it stays local. Raw tool inputs and outputs are never recorded.",
+      ),
     ]);
 
     console.log("");
@@ -216,6 +227,7 @@ export async function runFirstTimeSetup(
     }
     if (allowedScripts.length) profile.scripts = { allowedScripts };
     if (commands.length) profile.commands = commands;
+    if (protectedPaths.length) profile.protectedPaths = { extra: protectedPaths };
     config.profiles[name] = profile;
     config.telemetry = { level: telemetry };
     await saveConfig(config);

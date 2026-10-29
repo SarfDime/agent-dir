@@ -1,5 +1,6 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { authenticate, unauthorized } from "./auth.js";
+import { normalizeBrowserOrigin } from "./config.js";
 import { logRequest } from "./logging.js";
 import { createMcpHandler } from "./mcp.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
@@ -23,16 +24,21 @@ export function startServer({
   commandConfig = {},
   telemetry = { level: "none" },
   codeGraph,
-  serena,
   analytics = false,
+  allowedOrigins = [],
 }: ServerOptions): Promise<ServerHandle> {
-  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, serena, analytics);
+  const mcp = createMcpHandler(root, commandConfig, telemetry, codeGraph, analytics);
   const httpTelemetry = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
     ...(telemetry.configId ? { configId: telemetry.configId } : {}),
     sessionId: telemetry.sessionId ?? `http-${Date.now()}`,
   });
+  const allowedOriginSet = new Set(
+    allowedOrigins
+      .map((value) => normalizeOrigin(value))
+      .filter((value): value is string => value !== undefined),
+  );
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const startedAt = performance.now();
     const requestController = new AbortController();
@@ -41,6 +47,12 @@ export function startServer({
       if (!res.writableFinished) requestController.abort();
     });
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const requestOrigin = req.headers.origin;
+    const normalizedOrigin =
+      requestOrigin === undefined ? undefined : normalizeOrigin(requestOrigin);
+    const originAllowed = normalizedOrigin !== undefined && allowedOriginSet.has(normalizedOrigin);
+    // Echo the header value exactly: browsers compare it byte for byte.
+    if (originAllowed && requestOrigin) applyCorsHeaders(res, requestOrigin);
     let authenticated = false;
     try {
       if (url.pathname === HEALTH_PATH && req.method === "HEAD") {
@@ -48,16 +60,41 @@ export function startServer({
         sendText(res, 200, "ok\n");
         return;
       }
-      const body = await readBody(req, requestController.signal);
-      const requestInit: RequestInit = {
-        method: req.method ?? "GET",
-        headers: toFetchHeaders(req.headers),
-        signal: requestController.signal,
-      };
-      if (body.length) requestInit.body = body;
-      const request = new Request(url, requestInit);
-      authenticated = authenticate(request, token);
+      // Browser clients send a preflight without credentials, so this has to be answered before
+      // authentication or the browser never sends the real request.
+      if (url.pathname === "/mcp" && req.method === "OPTIONS") {
+        if (!originAllowed || !normalizedOrigin) {
+          sendText(
+            res,
+            403,
+            "Origin not allowed. Add this site's origin to the profile's allowedOrigins.\n",
+          );
+          logRequest({
+            method: req.method,
+            path: url.pathname,
+            status: 403,
+            detail: "MCP header validation: origin not allowed",
+          });
+          recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 403, false, startedAt);
+          return;
+        }
+        res.setHeader("access-control-allow-methods", "POST, OPTIONS");
+        res.setHeader(
+          "access-control-allow-headers",
+          "authorization, content-type, accept, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id",
+        );
+        res.setHeader("access-control-max-age", "600");
+        res.statusCode = 204;
+        res.end();
+        return;
+      }
+      // Authenticate from headers and URL alone, before buffering any request body.
+      authenticated = authenticate(
+        new Request(url, { method: req.method ?? "GET", headers: toFetchHeaders(req.headers) }),
+        token,
+      );
       if (!authenticated) {
+        res.setHeader("connection", "close");
         const response = unauthorized();
         await sendResponse(res, response);
         logRequest({
@@ -76,6 +113,14 @@ export function startServer({
         );
         return;
       }
+      const body = await readBody(req, requestController.signal);
+      const requestInit: RequestInit = {
+        method: req.method ?? "GET",
+        headers: toFetchHeaders(req.headers),
+        signal: requestController.signal,
+      };
+      if (body.length) requestInit.body = body;
+      const request = new Request(url, requestInit);
       if (url.pathname === "/mcp") {
         if (req.method !== "POST") {
           res.setHeader("allow", "POST");
@@ -96,7 +141,7 @@ export function startServer({
           );
           return;
         }
-        const headerError = validateMcpHeaders(request, messageBody(body));
+        const headerError = validateMcpHeaders(request, messageBody(body), allowedOriginSet);
         if (headerError) {
           const errorDetail = await getResponseErrorDetail(headerError);
           await sendResponse(res, headerError);
@@ -117,10 +162,15 @@ export function startServer({
           return;
         }
         const response = await mcp(request);
-        const mcpResponseBody = await response
-          .clone()
-          .json()
-          .catch(() => undefined);
+        // Streaming (SSE) responses must not be buffered or parsed: the stream stays open.
+        const isStream =
+          response.headers.get("content-type")?.includes("text/event-stream") === true;
+        const mcpResponseBody = isStream
+          ? undefined
+          : await response
+              .clone()
+              .json()
+              .catch(() => undefined);
         const errorDetail = await getResponseErrorDetail(response);
         const mcpLog = getMcpLog(body, mcpResponseBody);
         await sendResponse(res, response);
@@ -202,7 +252,7 @@ export function startServer({
           try {
             await new Promise<void>((done) => server.close(() => done()));
           } finally {
-            await Promise.all([codeGraph?.close(), serena?.close()]);
+            await Promise.all([codeGraph?.close()]);
           }
         },
       }),
@@ -222,6 +272,7 @@ function messageBody(body: Buffer): Record<string, unknown> | null {
 export function validateMcpHeaders(
   request: Request,
   message: Record<string, unknown> | null,
+  allowedOrigins: ReadonlySet<string> = new Set(),
 ): Response | undefined {
   const method = typeof message?.method === "string" ? message.method : undefined;
   const isNotification = method !== undefined && !Object.hasOwn(message ?? {}, "id");
@@ -300,8 +351,17 @@ export function validateMcpHeaders(
         400,
       );
   }
-  if (origin && origin !== new URL(request.url).origin)
-    return jsonRpcErrorForServer(message, -32020, "Invalid Origin.", 403);
+  if (origin) {
+    const originKey = normalizeOrigin(origin);
+    const sameOrigin = normalizeOrigin(new URL(request.url).origin);
+    if (originKey === undefined || (originKey !== sameOrigin && !allowedOrigins.has(originKey)))
+      return jsonRpcErrorForServer(
+        message,
+        -32020,
+        `Invalid Origin. Add '${origin}' to the profile's allowedOrigins (or pass --allow-origin) to let this browser client call /mcp.`,
+        403,
+      );
+  }
   return undefined;
 }
 
@@ -317,6 +377,18 @@ function decodeMcpHeaderValue(value: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Origins arrive with a trailing slash or different case; compare them normalized. */
+function normalizeOrigin(value: string): string | undefined {
+  return normalizeBrowserOrigin(value);
+}
+
+/** Headers a browser client needs to read a cross-origin response. */
+function applyCorsHeaders(res: ServerResponse, origin: string): void {
+  res.setHeader("access-control-allow-origin", origin);
+  res.setHeader("vary", "origin");
+  res.setHeader("access-control-expose-headers", "mcp-session-id");
 }
 
 function jsonRpcErrorForServer(
@@ -371,6 +443,21 @@ function getMcpErrorContext(body: Buffer, request: Request): string | undefined 
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Tool results carry their payload once, as a text block: read it back for request labels. */
+function appliedChanges(result: Record<string, unknown> | undefined): unknown[] {
+  const content = result?.content;
+  const text = Array.isArray(content)
+    ? content.find((item) => isRecordValue(item) && item.type === "text")
+    : undefined;
+  if (!isRecordValue(text) || typeof text.text !== "string") return [];
+  try {
+    const payload: unknown = JSON.parse(text.text);
+    return isRecordValue(payload) && Array.isArray(payload.items) ? payload.items : [];
+  } catch {
+    return [];
+  }
 }
 
 async function getResponseErrorDetail(response: Response): Promise<string | undefined> {
@@ -465,7 +552,7 @@ export function getMcpLog(
           const response = isRecordValue(responseBody) ? responseBody : undefined;
           const result = response && isRecordValue(response.result) ? response.result : undefined;
           if (result?.isError === true || response?.error !== undefined) return "change failed";
-          const applied = Array.isArray(result?.structuredContent) ? result.structuredContent : [];
+          const applied = appliedChanges(result);
           if (applied.length) {
             const entries = applied
               .filter(

@@ -1,4 +1,10 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import {
+  blacklistCandidates,
+  type CommandPolicyConfig,
+  evaluateCommandPolicy,
+  matchesBlacklistEntry,
+} from "./policy.js";
 
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const MAX_CAPTURE_BYTES = 512_000;
@@ -24,7 +30,7 @@ export function commandEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(
     Object.entries(process.env).filter(
       ([key]) =>
-        !/(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTHORIZATION|ACCESS[_-]?KEY)/i.test(
+        !/(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|AUTHORIZATION|ACCESS[_-]?KEY|COOKIE|SESSION[_-]?(?:ID|KEY)|SSH_AUTH_SOCK|GPG_|KUBECONFIG|DATABASE_URL|REDIS_URL|MONGO(?:DB)?_(?:URI|URL)|_DSN$|CONNECTION[_-]?STRING)/i.test(
           key,
         ),
     ),
@@ -71,66 +77,64 @@ export interface CommandResult {
   stderr: string;
 }
 
-export function isCommandBlacklisted(
-  command: string,
-  args: string[] = [],
-  blacklistedCommands: string[] = [],
-): boolean {
-  const invocation = [command, ...args];
-  return blacklistedCommands.some((entry) => {
-    const tokens = entry.trim().split(/\s+/).filter(Boolean);
-    return tokens.length > 0 && tokens.every((token, index) => invocation[index] === token);
-  });
+/** Outcome of one captured process. Never rejects; failures are described by the flags. */
+export interface CaptureResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  aborted: boolean;
+  /** Spawn failure message (for example the executable does not exist). */
+  error?: string;
+  durationMs: number;
 }
 
-export function runCommand(
+/**
+ * The single process runner for commands and package scripts: no shell, filtered environment,
+ * process-tree termination, bounded capture, and partial output preserved on timeout or abort.
+ */
+export function spawnCapture(
   root: string,
-  command: string,
-  args: string[] = [],
-  allowedCommands: string[] = [],
-  blacklistedCommands: string[] = [],
-  timeoutMs = 120000,
-  signal?: AbortSignal,
-): Promise<CommandResult> {
-  if (!SAFE_NAME.test(command)) throw new Error("Invalid command name.");
-  if (!allowedCommands.includes(command))
-    throw new Error(`Command '${command}' is not allowed by this profile.`);
-  if (isCommandBlacklisted(command, args, blacklistedCommands))
-    throw new Error(`Command '${[command, ...args].join(" ")}' is blocked by this profile.`);
-  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
-    throw new Error("Command arguments must be strings.");
-
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+  executable: string,
+  args: string[],
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<CaptureResult> {
+  const timeoutMs = options.timeoutMs ?? 120000;
+  const signal = options.signal;
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (result: Omit<CaptureResult, "stdout" | "stderr" | "durationMs">): void => {
+      if (finished) return;
+      finished = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      resolve({ ...result, stdout, stderr, durationMs: Date.now() - startedAt });
+    };
+    const child = spawn(executable, args, {
       cwd: root,
       shell: false,
       env: commandEnvironment(),
       ...processTreeSpawnOptions(),
     });
-    let stdout = "";
-    let stderr = "";
-    let finished = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const abort = () => {
+    function abort(): void {
       if (finished) return;
-      finished = true;
-      clearTimeout(timer);
       terminateProcessTree(child);
-      reject(new Error(`Command '${command}' was aborted.`));
-    };
+      finish({ exitCode: null, timedOut: false, aborted: true });
+    }
     timer = setTimeout(() => {
       if (finished) return;
-      finished = true;
       terminateProcessTree(child);
-      signal?.removeEventListener("abort", abort);
-      reject(new Error(`Command '${command}' timed out after ${timeoutMs}ms.`));
+      finish({ exitCode: null, timedOut: true, aborted: false });
     }, timeoutMs);
     if (signal?.aborted) {
       abort();
       return;
     }
     signal?.addEventListener("abort", abort, { once: true });
-
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdout = appendBoundedOutput(stdout, chunk);
     });
@@ -138,18 +142,105 @@ export function runCommand(
       stderr = appendBoundedOutput(stderr, chunk);
     });
     child.on("error", (error: Error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      reject(error);
+      finish({ exitCode: null, timedOut: false, aborted: false, error: error.message });
     });
     child.on("close", (code: number | null) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      resolve({ command: [command, ...args].join(" "), exitCode: code ?? 1, stdout, stderr });
+      finish({ exitCode: code ?? 1, timedOut: false, aborted: false });
     });
   });
+}
+
+export function isCommandBlacklisted(
+  command: string,
+  args: string[] = [],
+  blacklistedCommands: string[] = [],
+): boolean {
+  // Global options placed before a subcommand (`git -C . push`) must not bypass an entry.
+  const candidates = blacklistCandidates(command, args);
+  return blacklistedCommands.some((entry) =>
+    candidates.some((invocation) => matchesBlacklistEntry(entry, invocation)),
+  );
+}
+
+export interface CommandCheckContext {
+  allowedCommands: string[];
+  blacklistedCommands?: string[];
+  allowedScripts?: string[];
+  policy?: CommandPolicyConfig;
+}
+
+/** Built-in tools that replace general search and read executables. */
+const BUILT_IN_ALTERNATIVES: Record<string, string> = {
+  grep: "search_code",
+  egrep: "search_code",
+  fgrep: "search_code",
+  rg: "search_code",
+  ag: "search_code",
+  ack: "search_code",
+  cat: "read_range",
+  head: "read_range",
+  tail: "read_range",
+  less: "read_range",
+  more: "read_range",
+  find: "find_files",
+  fd: "find_files",
+  ls: "find_files or project_context",
+};
+
+/** Validates one command against the profile; returns a denial reason or undefined. */
+export function checkCommand(
+  root: string,
+  command: string,
+  args: string[],
+  context: CommandCheckContext,
+): string | undefined {
+  if (typeof command !== "string" || !SAFE_NAME.test(command)) return "Invalid command name.";
+  if (!context.allowedCommands.includes(command)) {
+    const alternative = BUILT_IN_ALTERNATIVES[command];
+    return `Command '${command}' is not allowed by this profile.${
+      alternative
+        ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
+        : ""
+    }`;
+  }
+  if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
+    return "Command arguments must be strings.";
+  if (isCommandBlacklisted(command, args, context.blacklistedCommands ?? []))
+    return `Command '${[command, ...args].join(" ")}' is blocked by this profile.`;
+  return evaluateCommandPolicy(command, args, {
+    root,
+    ...(context.allowedScripts ? { allowedScripts: context.allowedScripts } : {}),
+    ...(context.policy ? { policy: context.policy } : {}),
+  });
+}
+
+export async function runCommand(
+  root: string,
+  command: string,
+  args: string[] = [],
+  allowedCommands: string[] = [],
+  blacklistedCommands: string[] = [],
+  timeoutMs = 120000,
+  signal?: AbortSignal,
+  context: Omit<CommandCheckContext, "allowedCommands" | "blacklistedCommands"> = {},
+): Promise<CommandResult> {
+  const problem = checkCommand(root, command, args, {
+    allowedCommands,
+    blacklistedCommands,
+    ...context,
+  });
+  if (problem) throw new Error(problem);
+  const capture = await spawnCapture(root, command, args, {
+    timeoutMs,
+    ...(signal ? { signal } : {}),
+  });
+  if (capture.aborted) throw new Error(`Command '${command}' was aborted.`);
+  if (capture.timedOut) throw new Error(`Command '${command}' timed out after ${timeoutMs}ms.`);
+  if (capture.error) throw new Error(capture.error);
+  return {
+    command: [command, ...args].join(" "),
+    exitCode: capture.exitCode ?? 1,
+    stdout: capture.stdout,
+    stderr: capture.stderr,
+  };
 }

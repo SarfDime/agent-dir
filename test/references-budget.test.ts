@@ -18,12 +18,12 @@ test("find_references preserves later call sites when an earlier match has a lon
       'import { target } from "./a-definition";\nexport const result = target("ok");\n',
     );
 
-    const matches = await findReferences(root, "target", 20, 1024);
+    const result = await findReferences(root, "target", { maxResults: 20, maxBytes: 1024 });
     assert.ok(
-      matches.some((match) => match.path === "src/z-caller.ts"),
-      JSON.stringify(matches),
+      result.items.some((match) => match.path === "src/z-caller.ts"),
+      JSON.stringify(result),
     );
-    assert.ok(Buffer.byteLength(JSON.stringify(matches), "utf8") <= 1024);
+    assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 1024);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

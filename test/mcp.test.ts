@@ -36,11 +36,44 @@ async function request(
   return (await response.json()) as Record<string, unknown>;
 }
 
+test("every advertised tool rejects unknown arguments and names the valid ones", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-args-"));
+  try {
+    const list = await request(root, 1, "tools/list");
+    const tools = (list.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
+    assert.ok(tools.length > 0);
+
+    for (const tool of tools) {
+      const name = String(tool.name);
+      const call = await request(root, 2, "tools/call", {
+        name,
+        arguments: { definitelyNotAnArgument: true },
+      });
+      const result = call.result as Record<string, unknown>;
+      assert.equal(result.isError, true, `${name} should reject an unknown argument`);
+      const text = String((result.content as Array<{ text: string }>)[0]?.text);
+      assert.match(text, /Unknown argument 'definitelyNotAnArgument'/, `${name}: ${text}`);
+      assert.match(text, /Valid arguments:|takes no arguments/, `${name}: ${text}`);
+
+      if (!tool.inputSchema || typeof tool.inputSchema !== "object") continue;
+      const required = (tool.inputSchema as Record<string, unknown>).required;
+      if (!Array.isArray(required) || required.length === 0) continue;
+      const missing = await request(root, 3, "tools/call", { name, arguments: {} });
+      const missingText = String(
+        ((missing.result as Record<string, unknown>).content as Array<{ text: string }>)[0]?.text,
+      );
+      assert.match(missingText, /is required/, `${name} should name a missing required argument`);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("telemetry analytics is only exposed when explicitly enabled", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-analytics-"));
   try {
     for (const enabled of [false, true]) {
-      const handler = createMcpHandler(root, {}, { level: "none" }, undefined, undefined, enabled);
+      const handler = createMcpHandler(root, {}, { level: "none" }, undefined, enabled);
       const response = await handler(
         new Request("http://localhost/mcp", {
           method: "POST",
@@ -82,13 +115,58 @@ test("telemetry analytics is only exposed when explicitly enabled", async () => 
         const analyticsBody = (await analyticsResponse.json()) as {
           result?: {
             isError?: boolean;
-            mode?: string;
-            matchedEvents?: number;
+            resultType?: string;
+            content?: Array<{ type: string; text: string }>;
           };
         };
-        assert.equal(analyticsBody.result?.isError, undefined);
-        assert.equal(analyticsBody.result?.mode, "summary", JSON.stringify(analyticsBody));
-        assert.equal(typeof analyticsBody.result?.matchedEvents, "number");
+        const analyticsResult = analyticsBody.result;
+        assert.equal(analyticsResult?.isError, undefined, JSON.stringify(analyticsBody));
+        assert.equal(analyticsResult?.resultType, "complete");
+        assert.equal(analyticsResult?.content?.[0]?.type, "text");
+        const analyticsPayload = JSON.parse(analyticsResult?.content?.[0]?.text ?? "{}") as {
+          mode?: string;
+          matchedEvents?: number;
+          truncated?: boolean;
+        };
+        assert.equal(analyticsPayload.mode, "summary");
+        assert.equal(typeof analyticsPayload.matchedEvents, "number");
+        for (const mode of ["summary", "sessions", "events"]) {
+          const small = await handler(
+            new Request("http://localhost/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+                "mcp-protocol-version": "2026-07-28",
+                "mcp-method": "tools/call",
+                "mcp-name": "telemetry_analytics",
+              },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 3,
+                method: "tools/call",
+                params: {
+                  name: "telemetry_analytics",
+                  arguments: { mode, maxBytes: 1024 },
+                  _meta: META,
+                },
+              }),
+            }),
+          );
+          const smallBody = (await small.json()) as {
+            result?: {
+              content?: Array<{ text: string }>;
+            };
+          };
+          const smallPayload = JSON.parse(smallBody.result?.content?.[0]?.text ?? "{}") as {
+            mode?: string;
+            preview?: unknown;
+            truncated?: boolean;
+          };
+          assert.equal(smallPayload.mode, mode);
+          assert.equal(smallPayload.preview, undefined);
+          assert.equal(typeof smallPayload.truncated, "boolean");
+        }
       }
       handler.closeSubscriptions();
     }
@@ -172,7 +250,7 @@ test("MCP telemetry records command, session, and detailed project context", asy
           method: "tools/call",
           params: {
             name: "run_command_batch",
-            arguments: { commands: ["git status --short"] },
+            arguments: { commands: [{ command: "git", args: ["status", "--short"] }] },
             _meta: META,
           },
         }),
@@ -258,7 +336,10 @@ test("modern MCP discovery is stateless and advertises skills", async () => {
     const first = await request(root, 1, "server/discover");
     const second = await request(root, 2, "server/discover");
     assert.deepEqual(first.result, second.result);
-    assert.deepEqual((first.result as Record<string, unknown>).supportedVersions, ["2026-07-28"]);
+    assert.deepEqual((first.result as Record<string, unknown>).supportedVersions, [
+      "2026-07-28",
+      "2025-11-25",
+    ]);
     assert.deepEqual(
       ((first.result as Record<string, unknown>).capabilities as Record<string, unknown>)
         .extensions,
@@ -269,27 +350,25 @@ test("modern MCP discovery is stateless and advertises skills", async () => {
   }
 });
 
-test("modern tools expose output schemas and structured content", async () => {
+test("modern tools send one payload and no redundant schema metadata", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {
     await fsWriteFile(path.join(root, "hello.txt"), "hello");
     const list = await request(root, 1, "tools/list");
     const tools = (list.result as Record<string, unknown>).tools as Array<Record<string, unknown>>;
     const readTool = tools.find((tool) => tool.name === "read_range");
-    assert.ok(readTool?.outputSchema);
+    assert.equal(readTool?.outputSchema, undefined);
+    assert.equal(readTool?.title, undefined);
     const call = await request(root, 2, "tools/call", {
       name: "read_range",
       arguments: { path: "hello.txt", startLine: 1, endLine: 1 },
     });
     const result = call.result as Record<string, unknown>;
     assert.equal(result.resultType, "complete");
-    assert.deepEqual(result.structuredContent, {
-      path: "hello.txt",
-      startLine: 1,
-      endLine: 1,
-      content: "hello",
-      truncated: false,
-    });
+    assert.equal(result.structuredContent, undefined);
+    const content = result.content as Array<{ type: string; text: string }>;
+    assert.equal(content[0]?.type, "text");
+    assert.match(content[0]?.text ?? "", /hello/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

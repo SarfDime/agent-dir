@@ -5,6 +5,7 @@ import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import { createTelemetryEnvelope, sanitizeAnonymousEvent } from "../src/telemetry/privacy.js";
 import { TelemetryRecorder } from "../src/telemetry/recorder.js";
 import { telemetrySessionPath } from "../src/telemetry/storage.js";
+import type { TelemetryErrorCategory, ToolOutcome } from "../src/telemetry/types.js";
 
 test("telemetry defaults to no recorded events", () => {
   const recorder = new TelemetryRecorder({ level: "none" });
@@ -236,6 +237,55 @@ test("tool telemetry sanitization retains estimates and hashes but never file co
   assert.equal("diagnosticDetails" in event, false);
 });
 
+test("privacy sanitizer keeps every field declared on the event types", () => {
+  // Regression guard: these fields were once added to the event interfaces but omitted from the
+  // allowlist, so they were silently dropped before reaching disk.
+  const toolEvent = sanitizeAnonymousEvent({
+    event: "tool_call",
+    tool: "search_code",
+    success: true,
+    durationMs: 7,
+    outcome: "truncated",
+    skippedCount: 3,
+    integration: "codegraph",
+    integrationStatus: "indexed",
+    argShape: { regex: true, caseSensitive: false, paths: true },
+  });
+  assert.equal(toolEvent.outcome, "truncated");
+  assert.equal(toolEvent.skippedCount, 3);
+  assert.equal(toolEvent.integration, "codegraph");
+  assert.equal(toolEvent.integrationStatus, "indexed");
+  // Only flags that were set are kept; unset flags are omitted to keep events small.
+  assert.deepEqual(toolEvent.argShape, { regex: true, paths: true });
+
+  const requestEvent = sanitizeAnonymousEvent({
+    event: "mcp_request",
+    method: "tools/list",
+    success: true,
+    durationMs: 5,
+    toolCount: 12,
+    toolSetHash: "f".repeat(64),
+    guidanceVariant: "terse",
+  });
+  assert.equal(requestEvent.toolCount, 12);
+  assert.equal(requestEvent.toolSetHash, "f".repeat(64));
+  assert.equal(requestEvent.guidanceVariant, "terse");
+});
+
+test("privacy sanitizer coerces unknown categories and outcomes to safe values", () => {
+  // Only relevant for data that bypasses the types (older versions, hand-edited files).
+  const event = sanitizeAnonymousEvent({
+    event: "tool_call",
+    tool: "read_range",
+    success: false,
+    durationMs: 1,
+    outcome: "exploded" as ToolOutcome,
+    errorCategory: "operator exploded" as unknown as TelemetryErrorCategory,
+  });
+  assert.equal(event.outcome, "ok");
+  assert.equal(event.errorCategory, "unknown");
+});
+
 test("privacy sanitizer rejects raw command arguments and identifying values", () => {
   const event = sanitizeAnonymousEvent({
     event: "command_call",
@@ -404,7 +454,9 @@ test("tunnel telemetry records lifecycle states without raw failure details", ()
     event: "tunnel",
     state: "disconnected",
     attempt: 2,
-    reasonCategory: "public endpoint failed",
+    // Simulates data written by an older version or edited on disk: it bypasses the type but
+    // still has to be neutralized at write time.
+    reasonCategory: "public endpoint failed" as unknown as TelemetryErrorCategory,
   });
   assert.deepEqual(event, {
     event: "tunnel",

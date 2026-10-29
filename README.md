@@ -76,15 +76,17 @@ See [Configuration and tunnel setup](docs/CONFIGURATION.md) for the setup wizard
 - A compact MCP toolset for project context, file discovery, source search, bounded reads, targeted changes, and validation.
 - Authenticated, stateless MCP over `POST /mcp`.
 - Explicit package-script and executable allowlists; commands run without a shell.
-- Optional ast-grep syntax-aware structural search when its CLI is installed, optional CodeGraph code intelligence when CodeGraph is installed and the project is indexed, and optional Serena read-only semantic navigation when Serena is installed and configured.
+- Optional CodeGraph code intelligence when CodeGraph is installed and the project is indexed.
+- One representation per tool result: a single compact text payload, with no duplicated structured content and no output schemas to pay for on every request.
 - Optional local-only telemetry, disabled by default.
 
-See [MCP interface and security model](docs/MCP.md) for the supported protocol, tools, authentication, command policy, and optional ast-grep, CodeGraph, and Serena integrations.
+See [MCP interface and security model](docs/MCP.md) for the supported protocol, tools, authentication, command policy, and the optional CodeGraph integration.
 
 ## Documentation
 
 - [Configuration and tunnel setup](docs/CONFIGURATION.md) — setup wizard, profiles, Cloudflare Tunnel, Wormhole, tokens, and command allowlists.
-- [MCP interface and security model](docs/MCP.md) — supported endpoint, protocol behavior, tools, authentication, command execution, and optional ast-grep, CodeGraph, and Serena integrations.
+- [MCP interface and security model](docs/MCP.md) — supported endpoint, protocol behavior, tools, authentication, command execution, and the optional CodeGraph integration.
+- [Migrating to 2.0](docs/MIGRATION.md) — breaking changes: removed and renamed tools, single-payload results, result shapes, batch semantics, and configuration keys.
 - [Telemetry interpretation](docs/telemetry.md) — privacy levels, event model, metric definitions, and interpretation guidance.
 - [Release procedure](docs/RELEASING.md) — validation, branch/PR flow, semantic-release, and npm publishing.
 - [Contributing guide](https://github.com/SarfDime/agent-dir/blob/main/.github/CONTRIBUTING.md) — development setup, checks, and pull-request expectations.

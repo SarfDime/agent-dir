@@ -7,7 +7,6 @@ import path from "node:path";
 import test from "node:test";
 import { createMcpHandler, validateMcpParamHeaders } from "../src/mcp.js";
 import { getMcpLog, startServer, validateMcpHeaders } from "../src/server.js";
-import { isAstGrepAvailable } from "../src/tools/astgrep.js";
 import { startTunnel } from "../src/tunnel.js";
 
 test("CLI reports its package version", () => {
@@ -378,6 +377,36 @@ function requestFor(id: number, method: string, params: Record<string, unknown> 
   });
 }
 
+/**
+ * Tool results carry one representation: a text block with the compact JSON payload (or plain
+ * text for `read_range`). Mirror a JSON payload onto `structuredContent` so assertions can read it.
+ */
+async function jsonPayload(response: Response): Promise<unknown> {
+  const body = (await response.json()) as unknown;
+  if (typeof body !== "object" || body === null) return body;
+  const result = (body as Record<string, unknown>).result;
+  if (typeof result !== "object" || result === null) return body;
+  const record = result as Record<string, unknown>;
+  if (record.structuredContent !== undefined) return body;
+  const content = record.content;
+  if (!Array.isArray(content)) return body;
+  const text = content.find(
+    (item): item is { type: string; text: string } =>
+      typeof item === "object" &&
+      item !== null &&
+      (item as Record<string, unknown>).type === "text" &&
+      typeof (item as Record<string, unknown>).text === "string",
+  )?.text;
+  if (text === undefined) return body;
+  record.textContent = text;
+  try {
+    record.structuredContent = JSON.parse(text) as unknown;
+  } catch {
+    // Plain-text results (read_range) stay in the content block only.
+  }
+  return body;
+}
+
 test("MCP discovery responses are compact and measured in telemetry", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-discovery-telemetry-"));
   try {
@@ -430,7 +459,6 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     "run_package_scripts_batch",
     "search_code",
     "validate",
-    ...(isAstGrepAvailable() ? ["ast_grep_search"] : []),
   ];
   const removedTools = [
     "allowed_commands",
@@ -465,7 +493,7 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     for (const config of [{}, { commands: ["git"] }]) {
       const handler = createMcpHandler(root, config);
       const listed = await handler(requestFor(1, "tools/list"));
-      const body = (await listed.json()) as {
+      const body = (await jsonPayload(listed)) as {
         result: { tools: Array<{ name: string }> };
       };
       assert.deepEqual(body.result.tools.map((tool) => tool.name).sort(), expectedTools.sort());
@@ -474,13 +502,10 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
           requestFor(index + 2, "tools/call", { name, arguments: {} }),
         );
         const result = (await response.json()) as {
-          result: { isError?: boolean; structuredContent?: { error?: string } };
+          result: { isError?: boolean; content?: Array<{ text?: string }> };
         };
         assert.equal(result.result.isError, true, name);
-        assert.match(
-          result.result.structuredContent?.error ?? "",
-          new RegExp(`Unknown tool: ${name}`),
-        );
+        assert.match(result.result.content?.[0]?.text ?? "", new RegExp(`Unknown tool: ${name}`));
       }
       handler.closeSubscriptions();
     }
@@ -600,7 +625,7 @@ test("aborted MCP requests do not prevent a fresh request from succeeding", asyn
       }),
     });
     assert.equal(fresh.status, 200);
-    const freshBody = (await fresh.json()) as { result?: { tools?: unknown[] } };
+    const freshBody = (await jsonPayload(fresh)) as { result?: { tools?: unknown[] } };
     assert.ok(Array.isArray(freshBody.result?.tools));
   } finally {
     await server.close();
@@ -659,7 +684,7 @@ test("apply_changes preflights and atomically applies related file edits", async
         },
       }),
     );
-    const failedBody = (await failed.json()) as {
+    const failedBody = (await jsonPayload(failed)) as {
       result: { isError?: boolean; structuredContent?: { error?: string } };
     };
     assert.equal(failedBody.result.isError, true);
@@ -677,7 +702,7 @@ test("apply_changes preflights and atomically applies related file edits", async
         },
       }),
     );
-    const duplicateBody = (await duplicate.json()) as {
+    const duplicateBody = (await jsonPayload(duplicate)) as {
       result: { isError?: boolean; structuredContent?: { error?: string } };
     };
     assert.equal(duplicateBody.result.isError, true);
@@ -696,11 +721,17 @@ test("apply_changes preflights and atomically applies related file edits", async
         },
       }),
     );
-    const previewBody = (await preview.json()) as {
-      result: { structuredContent: Array<{ path: string; changed: boolean; dryRun?: boolean }> };
+    const previewBody = (await jsonPayload(preview)) as {
+      result: {
+        structuredContent: { items: Array<{ path: string; changed: boolean; dryRun?: boolean }> };
+      };
     };
     assert.deepEqual(
-      previewBody.result.structuredContent.map((item) => [item.path, item.changed, item.dryRun]),
+      previewBody.result.structuredContent.items.map((item) => [
+        item.path,
+        item.changed,
+        item.dryRun,
+      ]),
       [
         ["created.txt", true, true],
         ["two.txt", true, true],
@@ -722,11 +753,11 @@ test("apply_changes preflights and atomically applies related file edits", async
         },
       }),
     );
-    const appliedBody = (await applied.json()) as {
-      result: { structuredContent: Array<{ path: string; changed: boolean }> };
+    const appliedBody = (await jsonPayload(applied)) as {
+      result: { structuredContent: { items: Array<{ path: string; changed: boolean }> } };
     };
     assert.equal(
-      appliedBody.result.structuredContent.every((item) => item.changed),
+      appliedBody.result.structuredContent.items.every((item) => item.changed),
       true,
     );
     assert.equal(await readFile(path.join(root, "created.txt"), "utf8"), "created\n");
@@ -762,7 +793,9 @@ test("LLM-oriented output budgets bound high-volume results", async () => {
         },
       }),
     );
-    const batchBody = (await batchResponse.json()) as { result: { structuredContent: unknown } };
+    const batchBody = (await jsonPayload(batchResponse)) as {
+      result: { structuredContent: unknown };
+    };
     assert.ok(
       Buffer.byteLength(JSON.stringify(batchBody.result.structuredContent), "utf8") <= 1024,
     );
@@ -773,10 +806,11 @@ test("LLM-oriented output budgets bound high-volume results", async () => {
         arguments: { query: "target", maxResults: 20, maxBytes: 1024 },
       }),
     );
-    const searchBody = (await searchResponse.json()) as {
-      result: { structuredContent: Array<unknown> };
+    const searchBody = (await jsonPayload(searchResponse)) as {
+      result: { textContent: string };
     };
-    assert.ok(searchBody.result.structuredContent.length < 20);
+    assert.match(searchBody.result.textContent, /truncated: maxBytes/);
+    assert.ok(Buffer.byteLength(searchBody.result.textContent, "utf8") <= 1024);
 
     const contextResponse = await handler(
       requestFor(3, "tools/call", {
@@ -784,7 +818,7 @@ test("LLM-oriented output budgets bound high-volume results", async () => {
         arguments: { maxBytes: 1024 },
       }),
     );
-    const contextBody = (await contextResponse.json()) as {
+    const contextBody = (await jsonPayload(contextResponse)) as {
       result: { structuredContent: unknown };
     };
     assert.ok(
@@ -819,11 +853,15 @@ test("discovery search outputs honor maxBytes", async () => {
         requestFor(index + 1, "tools/call", { name, arguments: argumentsValue }),
       );
       assert.equal(response.status, 200);
-      const body = (await response.json()) as { result: { structuredContent: unknown } };
-      assert.ok(
-        Buffer.byteLength(JSON.stringify(body.result.structuredContent), "utf8") <= 1024,
-        name,
-      );
+      const body = (await jsonPayload(response)) as {
+        result: { structuredContent?: unknown; textContent?: string };
+      };
+      // search_code renders grep-style text by default; the other tools return an object.
+      const rendered =
+        name === "search_code"
+          ? String(body.result.textContent)
+          : JSON.stringify(body.result.structuredContent);
+      assert.ok(Buffer.byteLength(rendered, "utf8") <= 1024, name);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -851,10 +889,10 @@ test("low-level read and command outputs honor maxBytes", async () => {
         arguments: { path: "one.txt", startLine: 1, endLine: 1, maxBytes: 1024 },
       }),
     );
-    const rangeBody = (await range.json()) as {
-      result: { structuredContent: { content: string } };
+    const rangeBody = (await jsonPayload(range)) as {
+      result: { textContent: string };
     };
-    assert.ok(Buffer.byteLength(rangeBody.result.structuredContent.content, "utf8") <= 1024);
+    assert.ok(Buffer.byteLength(rangeBody.result.textContent, "utf8") <= 1024);
 
     const secondRange = await handler(
       requestFor(2, "tools/call", {
@@ -862,13 +900,11 @@ test("low-level read and command outputs honor maxBytes", async () => {
         arguments: { path: "two.txt", startLine: 1, endLine: 1, maxBytes: 1024 },
       }),
     );
-    const secondRangeBody = (await secondRange.json()) as {
-      result: { structuredContent: { content: string } };
+    const secondRangeBody = (await jsonPayload(secondRange)) as {
+      result: { textContent: string };
     };
-    assert.ok(secondRangeBody.result.structuredContent.content.endsWith("[truncated]"));
-    assert.ok(
-      Buffer.byteLength(JSON.stringify(secondRangeBody.result.structuredContent), "utf8") <= 1024,
-    );
+    assert.ok(secondRangeBody.result.textContent.endsWith("[truncated]"));
+    assert.ok(Buffer.byteLength(secondRangeBody.result.textContent, "utf8") <= 1024);
 
     const patched = await handler(
       requestFor(3, "tools/call", {
@@ -881,10 +917,10 @@ test("low-level read and command outputs honor maxBytes", async () => {
         },
       }),
     );
-    const patchedBody = (await patched.json()) as {
-      result: { structuredContent: Array<{ changed: boolean; dryRun?: boolean }> };
+    const patchedBody = (await jsonPayload(patched)) as {
+      result: { structuredContent: { items: Array<{ changed: boolean; dryRun?: boolean }> } };
     };
-    assert.equal(patchedBody.result.structuredContent[0]?.changed, true);
+    assert.equal(patchedBody.result.structuredContent.items[0]?.changed, true);
 
     const compactPatch = await handler(
       requestFor(5, "tools/call", {
@@ -897,10 +933,12 @@ test("low-level read and command outputs honor maxBytes", async () => {
         },
       }),
     );
-    const compactPatchBody = (await compactPatch.json()) as {
-      result: { structuredContent: Array<{ path: string; changed: boolean; dryRun?: boolean }> };
+    const compactPatchBody = (await jsonPayload(compactPatch)) as {
+      result: {
+        structuredContent: { items: Array<{ path: string; changed: boolean; dryRun?: boolean }> };
+      };
     };
-    assert.deepEqual(compactPatchBody.result.structuredContent, [
+    assert.deepEqual(compactPatchBody.result.structuredContent.items, [
       { kind: "patch", path: "patch.txt", changed: true, dryRun: true, existed: true },
     ]);
 
@@ -910,12 +948,19 @@ test("low-level read and command outputs honor maxBytes", async () => {
         arguments: { scripts: ["check"], maxBytes: 1024 },
       }),
     );
-    const commandBody = (await command.json()) as {
-      result: { structuredContent: Array<{ stdout: string; stderr: string }> };
+    const commandBody = (await jsonPayload(command)) as {
+      result: {
+        structuredContent: {
+          items: Array<{ stdout?: string; stderr?: string; status: string }>;
+          truncated: boolean;
+        };
+      };
     };
-    const commandResult = commandBody.result.structuredContent[0];
+    const commandResult = commandBody.result.structuredContent.items[0];
     assert.ok(commandResult);
-    assert.ok(Buffer.byteLength(JSON.stringify(commandResult), "utf8") <= 1024);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(commandBody.result.structuredContent), "utf8") <= 1024,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -944,14 +989,14 @@ test("file, symbol, and code lookups return bounded context", async () => {
         arguments: { path: "src/sample.ts", startLine: 1, endLine: 6, maxBytes: 1024 },
       }),
     );
-    const fileBody = (await fileResponse.json()) as {
+    const fileBody = (await jsonPayload(fileResponse)) as {
       result: {
-        structuredContent: { path: string; content: string; truncated: boolean };
+        textContent: string;
       };
     };
-    assert.equal(fileBody.result.structuredContent.path, "src/sample.ts");
-    assert.match(fileBody.result.structuredContent.content, /greet/);
-    assert.equal(fileBody.result.structuredContent.truncated, false);
+    assert.match(fileBody.result.textContent, /src\/sample\.ts/);
+    assert.match(fileBody.result.textContent, /greet/);
+    assert.doesNotMatch(fileBody.result.textContent, /\[truncated\]/);
 
     const symbolResponse = await handler(
       requestFor(2, "tools/call", {
@@ -959,13 +1004,13 @@ test("file, symbol, and code lookups return bounded context", async () => {
         arguments: { symbol: "greet", maxResults: 5, maxBytes: 1024 },
       }),
     );
-    const symbolBody = (await symbolResponse.json()) as {
+    const symbolBody = (await jsonPayload(symbolResponse)) as {
       result: {
-        structuredContent: Array<{ symbol: string; text: string }>;
+        structuredContent: { items: Array<{ symbol: string; text: string }> };
       };
     };
-    assert.equal(symbolBody.result.structuredContent.length, 1);
-    assert.equal(symbolBody.result.structuredContent[0]?.symbol, "greet");
+    assert.equal(symbolBody.result.structuredContent.items.length, 1);
+    assert.equal(symbolBody.result.structuredContent.items[0]?.symbol, "greet");
 
     const codeResponse = await handler(
       requestFor(3, "tools/call", {
@@ -973,11 +1018,12 @@ test("file, symbol, and code lookups return bounded context", async () => {
         arguments: { query: "return message", maxResults: 5 },
       }),
     );
-    const codeBody = (await codeResponse.json()) as {
-      result: { structuredContent: Array<{ text: string }> };
+    const codeBody = (await jsonPayload(codeResponse)) as {
+      result: { textContent: string };
     };
-    assert.equal(codeBody.result.structuredContent.length, 1);
-    assert.match(codeBody.result.structuredContent[0]?.text ?? "", /return message/);
+    const codeLines = codeBody.result.textContent.split("\n");
+    assert.equal(codeLines.length, 2, "one header line plus one match");
+    assert.match(codeLines[1] ?? "", /return message/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -997,21 +1043,20 @@ test("validate composes diagnostics with explicitly allowed package scripts", as
         arguments: { level: "scripts", scripts: ["check"] },
       }),
     );
-    const body = (await response.json()) as {
+    const body = (await jsonPayload(response)) as {
       result: {
         structuredContent: {
           ok: boolean;
-          checks: Array<{ kind: string; script?: string; ok: boolean }>;
+          diagnostics: { ok: boolean };
+          scripts: { items: Array<{ command: string; status: string }> };
         };
       };
     };
     assert.equal(body.result.structuredContent.ok, true);
+    assert.equal(body.result.structuredContent.diagnostics.ok, true);
     assert.deepEqual(
-      body.result.structuredContent.checks.map((check) => [check.kind, check.script, check.ok]),
-      [
-        ["diagnostics", undefined, true],
-        ["package-script", "check", true],
-      ],
+      body.result.structuredContent.scripts.items.map((item) => [item.command, item.status]),
+      [["npm run check", "success"]],
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1042,10 +1087,17 @@ test("request logs show files changed by apply_changes without logging file cont
   );
   const logged = getMcpLog(request, {
     result: {
-      structuredContent: [
-        { kind: "patch", path: "src/secret.ts", changed: true },
-        { kind: "write", path: "src/new.ts", changed: true },
-        { kind: "delete", path: "src/old.ts", changed: false },
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            items: [
+              { kind: "patch", path: "src/secret.ts", changed: true },
+              { kind: "write", path: "src/new.ts", changed: true },
+              { kind: "delete", path: "src/old.ts", changed: false },
+            ],
+          }),
+        },
       ],
     },
   });
@@ -1092,7 +1144,7 @@ test("project_context reports the active command policy", async () => {
       }),
     );
     assert.equal(response.status, 200);
-    const result = (await response.json()) as {
+    const result = (await jsonPayload(response)) as {
       result: {
         structuredContent: { execution: { allowedScripts: string[]; commands: string[] } };
       };
@@ -1100,6 +1152,7 @@ test("project_context reports the active command policy", async () => {
     assert.deepEqual(result.result.structuredContent.execution, {
       allowedScripts: ["check", "test"],
       commands: ["git", "node", "npm"],
+      blacklistedCommands: ["git commit"],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1116,7 +1169,7 @@ test("project_context defaults to an empty command policy", async () => {
         arguments: {},
       }),
     );
-    const result = (await response.json()) as {
+    const result = (await jsonPayload(response)) as {
       result: {
         structuredContent: { execution: { allowedScripts: string[]; commands: string[] } };
       };
@@ -1124,6 +1177,7 @@ test("project_context defaults to an empty command policy", async () => {
     assert.deepEqual(result.result.structuredContent.execution, {
       allowedScripts: [],
       commands: [],
+      blacklistedCommands: [],
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1587,7 +1641,9 @@ test("Agent Dir instruction resources reflect the active execution policy", asyn
       commands: ["git", "rg"],
     });
     const listed = await handler(requestFor(1, "resources/list"));
-    const listedResult = (await listed.json()) as { result: { resources: Array<{ uri: string }> } };
+    const listedResult = (await jsonPayload(listed)) as {
+      result: { resources: Array<{ uri: string }> };
+    };
     assert.ok(
       listedResult.result.resources.some((resource) => resource.uri === "agent-dir://instructions"),
     );
@@ -1657,7 +1713,7 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
     });
 
     const contextResponse = await handler(requestFor(1, "tools/call", { name: "project_context" }));
-    const context = (await contextResponse.json()) as {
+    const context = (await jsonPayload(contextResponse)) as {
       result: {
         structuredContent: {
           package: { name: string };
@@ -1669,6 +1725,7 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
     assert.deepEqual(context.result.structuredContent.execution, {
       allowedScripts: ["check"],
       commands: ["git"],
+      blacklistedCommands: [],
     });
 
     const relevantResponse = await handler(
@@ -1677,14 +1734,11 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
         arguments: { query: "target", maxResults: 1 },
       }),
     );
-    const relevant = (await relevantResponse.json()) as {
-      result: {
-        structuredContent: Array<{ path: string; line: number; text: string }>;
-      };
+    const relevant = (await jsonPayload(relevantResponse)) as {
+      result: { textContent: string };
     };
-    assert.equal(relevant.result.structuredContent[0]?.path, "src/demo.ts");
-    assert.equal(relevant.result.structuredContent[0]?.line, 1);
-    assert.match(relevant.result.structuredContent[0]?.text ?? "", /target/);
+    assert.match(relevant.result.textContent, /^1 match in 1 file \(/);
+    assert.match(relevant.result.textContent, /src\/demo\.ts:1:\d+ export function target/);
 
     const commandResponse = await handler(
       requestFor(3, "tools/call", {
@@ -1692,11 +1746,20 @@ test("LLM-oriented tools reduce orientation and reading round trips; Git uses al
         arguments: { commands: [{ command: "git", args: ["--version"] }] },
       }),
     );
-    const command = (await commandResponse.json()) as {
-      result: { structuredContent: Array<{ command: string; exitCode: number; stdout: string }> };
+    const command = (await jsonPayload(commandResponse)) as {
+      result: {
+        structuredContent: {
+          ok: boolean;
+          items: Array<{ command: string; status: string; exitCode: number; ran: boolean }>;
+        };
+      };
     };
-    assert.equal(command.result.structuredContent[0]?.command, "git --version");
-    assert.equal(command.result.structuredContent[0]?.exitCode, 0);
+    const item = command.result.structuredContent.items[0];
+    assert.equal(item?.command, "git --version");
+    assert.equal(item?.exitCode, 0);
+    assert.equal(item?.status, "success");
+    assert.equal(item?.ran, true);
+    assert.equal(command.result.structuredContent.ok, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1716,14 +1779,13 @@ test("code search provides bounded discovery", async () => {
         arguments: { query: "target", maxResults: 1 },
       }),
     );
-    const body = (await response.json()) as {
-      result: {
-        structuredContent: Array<{ path: string; text: string }>;
-      };
+    const body = (await jsonPayload(response)) as {
+      result: { textContent: string };
     };
-    assert.equal(body.result.structuredContent.length, 1);
-
-    assert.equal(body.result.structuredContent[0]?.path, "src/demo.ts");
+    const lines = body.result.textContent.split("\n");
+    assert.equal(lines.length, 2, "one header line plus one match under maxResults: 1");
+    assert.match(lines[1] ?? "", /^src\/demo\.ts:1:\d+ /);
+    assert.match(lines[0] ?? "", /^1 match in 1 file \(/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1748,11 +1810,11 @@ test("mutation dry-run previews without changing files", async () => {
     );
     assert.equal(patchResponse.status, 200);
     assert.equal(await readFile(path.join(root, "demo.txt"), "utf8"), "before\n");
-    const patchResult = (await patchResponse.json()) as {
-      result: { structuredContent: Array<{ changed: boolean; dryRun: boolean }> };
+    const patchResult = (await jsonPayload(patchResponse)) as {
+      result: { structuredContent: { items: Array<{ changed: boolean; dryRun: boolean }> } };
     };
-    assert.equal(patchResult.result.structuredContent[0]?.changed, true);
-    assert.equal(patchResult.result.structuredContent[0]?.dryRun, true);
+    assert.equal(patchResult.result.structuredContent.items[0]?.changed, true);
+    assert.equal(patchResult.result.structuredContent.items[0]?.dryRun, true);
 
     const writeResponse = await handler(
       requestFor(2, "tools/call", {
@@ -1924,7 +1986,7 @@ test("resources/directory/read lists direct skill children", async () => {
     assert.equal((result.result as { cacheScope: string }).cacheScope, "private");
 
     const discover = await handler(requestFor(2, "server/discover"));
-    const discoverResult = (await discover.json()) as {
+    const discoverResult = (await jsonPayload(discover)) as {
       result: { capabilities: { extensions: Record<string, unknown> } };
     };
     assert.deepEqual(

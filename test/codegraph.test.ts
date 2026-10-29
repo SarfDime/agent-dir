@@ -190,7 +190,7 @@ test("Agent Dir conditionally exposes codegraph_explore", async () => {
       result: { instructions: string; codeGraph: { status: string } };
     };
     assert.equal(discovery.result.codeGraph.status, "available");
-    assert.match(discovery.result.instructions, /call codegraph_explore first/i);
+    assert.match(discovery.result.instructions, /codegraph_explore/);
 
     const instructionsResponse = await handler(
       new Request("http://localhost/mcp", {
@@ -212,7 +212,8 @@ test("Agent Dir conditionally exposes codegraph_explore", async () => {
     const instructions = (await instructionsResponse.json()) as {
       result: { contents: Array<{ text: string }> };
     };
-    assert.match(instructions.result.contents[0]?.text ?? "", /REQUIRED FIRST STEP/);
+    assert.match(instructions.result.contents[0]?.text ?? "", /codegraph_explore/);
+    assert.doesNotMatch(instructions.result.contents[0]?.text ?? "", /REQUIRED FIRST STEP/);
     handler.closeSubscriptions();
   } finally {
     fake.restore();
@@ -252,13 +253,13 @@ test("CodeGraph MCP output stays within maxBytes and preserves valid structured 
       }),
     );
     const body = (await response.json()) as {
-      result: { structuredContent?: Record<string, unknown> };
+      result: { content?: Array<{ type: string; text?: string }> };
     };
-    const structured = body.result.structuredContent;
-    assert.ok(structured, "MCP should return structured content");
-    assert.ok(Buffer.byteLength(JSON.stringify(structured), "utf8") <= 1024);
+    const text = body.result.content?.[0]?.text ?? "";
+    const structured = JSON.parse(text) as Record<string, unknown>;
+    assert.ok(structured, "MCP should return the payload");
+    assert.ok(Buffer.byteLength(text, "utf8") <= 1024);
     const serialized = JSON.stringify(structured);
-    assert.doesNotThrow(() => JSON.parse(serialized));
     assert.match(serialized, /truncated|budget|exceeded/i);
     handler.closeSubscriptions();
   } finally {
@@ -315,6 +316,60 @@ test("CodeGraph runtime failure is surfaced after process exit", async () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     await assert.rejects(() => integration.explore("second"), /CodeGraph/);
     assert.equal((await integration.capability()).status, "runtime_failed");
+    await integration.close();
+  } finally {
+    fake.restore();
+    await rm(fake.bin, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CodeGraph restarts after a failure once the backoff has passed and notifies listeners", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-codegraph-"));
+  const fake = await makeFakeCodeGraph();
+  try {
+    await writeIndex(root, "runtime-fail");
+    const integration = new CodeGraphIntegration(root, { retryBaseMs: 150 });
+    const states: string[] = [];
+    integration.onChange = () => states.push(integration.describe().status);
+    await integration.explore("first");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const failed = await integration.capability();
+    assert.equal(failed.status, "runtime_failed");
+    assert.match(failed.detail ?? "", /restarts automatically/);
+    assert.ok(integration.describe().retryInSeconds !== undefined);
+    await assert.rejects(() => integration.explore("during backoff"), /restarts automatically/);
+
+    // Remove the failure marker; the next process starts cleanly after the backoff.
+    await rm(path.join(root, ".codegraph", "runtime-fail"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await integration.explore("after recovery");
+    assert.equal((await integration.capability()).status, "available");
+    assert.deepEqual(
+      states.filter((state) => state !== "unknown"),
+      ["available", "runtime_failed", "available"],
+    );
+    await integration.close();
+  } finally {
+    fake.restore();
+    await rm(fake.bin, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("CodeGraph ignores stray non-JSON output instead of failing", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-codegraph-"));
+  const fake = await makeFakeCodeGraph();
+  try {
+    await writeIndex(root);
+    const integration = new CodeGraphIntegration(root);
+    // Reach into the stream handler: a log line followed by a real response must still work.
+    await integration.explore("warm up");
+    (integration as unknown as { consume(chunk: Buffer): void }).consume(
+      Buffer.from("starting indexer... done\n"),
+    );
+    assert.equal((await integration.capability()).status, "available");
+    await integration.explore("still works");
     await integration.close();
   } finally {
     fake.restore();

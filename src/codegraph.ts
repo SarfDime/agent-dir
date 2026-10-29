@@ -36,6 +36,8 @@ interface JsonRpcMessage {
   error?: { code?: number; message?: string; data?: unknown };
 }
 
+const RECHECK_MS = 30_000;
+
 interface PendingRequest {
   resolve: (message: JsonRpcMessage) => void;
   reject: (error: Error) => void;
@@ -52,14 +54,65 @@ export class CodeGraphIntegration {
   private closed = false;
   private runtimeFailure: string | undefined;
   private readonly pending = new Map<number, PendingRequest>();
+  private readonly retryBaseMs: number;
+  private detectedAt = 0;
+  private failures = 0;
+  private nextRetryAt = 0;
+  private lastStatus: string | undefined;
+  private lastCapability: CodeGraphCapability | undefined;
+  private discarding = false;
+  /** Called when availability changes so tool lists can be refreshed and clients notified. */
+  onChange: (() => void) | undefined;
 
-  constructor(root: string) {
+  constructor(root: string, options: { retryBaseMs?: number } = {}) {
     this.root = resolve(root);
+    this.retryBaseMs = options.retryBaseMs ?? 15_000;
   }
 
+  /** Last known availability for discovery responses; never starts anything. */
+  describe(): { status: string; detail?: string; retryInSeconds?: number } {
+    const capability = this.lastCapability;
+    if (!capability) return { status: "unknown" };
+    const failed = capability.status === "startup_failed" || capability.status === "runtime_failed";
+    return {
+      status: capability.status,
+      ...(capability.detail ? { detail: capability.detail } : {}),
+      ...(failed
+        ? { retryInSeconds: Math.max(0, Math.ceil((this.nextRetryAt - Date.now()) / 1000)) }
+        : {}),
+    };
+  }
+
+  private noteStatus(capability: CodeGraphCapability): void {
+    this.lastCapability = capability;
+    if (capability.status === this.lastStatus) return;
+    this.lastStatus = capability.status;
+    this.onChange?.();
+  }
+
+  /**
+   * Availability is re-checked so setup is picked up (a later `codegraph init`) and a failed
+   * process is restarted automatically once its backoff has passed.
+   */
   async capability(): Promise<CodeGraphCapability> {
-    if (!this.capabilityPromise) this.capabilityPromise = this.detect();
-    return this.capabilityPromise;
+    if (this.capabilityPromise) {
+      const current = await this.capabilityPromise;
+      const now = Date.now();
+      const setupMissing = current.status === "not_installed" || current.status === "not_indexed";
+      const failed = current.status === "startup_failed" || current.status === "runtime_failed";
+      const stale = setupMissing && now - this.detectedAt >= RECHECK_MS;
+      const retry = failed && now >= this.nextRetryAt && !this.closed;
+      if (!stale && !retry) {
+        this.lastCapability = current;
+        return current;
+      }
+      this.runtimeFailure = undefined;
+    }
+    this.capabilityPromise = this.detect();
+    this.detectedAt = Date.now();
+    const detected = await this.capabilityPromise;
+    this.noteStatus(detected);
+    return detected;
   }
 
   async prepare(): Promise<CodeGraphCapability> {
@@ -202,6 +255,7 @@ export class CodeGraphIntegration {
 
       this.initialized = true;
       this.runtimeFailure = undefined;
+      this.failures = 0;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.handleProcessFailure(`CodeGraph startup failed: ${detail}`, "startup_failed");
@@ -243,9 +297,21 @@ export class CodeGraphIntegration {
   }
 
   private consume(chunk: Buffer): void {
-    this.buffer += chunk.toString("utf8");
+    let text = chunk.toString("utf8");
+    if (this.discarding) {
+      const newline = text.indexOf("\n");
+      if (newline === -1) return;
+      this.discarding = false;
+      text = text.slice(newline + 1);
+    }
+    this.buffer += text;
     if (Buffer.byteLength(this.buffer, "utf8") > MAX_MESSAGE_BYTES) {
-      this.handleProcessFailure("CodeGraph returned an oversized MCP message.");
+      // Drop the oversized message and fail only the waiting requests, not the whole process.
+      this.buffer = "";
+      this.discarding = true;
+      this.rejectPending(
+        new Error("CodeGraph returned an oversized MCP message; narrow the query."),
+      );
       return;
     }
 
@@ -264,8 +330,7 @@ export class CodeGraphIntegration {
         clearTimeout(pending.timer);
         pending.resolve(message);
       } catch {
-        this.handleProcessFailure("CodeGraph returned malformed MCP JSON.");
-        return;
+        // A stray log line on stdout must not take the integration down.
       }
     }
   }
@@ -280,13 +345,18 @@ export class CodeGraphIntegration {
     const child = this.process;
     this.process = undefined;
     if (child && !child.killed) child.kill("SIGTERM");
-    this.capabilityPromise = Promise.resolve({
+    this.failures += 1;
+    const delayMs = Math.min(300_000, this.retryBaseMs * 2 ** (this.failures - 1));
+    this.nextRetryAt = Date.now() + delayMs;
+    const capability: CodeGraphCapability = {
       status,
       installed: true,
       indexed: true,
       tool: "codegraph_explore",
-      detail,
-    });
+      detail: `${detail} CodeGraph restarts automatically (next attempt in about ${Math.round(delayMs / 1000)} s); use search_code and read_range meanwhile.`,
+    };
+    this.capabilityPromise = Promise.resolve(capability);
+    this.noteStatus(capability);
   }
 
   private rejectPending(error: Error): void {
