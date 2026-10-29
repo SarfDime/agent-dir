@@ -6,11 +6,11 @@ allowlists or non-shell execution changed.
 
 ## Tool set
 
-| Change | Replacement |
-| --- | --- |
-| `serena_*` tools removed | `find_symbol`, `find_references`, `search_code`, `read_range`, `apply_changes` |
+| Change                    | Replacement                                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------ |
+| `serena_*` tools removed  | `find_symbol`, `find_references`, `search_code`, `read_range`, `apply_changes`       |
 | `ast_grep_search` removed | `search_code` (now with `multiline`) or `codegraph_explore` for structural questions |
-| `run_npm_batch` renamed | `run_package_scripts_batch` (no alias) |
+| `run_npm_batch` renamed   | `run_package_scripts_batch` (no alias)                                               |
 
 An Agent Dir instance now advertises 11 tools, plus `codegraph_explore` when the project is indexed
 and `telemetry_analytics` when started with `--analytics`. Prompts or agent instructions that name
@@ -42,14 +42,14 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 
 ## Result shapes per tool
 
-| Tool | Result |
-| --- | --- |
-| `search_code`, `find_symbol`, `find_references` | `{ items, returned, truncated, truncationReason?, backend, incomplete?, notes? }` instead of a bare array |
-| `find_files` | `{ items, truncated }` |
-| `apply_changes` | `{ items, dryRun }` (per-file status only, never contents or diffs) |
-| `read_range` | Plain text with a header plus `eof`, `totalLines`, `nextStartLine`; 16 KB default; `ranges: [...]` for several ranges |
-| `validate` | `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }` |
-| `run_command_batch`, `run_package_scripts_batch` | `{ ok, onError, summary, items, truncated }` with a per-item `status` |
+| Tool                                             | Result                                                                                                                |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `search_code`, `find_symbol`, `find_references`  | `{ items, returned, truncated, truncationReason?, backend, incomplete?, notes? }` instead of a bare array             |
+| `find_files`                                     | `{ items, truncated }`                                                                                                |
+| `apply_changes`                                  | `{ items, dryRun }` (per-file status only, never contents or diffs)                                                   |
+| `read_range`                                     | Plain text with a header plus `eof`, `totalLines`, `nextStartLine`; 16 KB default; `ranges: [...]` for several ranges |
+| `validate`                                       | `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }`                                            |
+| `run_command_batch`, `run_package_scripts_batch` | `{ ok, onError, summary, items, truncated }` with a per-item `status`                                                 |
 
 `search_code` also gained `multiline` (patterns can span lines; identical on the ripgrep and built-in
 backends) alongside the existing `paths`, `globs`, `context`, `caseSensitive` and `includeGenerated`.
@@ -66,13 +66,13 @@ successful, a `reason`, so an agent never has to infer whether a command ran.
 
 ## Configuration
 
-| Key | Change |
-| --- | --- |
-| `npm.allowedScripts` | Moved to `scripts.allowedScripts`, with `packageManager` for the manager. An old profile is migrated in memory with a warning. |
-| `tools.disabledSets` | `serena` and `ast_grep` no longer exist and are stripped with a warning. Supported sets: `codegraph`, `analytics`, `filesystem`, `search`, `commands`. |
-| `tools.disabled` | Entries such as `serena_find_symbol` or `ast_grep_search` are stripped with a warning. |
-| `blacklistedCommands` | Matched against normalized subcommands, so `git -C x push` and `npm --prefix x publish` are blocked like `git push`. Prefix entries keep working. |
-| `commandPolicy`, `protectedPaths` | New per-profile guardrails for argument rules and for paths `apply_changes` may not write. |
+| Key                               | Change                                                                                                                                                 |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `npm.allowedScripts`              | Moved to `scripts.allowedScripts`, with `packageManager` for the manager. An old profile is migrated in memory with a warning.                         |
+| `tools.disabledSets`              | `serena` and `ast_grep` no longer exist and are stripped with a warning. Supported sets: `codegraph`, `analytics`, `filesystem`, `search`, `commands`. |
+| `tools.disabled`                  | Entries such as `serena_find_symbol` or `ast_grep_search` are stripped with a warning.                                                                 |
+| `blacklistedCommands`             | Matched against normalized subcommands, so `git -C x push` and `npm --prefix x publish` are blocked like `git push`. Prefix entries keep working.      |
+| `commandPolicy`, `protectedPaths` | New per-profile guardrails for argument rules and for paths `apply_changes` may not write.                                                             |
 
 Remove the obsolete keys after the first start to silence the warnings.
 

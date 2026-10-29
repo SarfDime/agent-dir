@@ -172,25 +172,25 @@ The table above was padded into wide single-line rows by a Markdown formatter, s
 
 Structural metrics were measured directly against the built server. Behavioural metrics come from tool-call telemetry, so they need real usage of the 2.0 build; re-run the section 4b aggregation once a window exists and compare `toolSetHash` to be sure the advertised set is identical.
 
-| Metric | Baseline (section 3) | Now | Status |
-| --- | --- | --- | --- |
-| `tools/list` size | 22.7 KB | 11.1 KB (no integrations), 11.9 KB with CodeGraph and analytics | measured |
-| `initialize` response | 4.7-5.0 KB (long instructions) | 850 B (short decision table) | measured |
-| `server/discover` size | 1.5 KB | 2.4 KB (adds `capabilityModel`) | measured |
-| Advertised tools | 13-22 | 11-13 | measured |
-| Result wire size vs `maxBytes` | 1.84-2.08x | 1.01-1.13x | measured |
-| `telemetry_analytics` wire vs `maxBytes` | 1.76-2.27x | 0.40-1.00x | measured |
-| Search truncation reported | 0 of 93 | always (`truncated` + `truncationReason`) | structural |
-| Session summaries recorded | 7 of 20 | one per session (periodic snapshots) | structural |
-| Telemetry client identity | 3 of 3,153 events | every request | structural |
-| Legacy `diagnosticDetails` | 303 events | 0 | measured |
-| `read_range` share of output tokens | 62% | - | needs window |
-| `read_range` truncated | 10.6% | - | needs window |
-| Reads that follow a read | 73% | - | needs window |
-| `apply_changes` failures | 21.7% | - | needs window |
-| `validate` truncated / latency | 44% / 13.0 s mean | - | needs window |
-| `run_command_batch` latency | 3.6 s mean / 27.0 s p95 | - | needs window |
-| Duplicate output calls | 18 calls / ~35k tokens | - | needs window |
+| Metric                                   | Baseline (section 3)           | Now                                                             | Status       |
+| ---------------------------------------- | ------------------------------ | --------------------------------------------------------------- | ------------ |
+| `tools/list` size                        | 22.7 KB                        | 11.1 KB (no integrations), 11.9 KB with CodeGraph and analytics | measured     |
+| `initialize` response                    | 4.7-5.0 KB (long instructions) | 850 B (short decision table)                                    | measured     |
+| `server/discover` size                   | 1.5 KB                         | 2.4 KB (adds `capabilityModel`)                                 | measured     |
+| Advertised tools                         | 13-22                          | 11-13                                                           | measured     |
+| Result wire size vs `maxBytes`           | 1.84-2.08x                     | 1.01-1.13x                                                      | measured     |
+| `telemetry_analytics` wire vs `maxBytes` | 1.76-2.27x                     | 0.40-1.00x                                                      | measured     |
+| Search truncation reported               | 0 of 93                        | always (`truncated` + `truncationReason`)                       | structural   |
+| Session summaries recorded               | 7 of 20                        | one per session (periodic snapshots)                            | structural   |
+| Telemetry client identity                | 3 of 3,153 events              | every request                                                   | structural   |
+| Legacy `diagnosticDetails`               | 303 events                     | 0                                                               | measured     |
+| `read_range` share of output tokens      | 62%                            | -                                                               | needs window |
+| `read_range` truncated                   | 10.6%                          | -                                                               | needs window |
+| Reads that follow a read                 | 73%                            | -                                                               | needs window |
+| `apply_changes` failures                 | 21.7%                          | -                                                               | needs window |
+| `validate` truncated / latency           | 44% / 13.0 s mean              | -                                                               | needs window |
+| `run_command_batch` latency              | 3.6 s mean / 27.0 s p95        | -                                                               | needs window |
+| Duplicate output calls                   | 18 calls / ~35k tokens         | -                                                               | needs window |
 
 ## 4b. Credit-usage investigation (2026-10-29)
 
