@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile as fsWriteFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { writeFile as fsWriteFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -629,6 +629,66 @@ test("two clients in one process keep their own identity", async () => {
         envelope.event.event === "tool_call" ? [envelope.runtime?.mcpClientName] : [],
       );
     assert.deepEqual(toolClients, ["first-client", "second-client"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the agent-facing skill names exactly the advertised tools", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-skill-tools-"));
+  try {
+    // A stub integration so the conditional tools are advertised too, without a real index.
+    const codeGraph = {
+      capability: async () => ({ status: "available", tools: ["codegraph_explore"] }),
+      explore: async () => ({ result: "", truncated: false }),
+    } as unknown as Parameters<typeof createMcpHandler>[3];
+    const handler = createMcpHandler(root, {}, { level: "none" }, codeGraph, true);
+    const list = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/list",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }),
+    );
+    const advertised = new Set(
+      ((await list.json()) as { result: { tools: Array<{ name: string }> } }).result.tools.map(
+        (tool) => tool.name,
+      ),
+    );
+    assert.ok(advertised.size > 0);
+
+    const skill = await readFile(
+      path.join(process.cwd(), "skills", "agent-dir-tools", "SKILL.md"),
+      "utf8",
+    );
+    const table = skill.split("## Pick the tool by question")[1]?.split("\n## ")[0] ?? "";
+    assert.ok(table.length > 0, "the skill should keep its tool table");
+    const named = new Set<string>();
+    for (const line of table.split("\n")) {
+      if (!line.startsWith("|")) continue;
+      // | question | `tool` | not this |  — the middle cell holds exactly one backticked tool.
+      const toolCell = line.split("|")[2]?.trim() ?? "";
+      for (const match of toolCell.matchAll(/`([a-z][a-z0-9_]*)`/g))
+        if (match[1]) named.add(match[1]);
+    }
+
+    // No invented or renamed tool reaches an agent through the skill.
+    assert.deepEqual(
+      [...named].filter((name) => !advertised.has(name)),
+      [],
+      "the skill names tools that are not advertised",
+    );
+    // And no advertised tool is missing from it.
+    assert.deepEqual(
+      [...advertised].filter((name) => !named.has(name)),
+      [],
+      "an advertised tool is missing from the skill",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

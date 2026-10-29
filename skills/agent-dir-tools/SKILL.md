@@ -28,8 +28,9 @@ as a correctable message rather than a failure. Read those messages; do not rese
 | --- | --- | --- |
 | What is this project, and what may I run? | `project_context` | `ls`, `cat package.json` |
 | Where is file X? | `find_files` | `find`, `ls` |
+| How big is X, or when did it change? | `file_info` | `stat`, `wc -l` |
 | Where is text Y? | `search_code` | `grep`, `rg` |
-| What are the lines around a hit? | `search_code` with `context: 2` | `search_code` then `read_range` |
+| What are the lines around a hit? | `search_code` with context set | `search_code` then `read_range` |
 | Show me code | `read_range` | `cat`, `sed -n` |
 | Where is symbol X defined? | `find_symbol` | `search_code` on every guess |
 | Who calls X? | `find_references` | `search_code` per call site |
