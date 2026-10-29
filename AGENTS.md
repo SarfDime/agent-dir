@@ -25,6 +25,8 @@ Review the `npm pack --dry-run` file list for accidental source-only files, cred
 
 Keep changes focused. Preserve the authentication model, project-root filesystem safety, command allowlists, and non-shell command execution.
 
+Formatting scope: Biome formats TypeScript and JSON only. Markdown and `.serena/` are excluded in `biome.json` on purpose. Biome 2.6 can format Markdown, but it pads every table cell to the widest column, so a one-cell edit rewrites the whole table. Keep `npm run check` green rather than reformatting docs.
+
 ## Release rules
 
 Releases are fully automated by `.github/workflows/publish.yml`.
