@@ -44,7 +44,7 @@ Health of the rest of the surface, same window:
 | `validate` truncated | 47% |
 | `telemetry_analytics` truncated | 45% |
 | `codegraph_explore` truncated | 27% |
-| Identical repeated calls (same input fingerprint) | 223 of 2,390 (9%) |
+| Identical repeated calls (same input fingerprint, same session) | 102 of 2,390 (4%) |
 | `run_command_batch` policy denials | 7 |
 
 Fixed surfaces, measured against this repository at build time:
@@ -94,8 +94,10 @@ the result is cut, the agent usually has to run it again narrower, so the first 
 The fix is a summary-shaped default: counts by severity and by file, plus the first errors per file, instead
 of a bounded flat list.
 
-**F-07. 9% of calls repeat an earlier identical call.** 223 calls carry an input fingerprint already seen in
-the window. That is the residue of agents re-searching rather than re-reading their own results, and it is
+**F-07. 4% of calls repeat an earlier identical call in the same session.** 102 calls carry an input
+fingerprint already seen in that session. Counting across the whole window gives 223 (9%), but most of
+those are different sessions asking the same question, which is not waste. The remaining 4% is the
+residue of agents re-reading after context compaction rather than re-using their earlier result, and it is
 cheap to absorb (see E-04) but not free to fix.
 
 **F-08. Every tool result carries 84 B of redundant `_meta`.** 2,390 calls × 84 B is about 200 KB, and for
@@ -109,7 +111,7 @@ the server name and version during `initialize`.
 | E-01 | Explain empty and truncated results: files scanned, match mode, ignore rules applied, and one next step. | F-04 | Removes a class of wasted retries; 63 empty searches alone | S | Done |
 | E-02 | Render `search_code` results as `path:line:col text` lines by default, JSON on request. | F-03 | −43% of search bytes, about 0.5 MB and 130k tokens on this window | S | Done: 2,028 B to 964 B and 8,643 B to 3,962 B on two measured queries (−52%, −54%) |
 | E-03 | Record the read span (lines requested) as a bucketed telemetry field, then decide whether reads are too big or too many. | F-02 | Turns the largest cost into a measured question | S | Done: `readLines` per call, `efficiency.readSpans` buckets (1-40, 41-200, 201-800, 801+) |
-| E-04 | Note repeated identical calls in the result (`same arguments as an earlier call in this session`) so the client can skip re-reading. | F-07 | Low risk, targets 9% of calls | M | Open |
+| E-04 | Note repeated identical calls in the result (`same arguments as an earlier call in this session`) so the client can skip re-reading. | F-07 | Low risk, targets 4% of calls | M | Open |
 | E-05 | Suggest the closest existing path on `apply_changes` `not_found`. | F-05 | Recovers 39 observed failures in one turn instead of two | S | Done |
 | E-06 | `validate` default: severity and per-file summary plus the first few errors per file. | F-06 | Removes the 47% truncated case that currently forces a second run | M | Done: `diagnostics.summary` and `byFile` always present, flat `issues` only when it fits; 30 issues in 30 files now return 1,807 B with the worst files named |
 | E-07 | `search_code` accepts `queries: string[]` and returns labelled groups. | §4c-3 | Fewer round trips for multi-pattern work, which today falls back to `run_command_batch` | S | Open |
