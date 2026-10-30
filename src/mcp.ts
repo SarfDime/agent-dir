@@ -58,6 +58,15 @@ const packageVersion = (require("../../package.json") as { version: string }).ve
 const PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION];
+/**
+ * Versions a client may still ask for. They are echoed back at `initialize` because such a client
+ * refuses to continue when the answer differs from what it sent, and the subset Agent Dir
+ * implements over Streamable HTTP — JSON-RPC, `tools`, `resources` — is the same for all of them.
+ * `2024-11-05` and `2025-03-26` are the versions shipped MCP clients still pin (DeepSeek++ allows
+ * exactly these plus `2025-06-18`, and rejects a server that answers `2025-11-25`). The transport
+ * is unaffected; this only stops a client that pins an old version string from disconnecting.
+ */
+const ECHOED_PROTOCOL_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18"];
 const SERVER_INFO = { name: "agent-dir", version: packageVersion };
 const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
@@ -589,11 +598,13 @@ export function createMcpHandler(
         return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
       }
       const supportedVersions = SUPPORTED_PROTOCOL_VERSIONS;
-      // Lifecycle negotiation: answer with a version we support instead of failing,
-      // so older clients can decide whether to continue.
-      const negotiatedVersion = supportedVersions.includes(requestedVersion)
-        ? requestedVersion
-        : LEGACY_PROTOCOL_VERSION;
+      // Lifecycle negotiation: answer with the requested version when we can serve it, so clients
+      // that pin an old version string keep working; otherwise offer the version we prefer.
+      const negotiatedVersion =
+        supportedVersions.includes(requestedVersion) ||
+        ECHOED_PROTOCOL_VERSIONS.includes(requestedVersion)
+          ? requestedVersion
+          : LEGACY_PROTOCOL_VERSION;
       mcpSuccess = true;
       const initializeCapability = capabilityModel({
         tools: (await getAvailableTools()).map((item) => item.name),
