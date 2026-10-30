@@ -120,12 +120,30 @@ test("initialize answers with the requested version when supported", async () =>
 test("initialize negotiates down instead of failing on an unknown version", async () => {
   await withServer(async (port) => {
     const { status, body } = await rpc(port, LEGACY, "initialize", {
-      protocolVersion: "2025-06-18",
+      protocolVersion: "1999-01-01",
       capabilities: {},
       clientInfo: { name: "contract", version: "1.0.0" },
     });
     assert.equal(status, 200, JSON.stringify(body));
     assert.equal(body.result.protocolVersion, LEGACY);
+  });
+});
+
+test("initialize echoes a known legacy version so old clients stay connected", async () => {
+  await withServer(async (port) => {
+    // DeepSeek++ allows exactly 2024-11-05, 2025-03-26 and 2025-06-18, and fails closed on
+    // anything else, including the 2025-11-25 this server used to answer with.
+    for (const version of ["2024-11-05", "2025-03-26", "2025-06-18"]) {
+      const { status, body } = await rpc(port, LEGACY, "initialize", {
+        protocolVersion: version,
+        capabilities: {},
+        clientInfo: { name: "contract", version: "1.0.0" },
+      });
+      assert.equal(status, 200, JSON.stringify(body));
+      // A client that pins this string refuses any other answer, which is what "Unsupported MCP
+      // protocol version" means on the client side.
+      assert.equal(body.result.protocolVersion, version);
+    }
   });
 });
 
