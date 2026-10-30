@@ -18,7 +18,7 @@ hand-bumped.
 
 | ID   | Pri | Eff | What remains | What would close it |
 | --- | --- | --- | --- | --- |
-| 2.09 | P1 | M | Typed error classes instead of message matching. `policy_denied`, `not_found`, `invalid_input`, `unavailable_integration`, `unknown_tool` and `timeout` are already classified first, but by matching our own strings. | Throw typed errors from the tools and map them in one place. No user-visible change expected, so it needs no behavioural window. |
+| 2.09 | P1 | M | Typed error classes instead of message matching. `policy_denied`, `not_found`, `invalid_input`, `unavailable_integration`, `unknown_tool` and `timeout` are already classified first, but mostly by matching our own strings. | Adopted for `apply_changes` (`ToolFailure` with `patch_text_not_found`, `patch_ambiguous`, `path_not_found`), and tool failures now record a machine-readable `errorReason`. Remaining: the command and integration tools still classify by message. |
 | 2.05 | P2 | M | Streaming analytics reader. Retention, file-level filtering, side-effect-free reads and `prune` are in place; `telemetry_analytics` still loads the filtered files into memory, bounded by the retention cap. | Measure analytics latency above ~1 s on a large store, then stream. Without that measurement this is speculative. |
 | 2.11 | P3 | S | Asynchronous telemetry appends. Directory creation and chmod already happen once per file; appends are still synchronous. | A measured latency effect, or an explicit decision to trade durability for speed. |
 | 4.11 | P3 | M | Watcher-based file index. The 2 s cached file list is in place. | A measurement on a large repository that justifies the invalidation complexity; none exists yet. |

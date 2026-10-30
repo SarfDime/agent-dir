@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile as fsWriteFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { writeFile as fsWriteFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -401,6 +401,293 @@ test("skills/list and resources/read expose project skills", async () => {
     assert.equal(
       (contents[0] as Record<string, unknown>).text,
       "---\nname: demo\ndescription: Demo skill\nauthor: team\n---\n# Demo\n",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("argument rejections record a reason, sanitized keys and an input fingerprint", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-reason-"));
+  try {
+    const configId = `test-mcp-reason-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+    const call = (id: number, name: string, args: Record<string, unknown>) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2026-07-28",
+            "mcp-method": "tools/call",
+            "mcp-name": name,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: { name, arguments: args, _meta: META },
+          }),
+        }),
+      );
+
+    // An invented encoding wrapper: the message has to correct the belief, the event records why.
+    const base64 = await call(1, "apply_changes", { base64Args: "e30=" });
+    const base64Text = String(
+      (
+        ((await base64.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(base64Text, /Unknown argument 'base64Args'/);
+    assert.match(base64Text, /There is no base64 option/);
+    assert.match(base64Text, /escape quotes and newlines/);
+
+    // A whole-argument wrapper gets its own hint, and it is not the base64 advice.
+    const wrapped = await call(6, "apply_changes", { _raw: '{"dryRun":true,"changes":[]}' });
+    const wrappedText = String(
+      (
+        ((await wrapped.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(wrappedText, /Unknown argument '_raw'/);
+    assert.match(wrappedText, /whole argument object was sent as one string/);
+    assert.match(wrappedText, /not a wrapper key/);
+    assert.equal(/base64 option/.test(wrappedText), false);
+
+    // An ordinary typo still gets the plain message, with no hint bytes attached.
+    const typo = await call(7, "apply_changes", { changez: [] });
+    const typoText = String(
+      (
+        ((await typo.json()) as Record<string, unknown>).result as {
+          content: Array<{ text: string }>;
+        }
+      ).content[0]?.text,
+    );
+    assert.match(typoText, /Unknown argument 'changez'/);
+    assert.equal(/wrapper key|base64 option/.test(typoText), false);
+
+    const typed = await call(2, "apply_changes", { changes: "not-an-array" });
+    assert.equal(((await typed.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const missing = await call(3, "apply_changes", {});
+    assert.equal(((await missing.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const badEnum = await call(4, "validate", { level: "nonsense" });
+    assert.equal(((await badEnum.json()) as { result: { isError: boolean } }).result.isError, true);
+
+    const badRange = await call(5, "read_range", {
+      path: "x.ts",
+      startLine: 1,
+      endLine: 2,
+      maxBytes: 1,
+    });
+    assert.equal(
+      ((await badRange.json()) as { result: { isError: boolean } }).result.isError,
+      true,
+    );
+
+    const rejections = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .map((envelope) => envelope.event)
+      .filter((event) => event.event === "tool_call");
+    const reasons = rejections.map((event) =>
+      event.event === "tool_call" ? event.errorReason : undefined,
+    );
+    assert.deepEqual(reasons, [
+      "unknown_argument",
+      "unknown_argument",
+      "unknown_argument",
+      "type_mismatch",
+      "missing_required",
+      "enum_mismatch",
+      "length_or_range",
+    ]);
+    for (const event of rejections) {
+      if (event.event !== "tool_call") continue;
+      assert.equal(event.errorCategory, "invalid_input");
+      assert.equal(event.success, false);
+      assert.equal(event.inputFingerprint?.length, 64);
+    }
+    assert.deepEqual(
+      rejections.map((event) => (event.event === "tool_call" ? event.argumentKeys : undefined)),
+      [
+        // An invented key is recorded by name: it is the diagnostic signal, and the sanitizer
+        // already drops anything that is not identifier-shaped.
+        ["base64Args"],
+        ["_raw"],
+        ["changez"],
+        ["changes"],
+        undefined,
+        ["level"],
+        ["path", "startLine", "endLine", "maxBytes"],
+      ],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("client identity from initialize is attached to later events", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-client-"));
+  try {
+    const configId = `test-mcp-client-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "basic", configId });
+    const send = (id: number, method: string, params: Record<string, unknown>) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2024-11-05",
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        }),
+      );
+    await send(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "better-deepseek", version: "0.1.15" },
+    });
+    // A later request from the same client carries no clientInfo of its own.
+    await send(2, "tools/call", { name: "find_files", arguments: { pattern: "*.md" } });
+
+    const clientNames = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .map((envelope) => envelope.runtime?.mcpClientName);
+    assert.ok(clientNames.length >= 2);
+    assert.deepEqual([...new Set(clientNames)], ["better-deepseek"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("two clients in one process keep their own identity", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mixed-"));
+  try {
+    const configId = `test-mcp-mixed-${process.pid}-${Date.now()}`;
+    const handler = createMcpHandler(root, {}, { level: "basic", configId });
+    const send = (id: number, method: string, params: Record<string, unknown>, sessionId: string) =>
+      handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            "mcp-protocol-version": "2025-11-25",
+            "mcp-session-id": sessionId,
+          },
+          body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        }),
+      );
+
+    await send(
+      1,
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "first-client", version: "1.0.0" },
+      },
+      "session-a",
+    );
+    await send(
+      2,
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "second-client", version: "2.0.0" },
+      },
+      "session-b",
+    );
+    // Neither follow-up request carries clientInfo: attribution must come from its own session.
+    await send(
+      3,
+      "tools/call",
+      { name: "find_files", arguments: { pattern: "*.md" } },
+      "session-a",
+    );
+    await send(
+      4,
+      "tools/call",
+      { name: "find_files", arguments: { pattern: "*.md" } },
+      "session-b",
+    );
+
+    const toolClients = handler
+      .telemetrySnapshot()
+      .filter((envelope) => envelope.configId === configId)
+      .flatMap((envelope) =>
+        envelope.event.event === "tool_call" ? [envelope.runtime?.mcpClientName] : [],
+      );
+    assert.deepEqual(toolClients, ["first-client", "second-client"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the agent-facing skill names exactly the advertised tools", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-skill-tools-"));
+  try {
+    // A stub integration so the conditional tools are advertised too, without a real index.
+    const codeGraph = {
+      capability: async () => ({ status: "available", tools: ["codegraph_explore"] }),
+      explore: async () => ({ result: "", truncated: false }),
+    } as unknown as Parameters<typeof createMcpHandler>[3];
+    const handler = createMcpHandler(root, {}, { level: "none" }, codeGraph, true);
+    const list = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/list",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      }),
+    );
+    const advertised = new Set(
+      ((await list.json()) as { result: { tools: Array<{ name: string }> } }).result.tools.map(
+        (tool) => tool.name,
+      ),
+    );
+    assert.ok(advertised.size > 0);
+
+    const skill = await readFile(
+      path.join(process.cwd(), "skills", "agent-dir-tools", "SKILL.md"),
+      "utf8",
+    );
+    const table = skill.split("## Pick the tool by question")[1]?.split("\n## ")[0] ?? "";
+    assert.ok(table.length > 0, "the skill should keep its tool table");
+    const named = new Set<string>();
+    for (const line of table.split("\n")) {
+      if (!line.startsWith("|")) continue;
+      // | question | `tool` | not this |  — the middle cell holds exactly one backticked tool.
+      const toolCell = line.split("|")[2]?.trim() ?? "";
+      for (const match of toolCell.matchAll(/`([a-z][a-z0-9_]*)`/g))
+        if (match[1]) named.add(match[1]);
+    }
+
+    // No invented or renamed tool reaches an agent through the skill.
+    assert.deepEqual(
+      [...named].filter((name) => !advertised.has(name)),
+      [],
+      "the skill names tools that are not advertised",
+    );
+    // And no advertised tool is missing from it.
+    assert.deepEqual(
+      [...advertised].filter((name) => !named.has(name)),
+      [],
+      "an advertised tool is missing from the skill",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -12,7 +12,13 @@ import {
 } from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
 import { readTelemetryEvents } from "./telemetry/storage.js";
-import type { TelemetryConfig, TelemetryErrorCategory, TelemetryLevel } from "./telemetry/types.js";
+import type {
+  TelemetryConfig,
+  TelemetryEnvelope,
+  TelemetryErrorCategory,
+  TelemetryErrorReason,
+  TelemetryLevel,
+} from "./telemetry/types.js";
 import { type BatchOnError, runBatch } from "./tools/batch.js";
 import {
   findFiles,
@@ -23,7 +29,7 @@ import {
 } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
 import { diagnostics } from "./tools/diagnostics.js";
-import { applyFileChanges, readFile } from "./tools/files.js";
+import { applyFileChanges, readFile, ToolFailure } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
 import {
   packageScriptArgsProblem,
@@ -384,6 +390,7 @@ export function createMcpHandler(
   analyticsEnabled = false,
 ): McpHandler {
   const codeGraph = codeGraphIntegration ?? new CodeGraphIntegration(root);
+  const clientRegistry = createClientRegistry();
   const telemetryRecorder = new TelemetryRecorder({
     level: telemetry.level,
     persist: telemetry.persist ?? false,
@@ -500,6 +507,7 @@ export function createMcpHandler(
     let mcpSuccess = false;
     let runtime: import("./telemetry/types.js").TelemetryRuntimeContext | undefined;
     let telemetryRequestErrorCategory: TelemetryErrorCategory | undefined;
+    let telemetryRequestErrorReason: TelemetryErrorReason | undefined;
     let toolListMetrics: { toolCount: number; toolSetHash: string } | undefined;
     let guidanceVariantUsed: GuidanceVariant | undefined;
     const recordMcpRequest = (method = message?.method ?? "unknown") => {
@@ -514,6 +522,7 @@ export function createMcpHandler(
           ...(telemetryRequestErrorCategory
             ? { errorCategory: telemetryRequestErrorCategory }
             : {}),
+          ...(telemetryRequestErrorReason ? { errorReason: telemetryRequestErrorReason } : {}),
           ...(toolListMetrics ?? {}),
           ...(guidanceVariantUsed ? { guidanceVariant: guidanceVariantUsed } : {}),
         },
@@ -557,10 +566,15 @@ export function createMcpHandler(
       return jsonRpcError(message.id as string | number, -32602, "Invalid params.", 400);
     }
     const params = message.params ?? {};
+    const clientContext = {
+      sessionKey: request.headers.get("mcp-session-id")?.trim() || UNIDENTIFIED_SESSION,
+      registry: clientRegistry,
+    };
     runtime = telemetryRuntime(
       params,
       telemetry.level,
       request.headers.get("mcp-protocol-version"),
+      clientContext,
     );
     const meta = isRecord(params._meta) ? params._meta : undefined;
     if (message.method === "initialize") {
@@ -705,8 +719,13 @@ export function createMcpHandler(
             tool: string,
             category: TelemetryErrorCategory,
             rejected?: unknown,
+            details: { reason?: TelemetryErrorReason } = {},
           ): void => {
             const serialized = JSON.stringify(rejected ?? {});
+            // Key names are recorded as sent: a client-invented `_raw` or `base64Args` is the whole
+            // diagnostic signal. The privacy sanitizer still drops anything that is not
+            // identifier-shaped, so this cannot persist arbitrary text.
+            const argumentKeys = isRecord(rejected) ? Object.keys(rejected) : undefined;
             telemetryRecorder.record(
               {
                 event: "tool_call",
@@ -717,12 +736,16 @@ export function createMcpHandler(
                 durationMs: 0,
                 inputBytes: Buffer.byteLength(serialized, "utf8"),
                 estimatedInputTokens: estimateTokens(serialized),
+                inputFingerprint: telemetryHash(fingerprintInput(tool, rejected ?? {})),
                 errorCategory: category,
+                ...(details.reason ? { errorReason: details.reason } : {}),
+                ...(argumentKeys?.length ? { argumentKeys } : {}),
               },
               telemetryRuntime(
                 params,
                 telemetry.level,
                 request.headers.get("mcp-protocol-version"),
+                clientContext,
               ),
               telemetryProject,
             );
@@ -744,7 +767,10 @@ export function createMcpHandler(
           }
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
-            recordRejectedToolCall(toolName, "invalid_input", params.arguments);
+            telemetryRequestErrorReason = "type_mismatch";
+            recordRejectedToolCall(toolName, "invalid_input", params.arguments, {
+              reason: "type_mismatch",
+            });
             return jsonRpcError(
               message.id ?? null,
               -32602,
@@ -760,15 +786,26 @@ export function createMcpHandler(
           );
           if (headerError) {
             telemetryRequestErrorCategory = "invalid_input";
-            recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
+            telemetryRequestErrorReason = "other";
+            recordRejectedToolCall(toolName, "invalid_input", argumentsValue, {
+              reason: "other",
+            });
             return jsonRpcError(message.id ?? null, -32020, headerError, 400);
           }
-          const argumentError = validateToolArguments(toolDefinition.inputSchema, argumentsValue);
+          const argumentError = validateToolArguments(
+            toolDefinition.inputSchema,
+            argumentsValue,
+            "",
+            toolName,
+          );
           if (argumentError) {
             // Agent-friendly rejection: the caller sees the message and can correct the call,
             // which is what `isError` is for; a protocol error would end the turn instead.
             telemetryRequestErrorCategory = "invalid_input";
-            recordRejectedToolCall(toolName, "invalid_input", argumentsValue);
+            telemetryRequestErrorReason = argumentError.reason;
+            recordRejectedToolCall(toolName, "invalid_input", argumentsValue, {
+              reason: argumentError.reason,
+            });
             mcpSuccess = true;
             return trackedJson({
               jsonrpc: "2.0",
@@ -776,7 +813,7 @@ export function createMcpHandler(
               result: {
                 resultType: "complete",
                 isError: true,
-                content: [{ type: "text", text: JSON.stringify({ error: argumentError }) }],
+                content: [{ type: "text", text: JSON.stringify({ error: argumentError.message }) }],
                 _meta: SERVER_INFO_META,
               },
             });
@@ -812,6 +849,7 @@ export function createMcpHandler(
               params,
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
+              clientContext,
             );
             const metrics = toolTelemetryMetrics(toolName, output.payload, seenOutputFingerprints);
             const outcome = toolOutcome(count, metrics.truncated === true);
@@ -873,8 +911,10 @@ export function createMcpHandler(
               params,
               telemetry.level,
               request.headers.get("mcp-protocol-version"),
+              clientContext,
             );
             const errorCategory = classifyTelemetryError(error);
+            const errorReason = classifyTelemetryReason(error);
             telemetryRecorder.record(
               {
                 event: "tool_call",
@@ -888,6 +928,7 @@ export function createMcpHandler(
                 inputFingerprint: telemetryHash(fingerprintInput(toolName, argumentsValue)),
                 ...argumentShape(argumentsValue),
                 errorCategory,
+                ...(errorReason ? { errorReason } : {}),
               },
               runtime,
               telemetryProject,
@@ -1252,6 +1293,48 @@ function typeMatches(type: unknown, value: unknown): boolean {
   }
 }
 
+/** A rejected argument list: the message the caller sees plus the machine-readable reason. */
+export interface ToolArgumentProblem {
+  message: string;
+  reason: TelemetryErrorReason;
+}
+
+/** Keys shaped like a transport encoding wrapper, which Agent Dir does not accept anywhere. */
+const ENCODING_ARGUMENT = /base64|b64|encod/i;
+
+/**
+ * Keys shaped like the whole argument object wrapped into one string (`{"_raw": "{...}"}`).
+ * Deliberately narrow: a wrong key that is not one of these keeps the plain rejection, so the hint
+ * never costs bytes on an ordinary typo.
+ */
+const WRAPPED_ARGUMENTS = /^_?raw([_-]?arg(s|uments?))?$|^(args|arguments)[_-]?(json|raw)$/i;
+
+/** True when an event came from the named client, as `name` or `name@version`. */
+function matchesClient(event: TelemetryEnvelope, filter: string): boolean {
+  const name = event.runtime?.mcpClientName?.toLowerCase();
+  if (!name) return false;
+  if (name === filter) return true;
+  const version = event.runtime?.mcpClientVersion?.toLowerCase();
+  if (version !== undefined && `${name}@${version}` === filter) return true;
+  return name.startsWith(`${filter}@`) || name.startsWith(filter);
+}
+
+/** Most frequent client identity in a session, so sessions mode says who was driving. */
+function sessionClient(events: TelemetryEnvelope[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const event of events) {
+    const name = event.runtime?.mcpClientName;
+    if (!name) continue;
+    const label = `${name}@${event.runtime?.mcpClientVersion ?? "?"}`;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+}
+
+function argumentProblem(message: string, reason: TelemetryErrorReason): ToolArgumentProblem {
+  return { message, reason };
+}
+
 /**
  * Validates tool arguments against the advertised `inputSchema` before dispatch, so a bad call
  * fails with a message naming the argument instead of a coercion artefact inside a tool.
@@ -1260,57 +1343,89 @@ export function validateToolArguments(
   schema: ArgumentSchema,
   value: unknown,
   path = "",
-): string | undefined {
+  toolName?: string,
+): ToolArgumentProblem | undefined {
   const label = path || "arguments";
+  const unknownArgument = (key: string, names: string[]): ToolArgumentProblem => {
+    // A client that invented an encoding wrapper, or that wrapped the whole argument object into
+    // one string, is corrected in the text it actually reads instead of only being rejected.
+    const hint = WRAPPED_ARGUMENTS.test(key)
+      ? ' The whole argument object was sent as one string. Send the arguments themselves, for example {"changes": [...]}, not a wrapper key.'
+      : toolName === "apply_changes" && ENCODING_ARGUMENT.test(key)
+        ? " apply_changes takes plain JSON; escape quotes and newlines in `content` and `patches` as normal JSON strings. There is no base64 option."
+        : "";
+    return argumentProblem(
+      names.length
+        ? `Unknown argument '${key}'. Valid arguments: ${names.join(", ")}.${hint}`
+        : `Unknown argument '${key}'. This tool takes no arguments.${hint}`,
+      "unknown_argument",
+    );
+  };
   // A misspelled argument is reported against the parent schema before any `anyOf` branch runs,
   // otherwise an alternative shape's `required` check masks the typo with "is required".
   if (isRecord(value) && schema.additionalProperties === false && isRecord(schema.properties)) {
     const names = Object.keys(schema.properties);
     for (const key of Object.keys(value)) {
-      if (!isRecord(schema.properties[key]))
-        return names.length
-          ? `Unknown argument '${key}'. Valid arguments: ${names.join(", ")}.`
-          : `Unknown argument '${key}'. This tool takes no arguments.`;
+      if (!isRecord(schema.properties[key])) return unknownArgument(key, names);
     }
   }
   if (Array.isArray(schema.anyOf)) {
     const errors = schema.anyOf.map((branch) =>
-      isRecord(branch) ? validateToolArguments(branch, value, path) : undefined,
+      isRecord(branch) ? validateToolArguments(branch, value, path, toolName) : undefined,
     );
     if (errors.some((error) => error === undefined)) return undefined;
     return (
-      errors.find((error) => error !== undefined) ?? `${label} does not match any allowed shape.`
+      errors.find((error) => error !== undefined) ??
+      argumentProblem(`${label} does not match any allowed shape.`, "other")
     );
   }
   if (schema.type !== undefined && !typeMatches(schema.type, value))
-    return `'${label}' must be ${schema.type === "integer" ? "an integer" : `a ${String(schema.type)}`}.`;
+    return argumentProblem(
+      `'${label}' must be ${schema.type === "integer" ? "an integer" : `a ${String(schema.type)}`}.`,
+      "type_mismatch",
+    );
   if (Array.isArray(schema.enum) && !schema.enum.includes(value))
-    return `'${label}' must be one of ${schema.enum.map(String).join(", ")}.`;
+    return argumentProblem(
+      `'${label}' must be one of ${schema.enum.map(String).join(", ")}.`,
+      "enum_mismatch",
+    );
 
   if (typeof value === "string") {
     if (typeof schema.minLength === "number" && value.trim().length < schema.minLength)
-      return `'${label}' must be at least ${schema.minLength} characters.`;
+      return argumentProblem(
+        `'${label}' must be at least ${schema.minLength} characters.`,
+        "length_or_range",
+      );
     if (typeof schema.maxLength === "number" && value.length > schema.maxLength)
-      return `'${label}' must be at most ${schema.maxLength} characters.`;
+      return argumentProblem(
+        `'${label}' must be at most ${schema.maxLength} characters.`,
+        "length_or_range",
+      );
     return undefined;
   }
 
   if (typeof value === "number") {
     if (typeof schema.minimum === "number" && value < schema.minimum)
-      return `'${label}' must be at least ${schema.minimum}.`;
+      return argumentProblem(`'${label}' must be at least ${schema.minimum}.`, "length_or_range");
     if (typeof schema.maximum === "number" && value > schema.maximum)
-      return `'${label}' must be at most ${schema.maximum}.`;
+      return argumentProblem(`'${label}' must be at most ${schema.maximum}.`, "length_or_range");
     return undefined;
   }
 
   if (Array.isArray(value)) {
     if (typeof schema.minItems === "number" && value.length < schema.minItems)
-      return `'${label}' needs at least ${schema.minItems} item(s).`;
+      return argumentProblem(
+        `'${label}' needs at least ${schema.minItems} item(s).`,
+        "length_or_range",
+      );
     if (typeof schema.maxItems === "number" && value.length > schema.maxItems)
-      return `'${label}' accepts at most ${schema.maxItems} item(s).`;
+      return argumentProblem(
+        `'${label}' accepts at most ${schema.maxItems} item(s).`,
+        "length_or_range",
+      );
     if (isRecord(schema.items))
       for (const [index, entry] of value.entries()) {
-        const error = validateToolArguments(schema.items, entry, `${label}[${index}]`);
+        const error = validateToolArguments(schema.items, entry, `${label}[${index}]`, toolName);
         if (error) return error;
       }
     return undefined;
@@ -1323,18 +1438,24 @@ export function validateToolArguments(
     for (const [key, entry] of Object.entries(value)) {
       const property = properties[key];
       if (!isRecord(property)) {
-        if (schema.additionalProperties === false)
-          return names.length
-            ? `Unknown argument '${key}'. Valid arguments: ${names.join(", ")}.`
-            : `Unknown argument '${key}'. This tool takes no arguments.`;
+        if (schema.additionalProperties === false) return unknownArgument(key, names);
         continue;
       }
-      const error = validateToolArguments(property, entry, path ? `${label}.${key}` : key);
+      const error = validateToolArguments(
+        property,
+        entry,
+        path ? `${label}.${key}` : key,
+        toolName,
+      );
       if (error) return error;
     }
     for (const required of Array.isArray(schema.required) ? schema.required : []) {
       const name = String(required);
-      if (!(name in value)) return `'${path ? `${label}.${name}` : name}' is required.`;
+      if (!(name in value))
+        return argumentProblem(
+          `'${path ? `${label}.${name}` : name}' is required.`,
+          "missing_required",
+        );
     }
   }
   return undefined;
@@ -1388,6 +1509,12 @@ const telemetryAnalyticsTool: ToolDefinition = tool(
     mode: { type: "string", enum: ["summary", "sessions", "events"], default: "summary" },
     profile: { type: "string", maxLength: 100 },
     session: { type: "string", maxLength: 100 },
+    client: {
+      type: "string",
+      maxLength: 100,
+      description:
+        "Only events from this MCP client, by name or name@version (for example better-deepseek@0.1.15).",
+    },
     since: { type: "string", description: "Optional ISO timestamp lower bound." },
     until: { type: "string", description: "Optional ISO timestamp upper bound." },
     limit: { type: "integer", minimum: 1, maximum: 500, default: 100 },
@@ -1614,6 +1741,10 @@ async function callTool(
       typeof args.until === "string" ? Date.parse(args.until) : Number.POSITIVE_INFINITY;
     if (Number.isNaN(since) || Number.isNaN(until))
       throw new Error("since and until must be valid ISO timestamps.");
+    const clientFilter =
+      typeof args.client === "string" && args.client.trim()
+        ? args.client.trim().toLowerCase()
+        : undefined;
     const all = readTelemetryEvents({
       ...(typeof args.profile === "string" && args.profile ? { profile: args.profile } : {}),
       ...(typeof args.session === "string" && args.session ? { session: args.session } : {}),
@@ -1622,6 +1753,7 @@ async function callTool(
       (event) =>
         (!args.profile || event.configId === args.profile) &&
         (!args.session || event.sessionId === args.session) &&
+        (!clientFilter || matchesClient(event, clientFilter)) &&
         Date.parse(event.timestamp) >= since &&
         Date.parse(event.timestamp) <= until,
     );
@@ -1673,6 +1805,7 @@ async function callTool(
         matchedEvents: all.length,
         sessions: [...groups.entries()].slice(-limit).map(([key, events]) => ({
           key,
+          client: sessionClient(events),
           eventCount: events.length,
           start: events[0]?.timestamp,
           end: events.at(-1)?.timestamp,
@@ -1691,6 +1824,9 @@ async function callTool(
               ...("tool" in event.event ? { tool: event.event.tool } : {}),
               ...("errorCategory" in event.event && event.event.errorCategory
                 ? { category: event.event.errorCategory }
+                : {}),
+              ...("errorReason" in event.event && event.event.errorReason
+                ? { reason: event.event.errorReason }
                 : {}),
             })),
         })),
@@ -2300,6 +2436,15 @@ function toolResult(payload: Record<string, unknown>, text?: string): Record<str
 type TelemetryRuntime = import("./telemetry/types.js").TelemetryRuntimeContext;
 let cachedStaticRuntime: TelemetryRuntime | undefined;
 
+/** Identity a client reports about itself; carried across its own requests, never shared. */
+interface ClientIdentity {
+  name?: string;
+  version?: string;
+}
+
+/** Key used when a request carries no `Mcp-Session-Id` header. */
+const UNIDENTIFIED_SESSION = "unidentified";
+
 /** Fields that never change during the process lifetime are collected once. */
 function staticTelemetryRuntime(): TelemetryRuntime {
   cachedStaticRuntime ??= {
@@ -2323,18 +2468,77 @@ function staticTelemetryRuntime(): TelemetryRuntime {
   return cachedStaticRuntime;
 }
 
+/**
+ * Client identities seen by one handler. Clients that send a `Mcp-Session-Id` are tracked
+ * separately; a client that never sends one (protocol 2024-11-05) is tracked once, because a
+ * request without an identity cannot be attributed to a session at all. The identity is only used
+ * when the request itself carries no `clientInfo`, so a client that identifies every request is
+ * always attributed to itself.
+ */
+interface ClientRegistry {
+  bySession: Map<string, ClientIdentity>;
+  withoutSession?: ClientIdentity;
+}
+
+const MAX_TRACKED_CLIENT_SESSIONS = 32;
+
+function createClientRegistry(): ClientRegistry {
+  return { bySession: new Map() };
+}
+
+function rememberClient(
+  registry: ClientRegistry,
+  sessionKey: string,
+  identity: ClientIdentity,
+): void {
+  if (sessionKey === UNIDENTIFIED_SESSION) {
+    registry.withoutSession = identity;
+    return;
+  }
+  registry.bySession.delete(sessionKey);
+  registry.bySession.set(sessionKey, identity);
+  while (registry.bySession.size > MAX_TRACKED_CLIENT_SESSIONS) {
+    const oldest = registry.bySession.keys().next().value;
+    if (oldest === undefined) break;
+    registry.bySession.delete(oldest);
+  }
+}
+
+function lookupClient(registry: ClientRegistry, sessionKey: string): ClientIdentity | undefined {
+  return sessionKey === UNIDENTIFIED_SESSION
+    ? registry.withoutSession
+    : registry.bySession.get(sessionKey);
+}
+
 function telemetryRuntime(
   params: Record<string, unknown>,
   level: TelemetryLevel,
   headerProtocolVersion?: string | null,
+  clientContext?: { sessionKey: string; registry: ClientRegistry },
 ): TelemetryRuntime {
   const meta = isRecord(params._meta) ? params._meta : undefined;
   const metaClient = meta?.["io.modelcontextprotocol/clientInfo"];
-  const clientInfo = isRecord(params.clientInfo)
+  const reportedClient = isRecord(params.clientInfo)
     ? params.clientInfo
     : isRecord(metaClient)
       ? metaClient
       : undefined;
+  const reportedIdentity: ClientIdentity = {
+    ...(typeof reportedClient?.name === "string" ? { name: reportedClient.name } : {}),
+    ...(typeof reportedClient?.version === "string" ? { version: reportedClient.version } : {}),
+  };
+  if (
+    clientContext &&
+    (reportedIdentity.name !== undefined || reportedIdentity.version !== undefined)
+  )
+    rememberClient(clientContext.registry, clientContext.sessionKey, reportedIdentity);
+  // Prefer what this request said; otherwise use what the same session said earlier.
+  const clientInfo =
+    reportedIdentity.name !== undefined || reportedIdentity.version !== undefined
+      ? reportedIdentity
+      : clientContext
+        ? lookupClient(clientContext.registry, clientContext.sessionKey)
+        : undefined;
   const metaVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
   const protocolVersion =
     typeof params.protocolVersion === "string"
@@ -2643,6 +2847,7 @@ function resultCount(payload: Record<string, unknown>): number | undefined {
 
 function classifyTelemetryError(error: unknown): TelemetryErrorCategory {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (error instanceof ToolFailure) return "not_found";
   if (message.startsWith("unknown tool")) return "unknown_tool";
   if (
     message.includes("integration is unavailable") ||
@@ -2673,6 +2878,22 @@ function classifyTelemetryError(error: unknown): TelemetryErrorCategory {
   if (message.includes("authentication") || message.includes("unauthorized"))
     return "authentication";
   return "execution";
+}
+
+/**
+ * Machine-readable reason for a failure, from typed errors where they exist and from the message
+ * otherwise. Never derived from, or containing, argument values or file contents.
+ */
+function classifyTelemetryReason(error: unknown): TelemetryErrorReason | undefined {
+  if (error instanceof ToolFailure) return error.reason;
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message.startsWith("unknown tool")) return undefined;
+  if (message.includes("enoent") || message.includes("does not exist")) return "path_not_found";
+  if (message.includes("patch text was not found")) return "patch_text_not_found";
+  if (message.includes("times in '")) return "patch_ambiguous";
+  if (message.includes("is required")) return "missing_required";
+  if (message.includes("must be") || message.includes("must contain")) return "type_mismatch";
+  return "other";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
