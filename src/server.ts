@@ -73,7 +73,7 @@ export function startServer({
             method: req.method,
             path: url.pathname,
             status: 403,
-            detail: "MCP header validation: origin not allowed",
+            detail: `MCP header validation: origin not allowed - ${normalizedOrigin}`,
           });
           recordHttpTelemetry(httpTelemetry, req.method, url.pathname, 403, false, startedAt);
           return;
@@ -168,9 +168,9 @@ export function startServer({
         const mcpResponseBody = isStream
           ? undefined
           : await response
-              .clone()
-              .json()
-              .catch(() => undefined);
+            .clone()
+            .json()
+            .catch(() => undefined);
         const errorDetail = await getResponseErrorDetail(response);
         const mcpLog = getMcpLog(body, mcpResponseBody);
         await sendResponse(res, response);
