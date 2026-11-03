@@ -1788,6 +1788,7 @@ async function callTool(
               commands: config.commands,
               sessionCount: Object.keys(config.sessions).length,
               legacySessionEvents: config.legacySessionEvents,
+              efficiency: config.efficiency,
             },
           ]),
         ),

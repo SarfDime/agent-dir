@@ -147,7 +147,7 @@ telemetry show is the raw event stream grouped by configuration and session. Use
 
 ## Reading telemetry summary
 
-telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. Use the raw stream when investigating a specific request or reconstructing event order. Raw tool events currently provide the token-size, fingerprint, duplicate-output, and file-metadata signals described above; aggregated summary fields for those measurements have not yet been added.
+telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. Use the raw stream when investigating a specific request or reconstructing event order. Each configuration in `mode=summary` also carries an `efficiency` block: estimated output tokens and token share per tool, truncation and empty rates, duplicate input/output calls, repeated file reads, requested read-size buckets (`readSpans`), `searchThenReadTransitions`, episodes, top transitions, clients, protocol versions, and guidance variants. It is larger than the reliability block, so raise `maxBytes` or filter by `profile` before reading it.
 
 ## Data quality rules
 
