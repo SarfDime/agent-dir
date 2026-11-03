@@ -545,13 +545,13 @@ test("client identity from initialize is attached to later events", async () => 
           headers: {
             "content-type": "application/json",
             accept: "application/json, text/event-stream",
-            "mcp-protocol-version": "2024-11-05",
+            "mcp-protocol-version": "2025-11-25",
           },
           body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
         }),
       );
     await send(1, "initialize", {
-      protocolVersion: "2024-11-05",
+      protocolVersion: "2025-11-25",
       capabilities: {},
       clientInfo: { name: "better-deepseek", version: "0.1.15" },
     });
