@@ -3,7 +3,7 @@ import { globToRegExp } from "./glob.js";
 /**
  * Paths that agents may not modify through Agent Dir's edit tools by default: version-control
  * internals (hooks and config can run programs), environment files with secrets, and registry
- * credentials. This is a guardrail, not a security boundary (see SECURITY.md).
+ * credentials. This is a guardrail, not a security boundary (see docs/SECURITY.md).
  */
 export interface PathProtectionConfig {
   /** Additional protected patterns (relative, `*`, `**` and `?` supported). */

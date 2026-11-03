@@ -181,7 +181,7 @@ A configured `blacklistedCommands` entry overrides the allowlist and blocks matc
 
 ### Command guardrails (`commandPolicy`)
 
-Built-in argument-aware guardrails are on by default; see `SECURITY.md` for what they cover and what they do not. Blacklist entries are matched after global options before the subcommand are removed, so `git -C . push` is blocked by a `git push` entry. A profile can add rules per executable or switch the built-in guardrails off:
+Built-in argument-aware guardrails are on by default; see `docs/SECURITY.md` for what they cover and what they do not. Blacklist entries are matched after global options before the subcommand are removed, so `git -C . push` is blocked by a `git push` entry. A profile can add rules per executable or switch the built-in guardrails off:
 
 ```json
 "commandPolicy": {

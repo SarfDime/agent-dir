@@ -94,7 +94,7 @@ Batch command operations execute sequentially and stop at the first failed comma
 
 Package scripts and other executables use separate allowlists. An executable not in the configured allowlist is rejected, and configured `blacklistedCommands` prefixes override the allowlist. Commands are launched without a shell.
 
-Agent Dir is not a security boundary against a hostile agent; see `SECURITY.md`. Built-in argument-aware guardrails (global-option-aware blacklist matching, git/package-manager/gh/rg/find rules) and protected paths for `apply_changes` reduce accidents and common bypasses, and are configurable per profile (`commandPolicy`, `protectedPaths`).
+Agent Dir is not a security boundary against a hostile agent; see `docs/SECURITY.md`. Built-in argument-aware guardrails (global-option-aware blacklist matching, git/package-manager/gh/rg/find rules) and protected paths for `apply_changes` reduce accidents and common bypasses, and are configurable per profile (`commandPolicy`, `protectedPaths`).
 
 ### Argument validation and errors
 
