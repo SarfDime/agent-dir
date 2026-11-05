@@ -118,6 +118,15 @@ Do not expose or print npm credentials.
 
 `GITHUB_TOKEN` is separate from npm authentication and is used by semantic-release for GitHub release operations. The repository currently supplies the release workflow's GitHub credential through the `RELEASE_TOKEN` Actions secret.
 
+## GitHub Packages
+
+After semantic-release, the same workflow publishes the latest release tag to GitHub Packages as `@sarfdime/agent-dir`. GitHub Packages only accepts packages scoped to the repository owner, so the name is rewritten at publish time in the workflow checkout only. `package.json`, the npm package name (`agent-dir`), and the release tags are unchanged.
+
+- It authenticates with the workflow's `GITHUB_TOKEN` (`packages: write`). No extra secret is needed.
+- It is not a second release path: it publishes an existing `vX.Y.Z` tag and never creates versions or tags.
+- It skips when that version is already on GitHub Packages, so re-running a failed workflow recovers a failed GitHub Packages publish.
+- A failure here does not mean the npm release failed. Check npm and the tag first, as described under release troubleshooting.
+
 ## Protected-branch automation
 
 The release workflow needs to write the semantic-release commit/tag back to `main`, even though normal pushes to `main` are blocked.

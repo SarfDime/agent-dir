@@ -10,6 +10,7 @@ permissions:
   issues: write
   pull-requests: write
   id-token: write
+  packages: write
 
 concurrency:
   group: release
@@ -59,3 +60,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GIT_SSH_COMMAND: ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes
+
+      # GitHub Packages only accepts scoped npm packages, so the latest release
+      # tag is published there as @sarfdime/agent-dir. The npm package name,
+      # package.json and the release tags are not changed. The step skips when
+      # that version is already published, so a re-run recovers a failed publish.
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/github-packages.npmrc
+          GPR_NAME: "@sarfdime/agent-dir"
+          GPR_REGISTRY: https://npm.pkg.github.com
+        run: |
+          printf '%s\n' \
+            '@sarfdime:registry=https://npm.pkg.github.com' \
+            '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}' \
+            > "$NPM_CONFIG_USERCONFIG"
+
+          git fetch --force --tags origin main
+          TAG="$(git describe --tags --abbrev=0 --match 'v*' origin/main)"
+          VERSION="${TAG#v}"
+
+          if npm view "${GPR_NAME}@${VERSION}" version --registry "$GPR_REGISTRY" > /dev/null 2>&1; then
+            echo "${GPR_NAME}@${VERSION} is already on GitHub Packages; nothing to do."
+            exit 0
+          fi
+
+          git checkout --detach "$TAG"
+          npm ci
+          npm run build
+          npm pkg set name="$GPR_NAME" publishConfig.registry="$GPR_REGISTRY"
+          npm publish --ignore-scripts
