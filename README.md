@@ -33,6 +33,8 @@ Or use it without a global installation:
 npx agent-dir .
 ```
 
+Each release is also published to GitHub Packages as `@sarfdime/agent-dir`. GitHub Packages requires authentication, even for public packages, so npm is the simplest way to install.
+
 The server starts with a generated Bearer token. Configure an MCP client to connect to the displayed `/mcp` endpoint and send:
 
 ```http
