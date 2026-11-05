@@ -16,7 +16,6 @@
     "README.md",
     "docs",
     "assets/agent-dir-banner.svg",
-    "SECURITY.md",
     "LICENSE"
   ],
   "engines": {

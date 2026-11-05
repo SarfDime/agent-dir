@@ -37,7 +37,7 @@ hand-bumped.
 
 - D-02: an OS sandbox stays a separate future enhancement, not part of the guardrail model. It needs
   bubblewrap or a container runtime on the host; the allowlist is documented as a guardrail, not a security
-  boundary (see `SECURITY.md`).
+  boundary (see `docs/SECURITY.md`).
 - Declined: a tree-sitter or ast-grep symbol index. Re-adding an AST parser reintroduces the dependency this
   release removed, and CodeGraph covers structural navigation where it is installed. Revisit only with
   evidence that `find_symbol` misses real cases in a project without CodeGraph.

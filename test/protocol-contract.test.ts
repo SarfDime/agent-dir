@@ -120,7 +120,7 @@ test("initialize answers with the requested version when supported", async () =>
 test("initialize negotiates down instead of failing on an unknown version", async () => {
   await withServer(async (port) => {
     const { status, body } = await rpc(port, LEGACY, "initialize", {
-      protocolVersion: "2025-06-18",
+      protocolVersion: "1999-01-01",
       capabilities: {},
       clientInfo: { name: "contract", version: "1.0.0" },
     });

@@ -589,8 +589,8 @@ export function createMcpHandler(
         return jsonRpcError(message.id ?? null, -32602, "Invalid initialize params.", 400);
       }
       const supportedVersions = SUPPORTED_PROTOCOL_VERSIONS;
-      // Lifecycle negotiation: answer with a version we support instead of failing,
-      // so older clients can decide whether to continue.
+      // Lifecycle negotiation: answer with the requested version when we support it; otherwise
+      // offer the version we prefer.
       const negotiatedVersion = supportedVersions.includes(requestedVersion)
         ? requestedVersion
         : LEGACY_PROTOCOL_VERSION;
@@ -1788,6 +1788,7 @@ async function callTool(
               commands: config.commands,
               sessionCount: Object.keys(config.sessions).length,
               legacySessionEvents: config.legacySessionEvents,
+              efficiency: config.efficiency,
             },
           ]),
         ),
@@ -2470,7 +2471,7 @@ function staticTelemetryRuntime(): TelemetryRuntime {
 
 /**
  * Client identities seen by one handler. Clients that send a `Mcp-Session-Id` are tracked
- * separately; a client that never sends one (protocol 2024-11-05) is tracked once, because a
+ * separately; a client that never sends one is tracked once, because a
  * request without an identity cannot be attributed to a session at all. The identity is only used
  * when the request itself carries no `clientInfo`, so a client that identifies every request is
  * always attributed to itself.

@@ -73,13 +73,15 @@ rejected. Watch `nextStartLine` and `truncated` to continue instead of re-readin
 {"dryRun": true, "changes": [
   {"kind": "patch", "path": "src/config.ts",
    "patches": [{"search": "const limit = 10;", "replace": "const limit = 20;"}]},
-  {"kind": "write", "path": "docs/new.md", "content": "# Title\n\nBody.\n"},
+  {"kind": "write", "path": "docs/status.md", "content": "Status: draft"},
   {"kind": "delete", "path": "docs/old.md"}
 ]}
 ```
 
 `search` must match the file byte for byte, including indentation. `count` lets one patch replace N identical
-occurrences. Send `dryRun: true` first for anything you cannot verify from a fresh `read_range`.
+occurrences. Send `dryRun: true` first for anything you cannot verify from a fresh `read_range`. Prefer `patch`
+over `write` for an existing file: a one-line anchor is cheaper to verify and survives clients that mishandle
+escaped quotes or newlines inside argument values.
 
 `run_command_batch` — `{"commands": [{"command": "git", "args": ["status", "--short"]}], "onError": "continue",
 "maxBytes": 8000}`. Every item reports `status` (`success` / `failure` / `skipped`), `ran`, `exitCode`, and

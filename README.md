@@ -90,8 +90,10 @@ See [MCP interface and security model](docs/MCP.md) for the supported protocol, 
 - [Telemetry interpretation](docs/telemetry.md) — privacy levels, event model, metric definitions, and interpretation guidance.
 - [Release procedure](docs/RELEASING.md) — validation, branch/PR flow, semantic-release, and npm publishing.
 - [Contributing guide](https://github.com/SarfDime/agent-dir/blob/main/.github/CONTRIBUTING.md) — development setup, checks, and pull-request expectations.
-- [Security policy](SECURITY.md) — supported versions and private vulnerability reporting.
+- [Security policy](docs/SECURITY.md) — supported versions and private vulnerability reporting.
 - [Maintainer skill](https://github.com/SarfDime/agent-dir/blob/main/skills/agent-dir-maintainer/SKILL.md) — repository-specific guidance for coding agents.
+- Agent instructions: AGENTS.md — entry point for coding agents; the scoped rules live in docs/AGENTS-*.md.
+- Code of conduct: docs/CODE_OF_CONDUCT.md — community expectations for participation.
 
 ## Development checks
 

@@ -6,7 +6,7 @@ import path from "node:path";
  * These rules catch common accidents and bypasses of the executable allowlist (global options
  * placed before a subcommand, registry publishing, remote code execution helpers, and execution
  * modes hidden in arguments). They are guardrails, NOT a security boundary: an agent that may run
- * an interpreter or write project files can still run arbitrary code. See SECURITY.md.
+ * an interpreter or write project files can still run arbitrary code. See docs/SECURITY.md.
  */
 export interface CommandPolicyRule {
   /** When set, only these first subcommands are allowed for the executable. */
