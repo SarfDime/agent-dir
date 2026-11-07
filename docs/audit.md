@@ -201,7 +201,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-05 | **Done** | `search_code` wraps single-string `paths`, `globs` and `queries`; `maxBytes` truncation includes bounded per-file counts for unreturned matches. |
 | P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
-| P-08 | Open | |
+| P-08 | **Done** | Summary defaults to compact rates, top issues and a bounded per-client split; `view=full`, failure grouping and `excludeClients` are covered by tests. |
 | P-09 | Open | Unblocked: validation extraction landed. |
 | P-10 | **Partial** | `validation.ts` extracted. Remaining: `classify-errors.ts`, `analytics-format.ts`, one handler module per tool. `src/mcp.ts` is 2,871 lines (was 3,153); target under ~1,200. |
 | P-11 | Open | Unblocked: validation extraction landed. |

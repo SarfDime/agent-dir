@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
-import { summarizeTelemetry } from "./telemetry/aggregate.js";
+import { summarizeTelemetry, type TelemetrySummary } from "./telemetry/aggregate.js";
 import {
   fingerprintInput,
   telemetryHmac,
@@ -1311,6 +1311,115 @@ function sessionClient(events: TelemetryEnvelope[]): string | undefined {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
 }
 
+type AnalyticsConfigSummary = TelemetrySummary["configs"][string];
+
+function compactClientSplit(clients: Record<string, number>) {
+  const sorted = Object.entries(clients).sort(
+    ([leftName, leftCount], [rightName, rightCount]) =>
+      rightCount - leftCount || leftName.localeCompare(rightName),
+  );
+  const top = sorted.slice(0, 10).map(([client, requests]) => ({ client, requests }));
+  const otherRequests = sorted.slice(10).reduce((total, [, requests]) => total + requests, 0);
+  return { top, ...(otherRequests > 0 ? { otherRequests } : {}) };
+}
+
+function compactAnalyticsConfig(config: AnalyticsConfigSummary) {
+  const issues = [
+    ...Object.entries(config.failuresByCategory.mcp).map(([issue, count]) => ({
+      event: "mcp_request",
+      issue,
+      count,
+    })),
+    ...Object.entries(config.tools)
+      .filter(([, tool]) => tool.failures > 0)
+      .map(([issue, tool]) => ({ event: "tool_call", issue, count: tool.failures })),
+    ...Object.entries(config.commands)
+      .filter(([, command]) => command.failures > 0)
+      .map(([issue, command]) => ({ event: "command_call", issue, count: command.failures })),
+  ]
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.event.localeCompare(right.event) ||
+        left.issue.localeCompare(right.issue),
+    )
+    .slice(0, 5);
+  return {
+    eventCount: config.eventCount,
+    httpRequests: config.httpRequests,
+    httpAuthFailures: config.httpAuthFailures,
+    httpErrors: config.httpErrors,
+    mcpRequests: config.mcpRequests,
+    mcpRequestsByMethod: config.mcpRequestsByMethod,
+    toolCalls: config.toolCalls,
+    commandCalls: config.commandCalls,
+    tunnelEvents: config.tunnelEvents,
+    tunnelFailures: config.tunnelFailures,
+    successRates: {
+      mcp: config.mcpSuccessRate,
+      tools: config.toolSuccessRate,
+      commands: config.commandSuccessRate,
+    },
+    topIssues: issues,
+    clients: compactClientSplit(config.efficiency.clients),
+    sessionCount: Object.keys(config.sessions).length,
+    legacySessionEvents: config.legacySessionEvents,
+    efficiency: {
+      estimatedOutputTokens: config.efficiency.estimatedOutputTokens,
+      duplicateOutputCalls: config.efficiency.duplicateOutputCalls,
+      duplicateOutputBytes: config.efficiency.duplicateOutputBytes,
+      duplicateInputCalls: config.efficiency.duplicateInputCalls,
+      repeatedFileReadCalls: config.efficiency.repeatedFileReadCalls,
+      searchThenReadTransitions: config.efficiency.searchThenReadTransitions,
+      readSpans: config.efficiency.readSpans,
+    },
+  };
+}
+
+interface AnalyticsFailureGroup {
+  event: string;
+  tool?: string;
+  commandFamily?: string;
+  method?: string;
+  category?: string;
+  reason?: string;
+  count: number;
+  first: string;
+  last: string;
+}
+
+function sessionFailureGroups(events: TelemetryEnvelope[]): AnalyticsFailureGroup[] {
+  const failures = new Map<string, AnalyticsFailureGroup>();
+  for (const envelope of events) {
+    const event = envelope.event;
+    if (!("success" in event) || event.success) continue;
+    const tool = "tool" in event ? event.tool : undefined;
+    const commandFamily = "commandFamily" in event ? event.commandFamily : undefined;
+    const method = "method" in event ? event.method : undefined;
+    const category = "errorCategory" in event ? event.errorCategory : undefined;
+    const reason = "errorReason" in event ? event.errorReason : undefined;
+    const key = JSON.stringify([event.event, tool, commandFamily, method, category, reason]);
+    const group = failures.get(key);
+    if (group) {
+      group.count += 1;
+      group.last = envelope.timestamp;
+    } else {
+      failures.set(key, {
+        event: event.event,
+        ...(tool ? { tool } : {}),
+        ...(commandFamily ? { commandFamily } : {}),
+        ...(method ? { method } : {}),
+        ...(category ? { category } : {}),
+        ...(reason ? { reason } : {}),
+        count: 1,
+        first: envelope.timestamp,
+        last: envelope.timestamp,
+      });
+    }
+  }
+  return [...failures.values()];
+}
+
 /** True when the profile's tool selection removes this tool. */
 export function isToolDisabled(name: string, selection: CommandConfig["tools"]): boolean {
   if (selection?.disabled?.includes(name)) return true;
@@ -1354,9 +1463,15 @@ async function availableTools(
 
 const telemetryAnalyticsTool: ToolDefinition = tool(
   "telemetry_analytics",
-  "Analyze locally persisted Agent Dir telemetry across all profiles and sessions. Summary mode is aggregate-only; event mode returns bounded sanitized event records. Available only when Agent Dir is started with --analytics.",
+  "Analyze locally persisted Agent Dir telemetry across all profiles and sessions. Summary mode defaults to compact rates, top issues and a per-client split; set view='full' for full tables. excludeClients removes matching clients; event mode returns bounded sanitized records. Available only when Agent Dir is started with --analytics.",
   {
     mode: { type: "string", enum: ["summary", "sessions", "events"], default: "summary" },
+    view: {
+      type: "string",
+      enum: ["compact", "full"],
+      default: "compact",
+      description: "Summary view only; full includes the per-tool and per-command tables.",
+    },
     profile: { type: "string", maxLength: 100 },
     session: { type: "string", maxLength: 100 },
     client: {
@@ -1364,6 +1479,12 @@ const telemetryAnalyticsTool: ToolDefinition = tool(
       maxLength: 100,
       description:
         "Only events from this MCP client, by name or name@version (for example better-deepseek@0.1.15).",
+    },
+    excludeClients: {
+      type: "array",
+      items: { type: "string", maxLength: 100 },
+      maxItems: 20,
+      description: "Exclude matching MCP clients; each selector uses the same matching as client.",
     },
     since: { type: "string", description: "Optional ISO timestamp lower bound." },
     until: { type: "string", description: "Optional ISO timestamp upper bound." },
@@ -1595,6 +1716,16 @@ async function callTool(
       typeof args.client === "string" && args.client.trim()
         ? args.client.trim().toLowerCase()
         : undefined;
+    const excludedClientFilters: string[] = [];
+    if (args.excludeClients !== undefined) {
+      if (!Array.isArray(args.excludeClients) || args.excludeClients.length > 20)
+        throw new Error("excludeClients must be an array of at most 20 client names.");
+      for (const client of args.excludeClients) {
+        if (typeof client !== "string" || client.length > 100)
+          throw new Error("excludeClients must contain strings of at most 100 characters.");
+        if (client.trim()) excludedClientFilters.push(client.trim().toLowerCase());
+      }
+    }
     const all = readTelemetryEvents({
       ...(typeof args.profile === "string" && args.profile ? { profile: args.profile } : {}),
       ...(typeof args.session === "string" && args.session ? { session: args.session } : {}),
@@ -1604,42 +1735,49 @@ async function callTool(
         (!args.profile || event.configId === args.profile) &&
         (!args.session || event.sessionId === args.session) &&
         (!clientFilter || matchesClient(event, clientFilter)) &&
+        !excludedClientFilters.some((filter) => matchesClient(event, filter)) &&
         Date.parse(event.timestamp) >= since &&
         Date.parse(event.timestamp) <= until,
     );
     let result: Record<string, unknown>;
     if (mode === "summary") {
+      const view = typeof args.view === "string" ? args.view : "compact";
+      if (!["compact", "full"].includes(view)) throw new Error("view must be compact or full.");
       const summary = summarizeTelemetry(all);
       result = {
         mode,
+        view,
         matchedEvents: all.length,
         configCount: summary.configCount,
         totalEvents: summary.totalEvents,
         configs: Object.fromEntries(
           Object.entries(summary.configs).map(([configId, config]) => [
             configId,
-            {
-              eventCount: config.eventCount,
-              httpRequests: config.httpRequests,
-              httpAuthFailures: config.httpAuthFailures,
-              httpErrors: config.httpErrors,
-              mcpRequests: config.mcpRequests,
-              toolCalls: config.toolCalls,
-              commandCalls: config.commandCalls,
-              tunnelEvents: config.tunnelEvents,
-              tunnelDisconnects: config.tunnelDisconnects,
-              tunnelReconnects: config.tunnelReconnects,
-              tunnelFailures: config.tunnelFailures,
-              mcpSuccessRate: config.mcpSuccessRate,
-              toolSuccessRate: config.toolSuccessRate,
-              commandSuccessRate: config.commandSuccessRate,
-              failuresByCategory: config.failuresByCategory,
-              tools: config.tools,
-              commands: config.commands,
-              sessionCount: Object.keys(config.sessions).length,
-              legacySessionEvents: config.legacySessionEvents,
-              efficiency: config.efficiency,
-            },
+            view === "full"
+              ? {
+                  eventCount: config.eventCount,
+                  httpRequests: config.httpRequests,
+                  httpAuthFailures: config.httpAuthFailures,
+                  httpErrors: config.httpErrors,
+                  mcpRequests: config.mcpRequests,
+                  mcpRequestsByMethod: config.mcpRequestsByMethod,
+                  toolCalls: config.toolCalls,
+                  commandCalls: config.commandCalls,
+                  tunnelEvents: config.tunnelEvents,
+                  tunnelDisconnects: config.tunnelDisconnects,
+                  tunnelReconnects: config.tunnelReconnects,
+                  tunnelFailures: config.tunnelFailures,
+                  mcpSuccessRate: config.mcpSuccessRate,
+                  toolSuccessRate: config.toolSuccessRate,
+                  commandSuccessRate: config.commandSuccessRate,
+                  failuresByCategory: config.failuresByCategory,
+                  tools: config.tools,
+                  commands: config.commands,
+                  sessionCount: Object.keys(config.sessions).length,
+                  legacySessionEvents: config.legacySessionEvents,
+                  efficiency: config.efficiency,
+                }
+              : compactAnalyticsConfig(config),
           ]),
         ),
       };
@@ -1667,19 +1805,7 @@ async function callTool(
                 counts[event.event.tool] = (counts[event.event.tool] ?? 0) + 1;
               return counts;
             }, {}),
-          failures: events
-            .filter((event) => "success" in event.event && !event.event.success)
-            .map((event) => ({
-              timestamp: event.timestamp,
-              event: event.event.event,
-              ...("tool" in event.event ? { tool: event.event.tool } : {}),
-              ...("errorCategory" in event.event && event.event.errorCategory
-                ? { category: event.event.errorCategory }
-                : {}),
-              ...("errorReason" in event.event && event.event.errorReason
-                ? { reason: event.event.errorReason }
-                : {}),
-            })),
+          failures: sessionFailureGroups(events),
         })),
       };
     } else {

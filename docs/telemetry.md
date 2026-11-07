@@ -121,10 +121,10 @@ Event shapes live in `src/telemetry/types.ts`; the persistence allowlist lives i
 
 Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool. It reads persisted telemetry across all profiles and sessions on the host; this is separate from enabling collection. Keep the flag off unless the connected agent needs access to this history.
 
-- `mode=summary` returns aggregate reliability, timing, and usage metrics.
-- `mode=sessions` returns per-session tool counts and failure summaries.
+- `mode=summary` defaults to compact counts and success rates, the five highest-volume issues, and the ten most-used MCP clients (plus an `otherRequests` total when more clients exist). `view=full` returns the complete per-tool and per-command tables.
+- `mode=sessions` returns per-session tool counts and failure summaries. Identical failures within a session are grouped by event and failure details, with `count`, `first`, and `last` timestamps.
 - `mode=events` returns bounded event records, with runtime/project context reduced to coarse fields and legacy raw diagnostic tool details removed.
-- Optional `profile`, `session`, `since`, and `until` filters narrow the dataset. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
+- Optional `profile`, `session`, `client`, `excludeClients`, `since`, and `until` filters narrow the dataset. `excludeClients` accepts up to 20 client selectors and uses the same name/name@version matching as `client`. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
 
 Diagnostic-level telemetry can still include identifying runtime metadata, so only enable remote analytics on a connector you trust. The analytics tool is hidden by default and is registered only when the explicit flag is true.
 
