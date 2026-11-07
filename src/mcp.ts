@@ -1332,6 +1332,16 @@ function argumentProblem(message: string, reason: TelemetryErrorReason): ToolArg
   return { message, reason };
 }
 
+function withArticle(type: string): string {
+  return /^[aeiou]/.test(type) ? `an ${type}` : `a ${type}`;
+}
+
+/** JSON type name of a received value, so a type error says what actually arrived. */
+function describeJsonType(value: unknown): string {
+  if (value === null) return "null";
+  return Array.isArray(value) ? "array" : typeof value;
+}
+
 /**
  * Validates tool arguments against the advertised `inputSchema` before dispatch, so a bad call
  * fails with a message naming the argument instead of a coercion artefact inside a tool.
@@ -1370,15 +1380,31 @@ export function validateToolArguments(
     const errors = schema.anyOf.map((branch) =>
       isRecord(branch) ? validateToolArguments(branch, value, path, toolName) : undefined,
     );
-    if (errors.some((error) => error === undefined)) return undefined;
+    const failures = errors.filter((error): error is ToolArgumentProblem => error !== undefined);
+    if (failures.length < errors.length) {
+      // A branch matched, but the properties the schema declares itself still apply to the value.
+      const { anyOf: _matched, ...own } = schema;
+      return validateToolArguments(own, value, path, toolName);
+    }
+    // No branch matched. When every branch only lacks its own key, say so once; otherwise the
+    // branch that got past the presence check is the closer match and its error is the useful one.
+    if (failures.length > 0 && failures.every((error) => error.reason === "missing_required")) {
+      const names = schema.anyOf.flatMap((branch) =>
+        isRecord(branch) && Array.isArray(branch.required)
+          ? branch.required.map((name) => `'${path ? `${label}.${String(name)}` : String(name)}'`)
+          : [],
+      );
+      return argumentProblem(`One of ${names.join(" or ")} is required.`, "missing_required");
+    }
     return (
-      errors.find((error) => error !== undefined) ??
+      failures.find((error) => error.reason !== "missing_required") ??
+      failures[0] ??
       argumentProblem(`${label} does not match any allowed shape.`, "other")
     );
   }
   if (schema.type !== undefined && !typeMatches(schema.type, value))
     return argumentProblem(
-      `'${label}' must be ${schema.type === "integer" ? "an integer" : `a ${String(schema.type)}`}.`,
+      `'${label}' must be ${schema.type === "integer" ? "an integer" : withArticle(String(schema.type))} (got ${describeJsonType(value)}).`,
       "type_mismatch",
     );
   if (Array.isArray(schema.enum) && !schema.enum.includes(value))
