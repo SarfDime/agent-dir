@@ -71,15 +71,15 @@ test("efficiency summary measures duplicates, truncation, search-then-read and e
   });
 });
 
-test("efficiency summary reports client and protocol usage from MCP requests", () => {
-  const request = (version: string, name: string): TelemetryEnvelope =>
+test("telemetry summary reports MCP request counts per method", () => {
+  const request = (version: string, name: string, method: string): TelemetryEnvelope =>
     ({
       schemaVersion: 1,
       timestamp: new Date(START).toISOString(),
       configId: "p",
       sessionId: "s1",
       level: "basic",
-      event: { event: "mcp_request", method: "server/discover", success: true, durationMs: 1 },
+      event: { event: "mcp_request", method, success: true, durationMs: 1 },
       runtime: {
         agentDirVersion: "1.3.0",
         nodeMajor: 24,
@@ -91,10 +91,18 @@ test("efficiency summary reports client and protocol usage from MCP requests", (
       },
     }) as TelemetryEnvelope;
   const summary = summarizeTelemetry([
-    request("2026-07-28", "Anthropic/ClaudeAI"),
-    request("2026-07-28", "Anthropic/ClaudeAI"),
-    request("2025-11-25", "other"),
+    request("2026-07-28", "Anthropic/ClaudeAI", "server/discover"),
+    request("2026-07-28", "Anthropic/ClaudeAI", "tools/list"),
+    request("2025-11-25", "other", "tools/call"),
+    call(1_000, "read_range"),
   ]);
+  assert.equal(summary.configs.p?.mcpRequests, 3);
+  assert.equal(summary.configs.p?.toolCalls, 1);
+  assert.deepEqual(summary.configs.p?.mcpRequestsByMethod, {
+    "server/discover": 1,
+    "tools/list": 1,
+    "tools/call": 1,
+  });
   assert.deepEqual(summary.configs.p?.efficiency.protocolVersions, {
     "2026-07-28": 2,
     "2025-11-25": 1,

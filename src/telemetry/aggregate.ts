@@ -11,6 +11,7 @@ export interface TelemetrySummary {
       httpAuthFailures: number;
       httpErrors: number;
       mcpRequests: number;
+      mcpRequestsByMethod: Record<string, number>;
       toolCalls: number;
       commandCalls: number;
       tunnelEvents: number;
@@ -392,6 +393,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
     let httpAuthFailures = 0;
     let httpErrors = 0;
     let mcpRequests = 0;
+    const mcpRequestsByMethod: Record<string, number> = {};
     let toolCalls = 0;
     let commandCalls = 0;
     let tunnelEvents = 0;
@@ -461,6 +463,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
 
       if (event.event === "mcp_request") {
         mcpRequests += 1;
+        mcpRequestsByMethod[event.method] = (mcpRequestsByMethod[event.method] ?? 0) + 1;
       } else if (event.event === "tool_call") {
         toolCalls += 1;
         const item = tools.get(event.tool) ?? bucket();
@@ -508,6 +511,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
       httpAuthFailures,
       httpErrors,
       mcpRequests,
+      mcpRequestsByMethod,
       toolCalls,
       commandCalls,
       tunnelEvents,

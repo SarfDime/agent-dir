@@ -200,7 +200,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-04 | Open | Targets `run_package_scripts_batch` only now that `validate` is gone. |
 | P-05 | Open | |
 | P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |
-| P-07 | Open | |
+| P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | Open | |
 | P-09 | Open | Unblocked: validation extraction landed. |
 | P-10 | **Partial** | `validation.ts` extracted. Remaining: `classify-errors.ts`, `analytics-format.ts`, one handler module per tool. `src/mcp.ts` is 2,871 lines (was 3,153); target under ~1,200. |
@@ -340,7 +340,8 @@ Percentage targets are judgment calls, not measured limits; revisit after P-00.
 
 1. Read span per `read_range` call — done (R-E03).
 2. Whether a client reused a previous `tools/list` response. Every call records `responseBytes`, but a client
-   that caches costs nothing after the first.
+   that caches costs nothing after the first. MCP request counts by method (P-07) separate protocol requests
+   from tool calls, but do not reveal client-side response caching.
 3. Prompt growth versus tool output growth in the same session. Telemetry records tool bytes only, so "the
    agent is expensive" and "the tool returns too much" are not separable from the server side.
 
