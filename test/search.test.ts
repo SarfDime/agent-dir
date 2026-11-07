@@ -255,6 +255,12 @@ test("inside a git repository the file list honors .gitignore and includes untra
       ["tracked.ts", "untracked.ts"],
     );
     assert.deepEqual((await findFiles(root, "*.ts")).files, ["tracked.ts", "untracked.ts"]);
+    const ignored = await searchCode(root, "needle", {
+      paths: ["ignored/skip.ts"],
+      backend: "builtin",
+    });
+    assert.equal(ignored.items.length, 0);
+    assert.match(ignored.notes?.join("\n") ?? "", /ignored\/skip\.ts.*Git ignores 'ignored'/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

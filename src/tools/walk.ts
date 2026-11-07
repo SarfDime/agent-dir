@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { commandEnvironment } from "./commands.js";
 
@@ -42,6 +42,58 @@ const cache = new Map<string, { at: number; value: ProjectFiles }>();
 
 export function invalidateProjectFiles(_root?: string): void {
   cache.clear();
+}
+
+export async function ignoredProjectPaths(root: string, paths: string[]): Promise<Set<string>> {
+  if (paths.length === 0) return new Set();
+  const candidates = new Set(paths);
+  for (const file of paths) {
+    if (file.includes("\0") || file.length > 1024) continue;
+    let slash = file.lastIndexOf("/");
+    while (slash > 0) {
+      candidates.add(file.slice(0, slash));
+      slash = file.lastIndexOf("/", slash - 1);
+    }
+  }
+  const inputPaths = [...candidates].filter((file) => !file.includes("\0") && file.length <= 1024);
+  if (inputPaths.length === 0) return new Set();
+  const input = inputPaths.join("\0");
+  if (Buffer.byteLength(input, "utf8") > 16 * 1024)
+    throw new Error("Too many or too-long paths to check Git ignore rules.");
+  const output = await new Promise<Buffer>((resolve, reject) => {
+    const child = spawn("git", ["check-ignore", "--no-index", "-z", "--stdin"], {
+      cwd: root,
+      stdio: ["pipe", "pipe", "ignore"],
+      env: { ...commandEnvironment(), GIT_OPTIONAL_LOCKS: "0" },
+    });
+    const chunks: Buffer[] = [];
+    let outputBytes = 0;
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("git check-ignore timed out."));
+    }, 3_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes > 64 * 1024) {
+        child.kill();
+        reject(new Error("git check-ignore output exceeded 64 KB."));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.stdin.on("error", reject);
+    child.once("error", reject);
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0 && code !== 1) {
+        reject(new Error(`git check-ignore exited with code ${code ?? "unknown"}.`));
+        return;
+      }
+      resolve(Buffer.concat(chunks));
+    });
+    child.stdin.end(`${input}\0`);
+  });
+  return new Set(output.toString("utf8").split("\0").filter(Boolean));
 }
 
 function ignoredPath(file: string): boolean {
