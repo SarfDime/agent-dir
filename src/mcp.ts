@@ -115,6 +115,12 @@ const timeoutMsSchema = {
   default: 120000,
   description: "Timeout per item in milliseconds. A timed-out item fails with its partial output.",
 };
+const okExitCodesSchema = {
+  type: "array",
+  items: { type: "integer", minimum: 0, maximum: 255 },
+  minItems: 1,
+  maxItems: 8,
+};
 const onErrorSchema = {
   type: "string",
   enum: ["continue", "stop"],
@@ -326,16 +332,20 @@ const baseTools: ToolDefinition[] = [
             command: stringSchema,
             args: { type: "array", items: stringSchema },
             okExitCodes: {
-              type: "array",
-              items: { type: "integer", minimum: 0, maximum: 255 },
-              maxItems: 8,
-              description: "Exit codes that count as success. Default [0].",
+              ...okExitCodesSchema,
+              description:
+                "Exit codes that count as success for this item, overriding the batch default.",
             },
           },
           ["command"],
         ),
         minItems: 1,
         maxItems: 10,
+      },
+      okExitCodes: {
+        ...okExitCodesSchema,
+        description:
+          "Default exit codes that count as success for every command. An item-level value overrides this; default [0].",
       },
       onError: onErrorSchema,
       timeoutMs: timeoutMsSchema,
@@ -1935,12 +1945,13 @@ async function callTool(
       const timeoutMs = timeoutMsArg(args.timeoutMs);
       if (commands.length > 10)
         throw new Error("run_command_batch accepts at most 10 commands per call.");
+      const defaultOkExitCodes = okExitCodesArg(args.okExitCodes);
       payload = {
         ...(await runBatch(
           commands.map((item) => {
             const command = typeof item.command === "string" ? item.command : "";
             const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
-            const okExitCodes = okExitCodesArg(item.okExitCodes);
+            const okExitCodes = okExitCodesArg(item.okExitCodes) ?? defaultOkExitCodes;
             return {
               label: [command, ...commandArgs.map(String)].join(" "),
               ...(okExitCodes ? { okExitCodes } : {}),

@@ -199,7 +199,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-03 | Open | `closestPathHint` is still private to `src/tools/files.ts` (~180) and used only by `apply_changes` (~269). |
 | P-04 | Open | Targets `run_package_scripts_batch` only now that `validate` is gone. |
 | P-05 | Open | |
-| P-06 | Open | The advertised `run_command_batch` schema still takes `okExitCodes` per command only. |
+| P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |
 | P-07 | Open | |
 | P-08 | Open | |
 | P-09 | Open | Unblocked: validation extraction landed. |

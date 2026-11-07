@@ -366,6 +366,29 @@ test("run_command_batch applies guardrails per item and reports every status", a
   }
 });
 
+test("run_command_batch applies top-level okExitCodes unless an item overrides it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-batch-exit-codes-"));
+  const handler = createMcpHandler(root, { commands: ["node"] }, { level: "none" });
+  try {
+    const result = await callBatch(handler, "run_command_batch", {
+      commands: [
+        { command: "node", args: ["-e", "process.exit(1)"] },
+        { command: "node", args: ["-e", "process.exit(1)"], okExitCodes: [0] },
+      ],
+      okExitCodes: [0, 1],
+    });
+
+    assert.deepEqual(
+      result.items.map((item) => item.status),
+      ["success", "failure"],
+    );
+    assert.equal(result.ok, false);
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run_package_scripts_batch stops by default and can continue", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-scripts-"));
   try {
