@@ -189,6 +189,18 @@ test("git guardrails block execution vectors but keep normal use", () => {
   assert.equal(deny(["push", "origin", "main"]), undefined);
 });
 
+test("optional Git policy parses and denies git grep", () => {
+  const policy: unknown = JSON.parse(
+    '{"builtinGuardrails":true,"rules":{"git":{"allowSubcommands":["status","diff","log","show"],"denySubcommands":["grep","log -S"],"denyOptions":["--force"]}}}',
+  );
+  assert.equal(isCommandPolicy(policy), true);
+  if (!isCommandPolicy(policy)) throw new Error("Documented Git command policy did not parse");
+  assert.match(
+    evaluateCommandPolicy("git", ["grep", "needle"], { ...CONTEXT, policy }) ?? "",
+    /git grep is denied by this profile/,
+  );
+});
+
 test("package manager guardrails block publishing, remote execution and unlisted scripts", () => {
   const deny = (command: string, args: string[]) => evaluateCommandPolicy(command, args, CONTEXT);
   assert.match(deny("npm", ["publish"]) ?? "", /guardrail/);
