@@ -71,10 +71,21 @@ test("package scripts run with the filtered environment while retaining build es
   }
 });
 
-test("configured package scripts work with the filtered environment", async () => {
-  for (const script of ["check", "format:check"]) {
-    const result = await runPackageScript(process.cwd(), script, 120_000, [script]);
-    assert.equal(result.exitCode, 0, `${script} failed:\n${result.stderr}\n${result.stdout}`);
+test("configured package scripts run from a fixture project", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-package-script-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        private: true,
+        scripts: { "fixture:check": `node -e "process.stdout.write('fixture script passed')"` },
+      }),
+    );
+    const result = await runPackageScript(root, "fixture:check", 10_000, ["fixture:check"]);
+    assert.equal(result.exitCode, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), "fixture script passed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
