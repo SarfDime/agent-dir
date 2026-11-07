@@ -458,7 +458,6 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     "run_command_batch",
     "run_package_scripts_batch",
     "search_code",
-    "validate",
   ];
   const removedTools = [
     "allowed_commands",
@@ -487,6 +486,7 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
     "read_files",
     "read_relevant",
     "search_files",
+    "validate",
     "write_files",
   ];
   try {
@@ -509,6 +509,27 @@ test("MCP exposes only canonical tools; Git uses the allowlisted command interfa
       }
       handler.closeSubscriptions();
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a call to the removed validate tool points to run_package_scripts_batch", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-removed-tool-"));
+  try {
+    const handler = createMcpHandler(root, {});
+    const response = await handler(
+      requestFor(1, "tools/call", { name: "validate", arguments: {} }),
+    );
+    const body = (await response.json()) as {
+      result: { isError?: boolean; content?: Array<{ text?: string }> };
+    };
+    assert.equal(body.result.isError, true);
+    assert.match(
+      body.result.content?.[0]?.text ?? "",
+      /validate was removed.*run_package_scripts_batch/,
+    );
+    handler.closeSubscriptions();
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1024,40 +1045,6 @@ test("file, symbol, and code lookups return bounded context", async () => {
     const codeLines = codeBody.result.textContent.split("\n");
     assert.equal(codeLines.length, 2, "one header line plus one match");
     assert.match(codeLines[1] ?? "", /return message/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("validate composes diagnostics with explicitly allowed package scripts", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-modern-"));
-  try {
-    await writeFile(
-      path.join(root, "package.json"),
-      JSON.stringify({ scripts: { check: "node -e 'process.exit(0)'" } }),
-    );
-    const handler = createMcpHandler(root, { scripts: { allowedScripts: ["check"] } });
-    const response = await handler(
-      requestFor(4, "tools/call", {
-        name: "validate",
-        arguments: { level: "scripts", scripts: ["check"] },
-      }),
-    );
-    const body = (await jsonPayload(response)) as {
-      result: {
-        structuredContent: {
-          ok: boolean;
-          diagnostics: { ok: boolean };
-          scripts: { items: Array<{ command: string; status: string }> };
-        };
-      };
-    };
-    assert.equal(body.result.structuredContent.ok, true);
-    assert.equal(body.result.structuredContent.diagnostics.ok, true);
-    assert.deepEqual(
-      body.result.structuredContent.scripts.items.map((item) => [item.command, item.status]),
-      [["npm run check", "success"]],
-    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

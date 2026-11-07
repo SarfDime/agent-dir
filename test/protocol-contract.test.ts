@@ -213,7 +213,6 @@ const MATRIX_ARGUMENTS: Record<string, Json> = {
   find_symbol: { symbol: "needle", maxResults: 5 },
   find_references: { symbol: "needle", maxResults: 5 },
   project_context: {},
-  validate: { level: "diagnostics" },
   file_info: { path: "notes.txt" },
   run_package_scripts_batch: { scripts: ["check"] },
   run_command_batch: {

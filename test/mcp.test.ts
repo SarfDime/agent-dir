@@ -477,7 +477,10 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
     const missing = await call(3, "apply_changes", {});
     assert.equal(((await missing.json()) as { result: { isError: boolean } }).result.isError, true);
 
-    const badEnum = await call(4, "validate", { level: "nonsense" });
+    const badEnum = await call(4, "run_command_batch", {
+      commands: [{ command: "git" }],
+      onError: "nonsense",
+    });
     assert.equal(((await badEnum.json()) as { result: { isError: boolean } }).result.isError, true);
 
     const badRange = await call(5, "read_range", {
@@ -524,7 +527,7 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
         ["changez"],
         ["changes"],
         undefined,
-        ["level"],
+        ["commands", "onError"],
         ["path", "startLine", "endLine", "maxBytes"],
       ],
     );

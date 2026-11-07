@@ -28,7 +28,6 @@ import {
   searchCode,
 } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
-import { diagnostics } from "./tools/diagnostics.js";
 import { applyFileChanges, readFile, ToolFailure } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
 import {
@@ -283,17 +282,6 @@ const baseTools: ToolDefinition[] = [
     "project_context",
     "Return a compact LLM-oriented project snapshot combining project overview, package metadata, and active execution policy. Prefer this over separate orientation calls.",
     {
-      maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
-    },
-  ),
-  tool(
-    "validate",
-    "Validate the project. Diagnostics cover broken symlinks, invalid JSON and merge-conflict markers only; they do NOT include type checking or linting, so ok from level=diagnostics is not proof the code compiles. Use level=scripts or full to also run allowed package scripts (default: check, or typecheck and lint; full runs check and test). Scripts stop at the first failure and report status success, failure or skipped like run_package_scripts_batch.",
-    {
-      level: { type: "string", enum: ["diagnostics", "scripts", "full"], default: "diagnostics" },
-      timeoutMs: timeoutMsSchema,
-      scripts: { type: "array", items: stringSchema, minItems: 1, maxItems: 10 },
-      maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
     },
   ),
@@ -759,9 +747,10 @@ export function createMcpHandler(
               isToolDisabled(String(toolName), commandConfig.tools)
                 ? `Tool '${toolName}' is disabled by this profile.`
                 : `Unknown tool: ${toolName}.${
-                    suggestions.length
+                    REMOVED_TOOL_HINTS.get(String(toolName)) ??
+                    (suggestions.length
                       ? ` Closest tools: ${suggestions.join(", ")}.`
-                      : ` Available tools: ${available.join(", ")}.`
+                      : ` Available tools: ${available.join(", ")}.`)
                   }`,
             );
           }
@@ -1237,9 +1226,17 @@ export function toolAnnotations(name: string): Record<string, unknown> {
       idempotentHint: false,
       openWorldHint: false,
     };
-  // validate, run_command_batch and run_package_scripts_batch run programs that may touch anything.
+  // run_command_batch and run_package_scripts_batch run programs that may touch anything.
   return { readOnlyHint: false, destructiveHint: true, openWorldHint: true };
 }
+
+/** Tools removed on purpose: name the replacement instead of guessing the closest tool. */
+const REMOVED_TOOL_HINTS = new Map([
+  [
+    "validate",
+    " validate was removed; run an allowed package script such as check with run_package_scripts_batch.",
+  ],
+]);
 
 /** Plain Levenshtein distance, used only to suggest a tool name to a confused agent. */
 function editDistance(left: string, right: string): number {
@@ -1583,7 +1580,7 @@ function efficiencyModel(
       symbolNavigation: ["find_symbol", "find_references"],
       reading: ["read_range"],
       editing: ["apply_changes"],
-      validation: ["validate", "targeted package script"],
+      validation: ["targeted package script"],
       ...(analyticsEnabled ? { telemetryAnalytics: "telemetry_analytics" } : {}),
     },
     avoid: [
@@ -1609,14 +1606,14 @@ function capabilityInstructions(
   const commands = inlineList(document.execution.commands);
   const blocked = inlineList(document.execution.blacklistedCommands);
   if (variant === "terse") {
-    return `Agent Dir is the primary project interface: fewest calls, smallest output. Orient with project_context; locate with search_code or find_files; read with read_range; edit with apply_changes; verify with validate.${graphAvailable ? " Use codegraph_explore for behaviour, call flow and impact." : ""} Search before reading, read only the range you need, batch related calls, and never repeat a discovery. Scripts: ${scripts}. Commands: ${commands}. Blocked: ${blocked}.`;
+    return `Agent Dir is the primary project interface: fewest calls, smallest output. Orient with project_context; locate with search_code or find_files; read with read_range; edit with apply_changes; verify with a targeted package script.${graphAvailable ? " Use codegraph_explore for behaviour, call flow and impact." : ""} Search before reading, read only the range you need, batch related calls, and never repeat a discovery. Scripts: ${scripts}. Commands: ${commands}. Blocked: ${blocked}.`;
   }
   return `Use Agent Dir as the primary project interface: fewest calls, smallest output.
 
 - Orient, package, policy: project_context
 - Find files: find_files. Find text or regex: search_code
 - Definitions and usages: find_symbol, find_references${graphAvailable ? "\n- Behaviour, call flow, impact: codegraph_explore" : ""}
-- Read: read_range. Edit: apply_changes. Check: validate, then a targeted script
+- Read: read_range. Edit: apply_changes. Check: a targeted package script
 - Scripts: run_package_scripts_batch. Commands: run_command_batch
 
 Search before reading, read only the range you need, batch related calls, and never repeat a discovery that already answered the question.
@@ -1680,7 +1677,7 @@ function buildAgentInstructions(
         (codeGraph.detail ? ` — ${codeGraph.detail}` : "") +
         "."
       : "";
-  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Prefer validate for lightweight diagnostics and explicitly requested package scripts.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: use validate for diagnostics or explicitly allowed package scripts for executable checks.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed package scripts:\n${scripts}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: find_symbol, then find_references; fall back to search_code on empty or failed results.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: validate > targeted package script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
+  return `# Agent Dir operating instructions\n\nUse Agent Dir as the primary project interface. Optimize for correctness with the minimum necessary tool calls, filesystem reads, command output, and context.\n\n## Efficiency rules\n- Start with the narrowest operation that can answer the question. Do not dump the repository, large files, or full command output when a targeted operation is sufficient.\n- Prefer project_context for initial orientation; it combines project structure, package metadata, and execution policy in one call. \n- Prefer find_files for known filename patterns\n- Prefer search_code before reading files. Search first, then read only the relevant ranges.\n- Use CodeGraph first for non-trivial behavior, call/data flow, relationships, and impact analysis when available. If unavailable or failing, continue with native search tools.\n- Prefer read_range for a bounded section.\n- Prefer apply_changes for atomic writes, patches, and deletions. Do not rewrite an entire file when a small exact replacement is sufficient.\n- Batch related reads, writes, patches, searches, and commands into one tool call when practical.\n- Keep maxResults small unless the initial result is insufficient.\n- Prefer dedicated Agent Dir tools over run_command_batch because dedicated tools return structured, bounded results.\n- Run the narrowest relevant validation after a change; escalate only when required by the task or release workflow.\n- Never repeat a successful discovery/read just because another tool can provide the same information.\n\n## Preferred workflow\n1. Orient: project_context.\n2. Locate: find_files/search_code/find_symbol as appropriate.\n3. Read: read_range.\n4. Modify: apply_changes for atomic writes, patches, and deletes.\n5. Validate: run the narrowest allowed package script that checks the change.\n6. Review: use allowlisted Git commands through run_command_batch when \`git\` is enabled.\n\n## Execution policy\nAllowed package scripts:\n${scripts}\n\nAllowed executables:\n${commands}\n\nBlacklisted command prefixes:\n${blacklist}\n\nOnly use commands from the execution policy. A blacklisted command prefix overrides an allowed executable. Do not attempt to bypass it with shells or alternate executables.\n\n## Git operations\nUse \`run_command_batch\` for Git commands only when \`git\` is in the allowed executable list. The command allowlist and blacklist still apply; avoid destructive operations unless explicitly requested.\n\n## Tool selection\n- Behavior/call-flow/impact: codegraph_explore first when available.\n- Semantic symbol navigation and callers: find_symbol, then find_references; fall back to search_code on empty or failed results.\n- Literal text and regex: search_code.\n- File discovery: project_context > find_files.\n- File reading: read_range.\n- Editing: apply_changes for atomic multi-file edits.\n- Validation: targeted package script > full check/test.\n- Git operations: run_command_batch with the allowed \`git\` executable, respecting the configured blacklist.\n\n${analyticsEnabled ? "\n\n## Telemetry analytics\n- telemetry_analytics is enabled for this connector. Use mode=summary for cross-session metrics, mode=sessions for per-session tool counts and failures, and mode=events for bounded event sequences. Filter by profile/time/session before requesting event detail." : ""}\n\nThe execution policy and this guidance are generated from the running Agent Dir configuration; do not maintain a separate client-specific copy.${codeGraphSection}`;
 }
 
 function capabilities(): Record<string, unknown> {
@@ -2069,104 +2066,6 @@ async function callTool(
       payload = bounded.truncated
         ? { result: bounded.text, truncated: true }
         : JSON.parse(bounded.text);
-      break;
-    }
-    case "validate": {
-      const level = args.level === undefined ? "diagnostics" : args.level;
-      if (level !== "diagnostics" && level !== "scripts" && level !== "full")
-        throw new Error("level must be 'diagnostics', 'scripts' or 'full'.");
-      const maxResults = numberArg(args.maxResults, 200, 1000);
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const timeoutMs = timeoutMsArg(args.timeoutMs);
-      const diagnosticItems = await diagnostics(root, maxResults);
-      let scripts: string[] = [];
-      let note: string | undefined;
-      if (level === "diagnostics") {
-        if (args.scripts !== undefined)
-          note =
-            "scripts were ignored because level is diagnostics; use level scripts or full to run them.";
-      } else if (args.scripts !== undefined) {
-        scripts = stringArray(args.scripts, "scripts");
-      } else {
-        scripts = defaultValidationScripts(level, allowedScripts);
-        if (scripts.length === 0)
-          throw new Error(
-            `level '${level}' needs scripts, and none of check, typecheck or lint is allowed. Allowed scripts: ${allowedScripts.join(", ") || "(none)"}.`,
-          );
-        note = `No scripts were given; ran ${scripts.join(", ")}.`;
-      }
-      if (scripts.length > 10) throw new Error("validate accepts at most 10 scripts per call.");
-      const diagnosticsBudget = scripts.length > 0 ? Math.floor(maxBytes * 0.25) : maxBytes - 400;
-      const boundedDiagnostics = boundedItems(diagnosticItems, Math.max(256, diagnosticsBudget));
-      const diagnosticsOk = !diagnosticItems.some((item) => item.severity === "error");
-      // A flat list of issues is the first thing a byte budget cuts, and a cut list tells the
-      // caller nothing about where the problems are. The per-file summary survives any budget.
-      const summary = { error: 0, warning: 0, info: 0, files: 0 };
-      const perFile = new Map<
-        string,
-        { path: string; error: number; warning: number; info: number; first: string }
-      >();
-      for (const item of diagnosticItems) {
-        summary[item.severity] += 1;
-        const filePath = item.path ?? "(project)";
-        const entry = perFile.get(filePath) ?? {
-          path: filePath,
-          error: 0,
-          warning: 0,
-          info: 0,
-          first: "",
-        };
-        entry[item.severity] += 1;
-        if (!entry.first)
-          entry.first =
-            `${item.line ? `line ${item.line}: ` : ""}${item.code}: ${item.message}`.slice(0, 160);
-        perFile.set(filePath, entry);
-      }
-      summary.files = perFile.size;
-      const byFile = [...perFile.values()]
-        .sort((a, b) => b.error - a.error || b.warning - a.warning || a.path.localeCompare(b.path))
-        .slice(0, 10);
-      const batch =
-        scripts.length > 0
-          ? await runBatch(
-              scripts.map((script) => ({
-                label: packageScriptLabel(packageManager, script),
-                preflight: () => packageScriptProblem(root, script, allowedScripts),
-                execute: () =>
-                  packageScriptCapture(root, script, {
-                    timeoutMs,
-                    packageManager,
-                    ...(signal ? { signal } : {}),
-                  }),
-              })),
-              {
-                onError: "stop",
-                maxBytes: Math.max(1024, maxBytes - Math.max(256, diagnosticsBudget) - 300),
-              },
-            )
-          : undefined;
-      payload = {
-        level,
-        ok: diagnosticsOk && (batch?.ok ?? true),
-        diagnostics: {
-          ok: diagnosticsOk,
-          count: diagnosticItems.length,
-          summary,
-          byFile,
-          // The flat list is kept only when it fits whole; otherwise the summary is the result.
-          ...(boundedDiagnostics.truncated ? {} : { issues: boundedDiagnostics.items }),
-          truncated: boundedDiagnostics.truncated || byFile.length < perFile.size,
-          ...(boundedDiagnostics.truncated
-            ? {
-                note: `Issue list omitted because it exceeded the output budget; ${summary.error} errors and ${summary.warning} warnings in ${summary.files} files, top files listed in byFile. Raise maxBytes to see every issue.`,
-              }
-            : {}),
-        },
-        ...(batch ? { scripts: batch } : {}),
-        scriptsRequested: scripts,
-        truncated: boundedDiagnostics.truncated || (batch?.truncated ?? false),
-        ...(note ? { note } : {}),
-      };
       break;
     }
     case "file_info":
@@ -2736,7 +2635,6 @@ function commandTelemetryDescriptor(
   if (toolName === "run_package_scripts_batch")
     return { family: "package-scripts", operation: "batch" };
   if (toolName === "run_command_batch") return { family: "command", operation: "batch" };
-  if (toolName === "validate") return { family: "package-scripts", operation: "validate" };
   return undefined;
 }
 
@@ -2808,12 +2706,6 @@ function scriptRequests(value: unknown): Array<{ script: string; args?: string[]
       "Each script must be a name or an object with a script name and optional args.",
     );
   });
-}
-
-function defaultValidationScripts(level: string, allowedScripts: string[]): string[] {
-  const allowed = (names: string[]) => names.filter((name) => allowedScripts.includes(name));
-  if (level === "full") return allowed(["check", "test"]);
-  return allowedScripts.includes("check") ? ["check"] : allowed(["typecheck", "lint"]);
 }
 
 function timeoutMsArg(value: unknown): number {
@@ -2902,11 +2794,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 function isValidRequestId(value: unknown): value is string | number {
   return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
-}
-function stringArray(value: unknown, name: string): string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
-    throw new Error(`${name} must be an array of strings.`);
-  return value;
 }
 function objectArray(value: unknown, name: string): Record<string, unknown>[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "object" || item === null))
