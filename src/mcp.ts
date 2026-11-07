@@ -298,7 +298,7 @@ const baseTools: ToolDefinition[] = [
   ]),
   tool(
     "run_package_scripts_batch",
-    "Run one or more explicitly allowed package scripts sequentially. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
+    "Run one or more explicitly allowed package scripts sequentially. Successful output defaults to the last 20 lines; provide maxBytes to return full output up to that cap. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
     {
       scripts: {
         type: "array",
@@ -1947,7 +1947,11 @@ async function callTool(
                 ...(signal ? { signal } : {}),
               }),
           })),
-          { onError: batchOnError(args.onError, "stop"), maxBytes: outputBytesArg(args.maxBytes) },
+          {
+            onError: batchOnError(args.onError, "stop"),
+            maxBytes: outputBytesArg(args.maxBytes),
+            ...(args.maxBytes === undefined ? { successfulOutputLines: 20 } : {}),
+          },
         )),
       };
       break;

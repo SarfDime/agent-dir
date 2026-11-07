@@ -10,20 +10,29 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const MAX_CAPTURE_BYTES = 512_000;
 const TRUNCATION_MARKER = "\n…[output truncated at 512 KB]";
 
-export function appendBoundedOutput(current: string, chunk: Buffer | string): string {
+// shortcut: 512 KB head-only capture, upgrade to head/tail if complete tails become important.
+function appendBoundedOutputWithStatus(
+  current: string,
+  chunk: Buffer | string,
+): { output: string; truncated: boolean } {
   if (
     current.endsWith(TRUNCATION_MARKER) ||
     Buffer.byteLength(current, "utf8") >= MAX_CAPTURE_BYTES
   )
-    return current;
+    return { output: current, truncated: true };
   const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
   const available = MAX_CAPTURE_BYTES - Buffer.byteLength(current, "utf8");
-  if (incoming.byteLength <= available) return current + incoming.toString("utf8");
+  if (incoming.byteLength <= available)
+    return { output: current + incoming.toString("utf8"), truncated: false };
   const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
   const payloadBytes = Math.max(0, available - markerBytes);
   let payload = incoming.subarray(0, payloadBytes).toString("utf8");
   while (Buffer.byteLength(payload, "utf8") > payloadBytes) payload = payload.slice(0, -1);
-  return current + payload + TRUNCATION_MARKER;
+  return { output: current + payload + TRUNCATION_MARKER, truncated: true };
+}
+
+export function appendBoundedOutput(current: string, chunk: Buffer | string): string {
+  return appendBoundedOutputWithStatus(current, chunk).output;
 }
 
 export function commandEnvironment(): NodeJS.ProcessEnv {
@@ -82,6 +91,7 @@ export interface CaptureResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  outputTruncated?: boolean;
   timedOut: boolean;
   aborted: boolean;
   /** Spawn failure message (for example the executable does not exist). */
@@ -105,6 +115,7 @@ export function spawnCapture(
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let outputTruncated = false;
     let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: Omit<CaptureResult, "stdout" | "stderr" | "durationMs">): void => {
@@ -112,7 +123,13 @@ export function spawnCapture(
       finished = true;
       if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      resolve({ ...result, stdout, stderr, durationMs: Date.now() - startedAt });
+      resolve({
+        ...result,
+        stdout,
+        stderr,
+        ...(outputTruncated ? { outputTruncated: true } : {}),
+        durationMs: Date.now() - startedAt,
+      });
     };
     const child = spawn(executable, args, {
       cwd: root,
@@ -136,10 +153,14 @@ export function spawnCapture(
     }
     signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout = appendBoundedOutput(stdout, chunk);
+      const appended = appendBoundedOutputWithStatus(stdout, chunk);
+      stdout = appended.output;
+      outputTruncated ||= appended.truncated;
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr = appendBoundedOutput(stderr, chunk);
+      const appended = appendBoundedOutputWithStatus(stderr, chunk);
+      stderr = appended.output;
+      outputTruncated ||= appended.truncated;
     });
     child.on("error", (error: Error) => {
       finish({ exitCode: null, timedOut: false, aborted: false, error: error.message });

@@ -8,6 +8,7 @@ import {
   commandEnvironment,
   isCommandBlacklisted,
   runCommand,
+  spawnCapture,
 } from "../src/tools/commands.js";
 import { runPackageScript } from "../src/tools/package-scripts.js";
 
@@ -16,6 +17,15 @@ test("command output is bounded and marked when truncated", () => {
   assert.ok(Buffer.byteLength(output, "utf8") <= 512_000);
   assert.match(output, /output truncated at 512 KB/);
   assert.equal(appendBoundedOutput(output, "more"), output);
+});
+
+test("process capture reports output capped at 512 KB", async () => {
+  const result = await spawnCapture(process.cwd(), process.execPath, [
+    "-e",
+    "process.stdout.write('x'.repeat(600000))",
+  ]);
+  assert.equal(result.outputTruncated, true);
+  assert.match(result.stdout, /output truncated at 512 KB/);
 });
 
 test("child command environment filters common secret-bearing variables", () => {
