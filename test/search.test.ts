@@ -142,6 +142,11 @@ for (const backend of backends) {
       const complete = await searchCode(root, "needle 49", { backend });
       assert.equal(complete.truncated, false);
       assert.equal(complete.truncationReason, undefined);
+      assert.doesNotMatch(formatSearchEnvelope(complete), /Search tip:/);
+      assert.match(
+        formatSearchEnvelope(complete, { searchFooterHint: true }),
+        /Search tip: set context for nearby lines; use paths or globs to narrow follow-up searches\.$/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

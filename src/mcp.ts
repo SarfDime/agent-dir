@@ -5,6 +5,7 @@ import { hostname, release, userInfo } from "node:os";
 import { classifyTelemetryError, classifyTelemetryReason } from "./classify-errors.js";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
+import { type GuidanceVariant, guidanceVariant } from "./guidance.js";
 import {
   fingerprintInput,
   telemetryHmac,
@@ -1387,17 +1388,6 @@ interface CapabilityDocument {
 interface CapabilityModel {
   document: CapabilityDocument;
   instructions: string;
-}
-
-/** Guidance variants available for the workflow experiment (task 7.01). */
-export type GuidanceVariant = "table" | "terse";
-
-/**
- * `AGENT_DIR_GUIDANCE=terse` serves the shorter paragraph form. The variant is recorded on the
- * `initialize`/`server/discover` telemetry events so call mixes can be compared per variant.
- */
-export function guidanceVariant(): GuidanceVariant {
-  return process.env.AGENT_DIR_GUIDANCE === "terse" ? "terse" : "table";
 }
 
 const INLINE_LIST_LIMIT = 12;

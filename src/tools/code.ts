@@ -191,7 +191,10 @@ function describeQuery(request: SearchRequest): string {
  * Renders a search envelope as grep-style lines instead of JSON. Matched text is what an agent
  * uses; the JSON keys around it were 43% of the payload on a measured sample.
  */
-export function formatSearchEnvelope(envelope: SearchEnvelope): string {
+export function formatSearchEnvelope(
+  envelope: SearchEnvelope,
+  options: { searchFooterHint?: boolean } = {},
+): string {
   const files = new Set(envelope.items.map((item) => item.path)).size;
   const header = `${envelope.returned} ${
     envelope.returned === 1 ? "match" : "matches"
@@ -206,6 +209,10 @@ export function formatSearchEnvelope(envelope: SearchEnvelope): string {
     for (const after of item.after ?? []) lines.push(`  | ${after}`);
   }
   for (const note of envelope.notes ?? []) lines.push(`note: ${note}`);
+  if (options.searchFooterHint)
+    lines.push(
+      "Search tip: set context for nearby lines; use paths or globs to narrow follow-up searches.",
+    );
   return lines.join("\n");
 }
 

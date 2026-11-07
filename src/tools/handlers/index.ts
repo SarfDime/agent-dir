@@ -1,4 +1,5 @@
 import type { CodeGraphIntegration } from "../../codegraph.js";
+import { guidanceVariant } from "../../guidance.js";
 import type { PackageManager } from "../../types.js";
 import type { CommandPolicyConfig } from "../policy.js";
 import type { PathProtectionConfig } from "../protected-paths.js";
@@ -57,7 +58,7 @@ export function createToolHandlerTable({
     apply_changes: (args) =>
       handleApplyChanges(args, { root, pathProtection, notify, invalidateReadHistory }),
     find_files: (args) => handleFindFiles(args, root),
-    search_code: (args) => handleSearchCode(args, root),
+    search_code: (args) => handleSearchCode(args, root, guidanceVariant() === "search-footer"),
     find_symbol: (args) => handleFindSymbol(args, root),
     find_references: (args) => handleFindReferences(args, root),
     project_context: (args) =>

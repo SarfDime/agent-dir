@@ -130,12 +130,13 @@ Diagnostic-level telemetry can still include identifying runtime metadata, so on
 
 ### Guidance experiments
 
-The guidance text that `initialize` and `server/discover` return has two variants, selected with `AGENT_DIR_GUIDANCE`:
+Guidance experiments are selected with `AGENT_DIR_GUIDANCE`:
 
 - unset or `table` (default): the decision table.
 - `terse`: a single paragraph with the same policy.
+- `search-footer`: the decision table plus a one-line `search_code` text-result hint to use context and narrow follow-up searches. The hint is not added to JSON-format results.
 
-Each `initialize`/`discover` request records `guidanceVariant`, and `mode=summary` reports request counts per variant under `efficiency.guidanceVariants`. To compare, run the same workload under both variants and diff the `efficiency` block: calls per episode, `searchThenReadTransitions`, `argShape` usage, and tokens by tool. Nothing else in the response changes, so a difference is attributable to the guidance.
+Each `initialize`/`discover` request records `guidanceVariant`, and `mode=summary` reports request counts per variant under `efficiency.guidanceVariants`. To compare, run the same workload under `table` and `search-footer` and diff the `efficiency` block: calls per episode, `searchThenReadTransitions`, read-span buckets, `argShape` usage, and tokens by tool. Only the search result's text footer changes; search execution and JSON payloads are unchanged.
 
 Keep one variant per host and window; switching mid-session mixes the samples.
 

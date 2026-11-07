@@ -6,6 +6,7 @@ import type { ToolCallOutput } from "./types.js";
 export async function handleSearchCode(
   args: Record<string, unknown>,
   root: string,
+  searchFooterHint = false,
 ): Promise<ToolCallOutput> {
   const paths = optionalStringArray(args.paths, "paths", 20);
   const globs = optionalStringArray(args.globs, "globs", 20);
@@ -35,7 +36,10 @@ export async function handleSearchCode(
     };
     const text = asText
       ? envelopes
-          .map((envelope, index) => `## ${queries[index]}\n${formatSearchEnvelope(envelope)}`)
+          .map(
+            (envelope, index) =>
+              `## ${queries[index]}\n${formatSearchEnvelope(envelope, { searchFooterHint })}`,
+          )
           .join("\n\n")
       : undefined;
     return { payload, ...(text === undefined ? {} : { text }) };
@@ -43,6 +47,6 @@ export async function handleSearchCode(
   const envelope = await searchCode(root, String(args.query), { ...options, maxBytes });
   return {
     payload: { ...envelope },
-    ...(asText ? { text: formatSearchEnvelope(envelope) } : {}),
+    ...(asText ? { text: formatSearchEnvelope(envelope, { searchFooterHint }) } : {}),
   };
 }
