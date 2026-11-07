@@ -38,7 +38,7 @@ Project reference:
 - [docs/RELEASING.md](docs/RELEASING.md) - full release invariants.
 - [docs/SECURITY.md](docs/SECURITY.md) - security policy and private vulnerability reporting.
 - [docs/CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) - community expectations.
-- [docs/AUDIT-EFFICIENCY.md](docs/AUDIT-EFFICIENCY.md), [docs/AUDIT-PROGRESS.md](docs/AUDIT-PROGRESS.md) - audit notes.
+- [docs/audit.md](docs/audit.md) - cost audit, open items, and the current refactor plan.
 
 Agent skills live under `skills/`:
 
