@@ -196,7 +196,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-00 | Open | Re-baseline only after this branch is released; three commits change `toolSetHash`. Same work as O-6.03. |
 | P-01 | **Done** | See below. |
 | P-02 | **Done** | `read_range` failures use `ToolFailure` reasons and classify as `invalid_input`; regression coverage verifies all four reasons. |
-| P-03 | Open | `closestPathHint` is still private to `src/tools/files.ts` (~180) and used only by `apply_changes` (~269). |
+| P-03 | **Done** | Exported `closestPathHint` now suggests bounded project-relative paths in `read_range`, `file_info`, and empty `find_files` results; traversal paths receive no hint. |
 | P-04 | Open | Targets `run_package_scripts_batch` only now that `validate` is gone. |
 | P-05 | Open | |
 | P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |

@@ -1,3 +1,4 @@
+import { closestPathHint } from "./files.js";
 import { matchesGlob } from "./glob.js";
 import { runSearch, type SearchBackend, type SearchRequest } from "./search.js";
 import { listProjectFiles } from "./walk.js";
@@ -214,9 +215,10 @@ export async function findFiles(
   const matching = listing.files.filter((file) => matchesGlob(pattern, file));
   const truncated = matching.length > maxResults;
   const files = matching.slice(0, maxResults);
+  const hint = matching.length === 0 ? await closestPathHint(root, pattern) : "";
   const note =
     matching.length === 0
-      ? `No file matched '${pattern}' among ${listing.files.length} project files. Patterns match project-relative paths; '*' does not cross '/', so use '**' or a bare name such as 'mcp.ts'. Files ignored by .gitignore, node_modules and build output are not listed.`
+      ? `No file matched '${pattern}' among ${listing.files.length} project files.${hint} Patterns match project-relative paths; '*' does not cross '/', so use '**' or a bare name such as 'mcp.ts'. Files ignored by .gitignore, node_modules and build output are not listed.`
       : truncated
         ? `Showing ${files.length} of ${matching.length} matching files; raise maxResults or narrow the pattern.`
         : undefined;

@@ -173,12 +173,10 @@ function editDistance(a: string, b: string): number {
   return previous[b.length] as number;
 }
 
-/**
- * Names the closest existing paths when a change targets a file that does not exist. Without this
- * the agent has to spend a whole turn finding out that it guessed a path wrong.
- */
-async function closestPathHint(root: string, requested: string): Promise<string> {
+/** Suggests close, root-contained paths when a requested project path does not exist. */
+export async function closestPathHint(root: string, requested: string): Promise<string> {
   const normalized = requested.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (path.posix.isAbsolute(normalized) || normalized.split("/").includes("..")) return "";
   const base = path.posix.basename(normalized);
   const directory = path.posix.dirname(normalized);
   if (base.length < 3) return "";
@@ -186,6 +184,7 @@ async function closestPathHint(root: string, requested: string): Promise<string>
   const threshold = Math.max(2, Math.floor(base.length / 3));
   const scored: Array<{ file: string; score: number }> = [];
   for (const file of listing.files) {
+    if (Buffer.byteLength(file, "utf8") > 256 || /\p{Cc}/u.test(file)) continue;
     const candidateBase = path.posix.basename(file);
     const candidateDirectory = path.posix.dirname(file);
     if (candidateBase === base) {

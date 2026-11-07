@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { safePath, ToolFailure } from "./files.js";
+import { closestPathHint, safePath, ToolFailure } from "./files.js";
 
 const MAX_READ_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_RANGE_LINES = 2000;
@@ -48,8 +48,17 @@ export async function readRange(
       "range_too_large",
       `A range may contain at most ${MAX_RANGE_LINES} lines; request a smaller range.`,
     );
-  const target = await safePath(root, relativePath);
-  const stat = await fs.stat(target);
+  let target: string;
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    target = await safePath(root, relativePath);
+    stat = await fs.stat(target);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    throw new Error(
+      `'${relativePath}' does not exist.${await closestPathHint(root, relativePath)}`,
+    );
+  }
   if (!stat.isFile()) throw new ToolFailure("not_a_file", `'${relativePath}' is not a file.`);
   if (stat.size > MAX_READ_FILE_BYTES)
     throw new ToolFailure(

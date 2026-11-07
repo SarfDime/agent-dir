@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
-import { searchCode } from "../src/tools/code.js";
-import { applyFileChanges, listFiles, readFile } from "../src/tools/files.js";
+import { findFiles, searchCode } from "../src/tools/code.js";
+import { applyFileChanges, closestPathHint, listFiles, readFile } from "../src/tools/files.js";
+import { fileInfo } from "../src/tools/metadata.js";
 import { readRange } from "../src/tools/read.js";
 
 test("MCP authentication accepts Bearer and query-string tokens", () => {
@@ -85,6 +86,28 @@ test("filesystem access and code search stay inside project root", async () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("missing project paths get bounded hints without suggesting outside paths", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-path-hints-"));
+  try {
+    await fsWriteFile(path.join(root, "known.ts"), "export const known = true;");
+    await fsWriteFile(path.join(root, "secret.ts"), "inside");
+
+    const hint = await closestPathHint(root, "knwon.ts");
+    assert.equal(hint, " Did you mean 'known.ts'?");
+    assert.equal(await closestPathHint(root, "../secret.ts"), "");
+
+    await assert.rejects(readRange(root, "knwon.ts", 1, 1), /knwon\.ts.*Did you mean 'known\.ts'/);
+    await assert.rejects(fileInfo(root, "knwon.ts"), /knwon\.ts.*Did you mean 'known\.ts'/);
+
+    const empty = await findFiles(root, "knwon.ts");
+    assert.match(empty.note ?? "", /Did you mean 'known\.ts'/);
+    const escaped = await findFiles(root, "../secret.ts");
+    assert.doesNotMatch(escaped.note ?? "", /Did you mean/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
