@@ -112,7 +112,8 @@ after context compaction. Cheap to absorb, not free to fix (P-09).
 the `file_info` payload. Removed (R-E08).
 
 **C-01. `src/mcp.ts` was 2,806 lines** (3,153 by November). Tool table, argument validation, dispatch, result
-enveloping, guidance rendering, capability modelling and telemetry glue in one file. Being split (P-10).
+enveloping, guidance rendering, capability modelling and telemetry glue were consolidated in one file.
+P-10 extracted those responsibilities; the router is now 976 lines.
 
 **C-02. One test is coupled to the working tree.** `configured package scripts work with the filtered
 environment` runs the repository's own `npm run check` and `npm run format:check`, so it fails whenever the
@@ -124,7 +125,7 @@ live (P-12).
 
 **C-04. Type strictness is already strong.** `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`,
 `noUnusedLocals` and `noUnusedParameters` are on and an extra `tsc` run over the tree reports nothing. The
-remaining code debt is structural (C-01), not per-file.
+P-10 extraction addressed the structural concern in C-01; no further `src/mcp.ts` split is currently planned.
 
 **C-05. Error classification used string matching.** O-2.09 now gives command and integration failures
 typed categories and safe reasons; message matching remains only as a compatibility fallback.
@@ -231,7 +232,7 @@ messages; code side done, telemetry side needs P-00.
 `test/modern.test.ts` and `test/protocol-contract.test.ts`, and the `src/logging.ts` entry. No `validate`
 reference remains in `src/telemetry/`, `src/logging.ts` or `src/config.ts`; the server `instructions` no
 longer contains the old "Check: validate, then a targeted script" sentence; the only remaining text is the
-unknown-tool hint at `src/mcp.ts` ~1237, which points at `run_package_scripts_batch` and has a test. Docs
+unknown-tool hint, which points at `run_package_scripts_batch` and has a test. Docs
 updated: `docs/MCP.md`, `docs/MIGRATION.md` (removed in 3.0), `skills/agent-dir-tools/SKILL.md`.
 
 **The major bump depends on the merge method.** semantic-release reads the squash message. If the PR is
