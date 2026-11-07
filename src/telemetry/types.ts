@@ -37,6 +37,10 @@ export const TELEMETRY_ERROR_REASONS = [
   "patch_text_not_found",
   "patch_ambiguous",
   "path_not_found",
+  "range_too_large",
+  "not_a_file",
+  "binary_file",
+  "file_too_large",
   "other",
 ] as const;
 

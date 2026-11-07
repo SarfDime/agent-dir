@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { safePath } from "./files.js";
+import { safePath, ToolFailure } from "./files.js";
 
 const MAX_READ_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_RANGE_LINES = 2000;
@@ -44,18 +44,21 @@ export async function readRange(
   )
     throw new Error("startLine and endLine must be integers with 1 <= startLine <= endLine.");
   if (endLine - startLine + 1 > MAX_RANGE_LINES)
-    throw new Error(
+    throw new ToolFailure(
+      "range_too_large",
       `A range may contain at most ${MAX_RANGE_LINES} lines; request a smaller range.`,
     );
   const target = await safePath(root, relativePath);
   const stat = await fs.stat(target);
-  if (!stat.isFile()) throw new Error(`'${relativePath}' is not a file.`);
+  if (!stat.isFile()) throw new ToolFailure("not_a_file", `'${relativePath}' is not a file.`);
   if (stat.size > MAX_READ_FILE_BYTES)
-    throw new Error(
+    throw new ToolFailure(
+      "file_too_large",
       `'${relativePath}' is larger than 20 MB; use search_code with paths and context instead.`,
     );
   const raw = await fs.readFile(target, "utf8");
-  if (raw.includes("\0")) throw new Error(`'${relativePath}' looks like a binary file.`);
+  if (raw.includes("\0"))
+    throw new ToolFailure("binary_file", `'${relativePath}' looks like a binary file.`);
 
   const lines = raw.split("\n").map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
   if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();

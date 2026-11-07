@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -130,4 +130,56 @@ test("read_range returns plain text, structured data and supports several ranges
     assert.equal(missing.result.isError, true);
     assert.match(missing.result.content[0]?.text ?? "", /startLine and endLine are required/);
   });
+});
+
+test("read_range failures record a typed reason and invalid-input category", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-read-errors-"));
+  const configId = `test-read-errors-${process.pid}-${Date.now()}`;
+  const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+  try {
+    await mkdir(path.join(root, "directory"));
+    await writeFile(path.join(root, "binary.bin"), Buffer.from([65, 0, 66]));
+    await writeFile(path.join(root, "large.txt"), "");
+    await truncate(path.join(root, "large.txt"), 20 * 1024 * 1024 + 1);
+    await writeFile(path.join(root, "f.txt"), LINES);
+
+    const cases = [
+      { path: "f.txt", startLine: 1, endLine: 2001, reason: "range_too_large" },
+      { path: "directory", startLine: 1, endLine: 1, reason: "not_a_file" },
+      { path: "binary.bin", startLine: 1, endLine: 1, reason: "binary_file" },
+      { path: "large.txt", startLine: 1, endLine: 1, reason: "file_too_large" },
+    ] as const;
+
+    for (const [index, { reason, ...args }] of cases.entries()) {
+      const response = await handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: index + 1,
+            method: "tools/call",
+            params: { name: "read_range", arguments: args, _meta: META },
+          }),
+        }),
+      );
+      const body = (await response.json()) as {
+        result: { isError?: boolean };
+      };
+      assert.equal(body.result.isError, true);
+
+      const event = handler
+        .telemetrySnapshot()
+        .filter(
+          (envelope) => envelope.configId === configId && envelope.event.event === "tool_call",
+        )
+        .at(-1)?.event;
+      assert.ok(event?.event === "tool_call");
+      assert.equal(event.errorCategory, "invalid_input");
+      assert.equal(event.errorReason, reason);
+    }
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
 });

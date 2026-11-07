@@ -205,7 +205,14 @@ async function closestPathHint(root: string, requested: string): Promise<string>
 }
 
 /** Failure reasons a caller can act on; kept in sync with the telemetry `errorReason` vocabulary. */
-export type ToolFailureReason = "patch_text_not_found" | "patch_ambiguous" | "path_not_found";
+export type ToolFailureReason =
+  | "patch_text_not_found"
+  | "patch_ambiguous"
+  | "path_not_found"
+  | "range_too_large"
+  | "not_a_file"
+  | "binary_file"
+  | "file_too_large";
 
 /** A tool failure whose reason is safe to record, so analytics can separate the cases. */
 export class ToolFailure extends Error {

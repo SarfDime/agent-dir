@@ -149,7 +149,7 @@ table above is built from those categories.
 
 | ID | Pri | Eff | What remains | What would close it |
 | --- | --- | --- | --- | --- |
-| O-2.09 | P1 | M | Typed error classes instead of message matching. The six main classes are classified first, mostly by matching our own strings. Adopted for `apply_changes` (`ToolFailure` with `patch_text_not_found`, `patch_ambiguous`, `path_not_found`) and tool failures record a machine-readable `errorReason`. | Typed reasons for the command and integration tools, and for `read_range` (P-02). |
+| O-2.09 | P1 | M | Typed error classes instead of message matching. The six main classes are classified first, mostly by matching our own strings. Adopted for `apply_changes` (`ToolFailure` with `patch_text_not_found`, `patch_ambiguous`, `path_not_found`) and tool failures record a machine-readable `errorReason`. | Typed reasons for the command and integration tools; `read_range` reasons landed in P-02. |
 | O-2.05 | P2 | M | Streaming analytics reader. Retention, filtering, side-effect-free reads and `prune` are in place; `telemetry_analytics` still loads filtered files into memory, bounded by the retention cap. | Measure analytics latency above ~1 s on a large store, then stream. Without that measurement it is speculative. |
 | O-2.11 | P3 | S | Asynchronous telemetry appends. Directory creation and chmod already happen once per file; appends are still synchronous. | A measured latency effect, or an explicit decision to trade durability for speed. |
 | O-4.11 | P3 | M | Watcher-based file index. The 2 s cached file list is in place. | A large-repository measurement that justifies the invalidation complexity; none exists. |
@@ -195,7 +195,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | --- | --- | --- |
 | P-00 | Open | Re-baseline only after this branch is released; three commits change `toolSetHash`. Same work as O-6.03. |
 | P-01 | **Done** | See below. |
-| P-02 | Open | `ToolFailureReason` still lacks the `read.ts` reasons. |
+| P-02 | **Done** | `read_range` failures use `ToolFailure` reasons and classify as `invalid_input`; regression coverage verifies all four reasons. |
 | P-03 | Open | `closestPathHint` is still private to `src/tools/files.ts` (~180) and used only by `apply_changes` (~269). |
 | P-04 | Open | Targets `run_package_scripts_batch` only now that `validate` is gone. |
 | P-05 | Open | |

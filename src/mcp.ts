@@ -2574,7 +2574,17 @@ function resultCount(payload: Record<string, unknown>): number | undefined {
 
 function classifyTelemetryError(error: unknown): TelemetryErrorCategory {
   const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (error instanceof ToolFailure) return "not_found";
+  if (error instanceof ToolFailure) {
+    switch (error.reason) {
+      case "range_too_large":
+      case "not_a_file":
+      case "binary_file":
+      case "file_too_large":
+        return "invalid_input";
+      default:
+        return "not_found";
+    }
+  }
   if (message.startsWith("unknown tool")) return "unknown_tool";
   if (
     message.includes("integration is unavailable") ||
