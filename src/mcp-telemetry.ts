@@ -360,5 +360,11 @@ export async function buildTelemetryProjectContext(
 
 export function resultCount(payload: Record<string, unknown>): number | undefined {
   if (Array.isArray(payload.items)) return payload.items.length;
+  if (
+    typeof payload.returned === "number" &&
+    Number.isSafeInteger(payload.returned) &&
+    payload.returned >= 0
+  )
+    return payload.returned;
   return undefined;
 }

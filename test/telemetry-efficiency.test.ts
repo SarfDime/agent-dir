@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resultCount } from "../src/mcp-telemetry.js";
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import type { TelemetryEnvelope } from "../src/telemetry/types.js";
 
@@ -79,6 +80,28 @@ test("telemetry summary uses the conventional median for an even read sample", (
     call(3_000, "read_range", { readLines: 11 }),
   ]);
   assert.equal(summary.configs.p?.efficiency.readSpans.medianLines, 16);
+});
+
+test("telemetry counts multi-query search results for empty and populated outcomes", () => {
+  const emptyCount = resultCount({
+    returned: 0,
+    groups: [
+      { returned: 0, items: [] },
+      { returned: 0, items: [] },
+    ],
+  });
+  assert.equal(emptyCount, 0);
+  const populatedCount = resultCount({
+    returned: 3,
+    groups: [
+      { returned: 1, items: [{}] },
+      { returned: 2, items: [{}, {}] },
+    ],
+  });
+  assert.equal(populatedCount, 3);
+
+  const summary = summarizeTelemetry([call(0, "search_code", { resultCount: emptyCount })]);
+  assert.equal(summary.configs.p?.efficiency.tools.search_code?.emptyRatePercent, 100);
 });
 
 test("telemetry summary reports MCP request counts per method", () => {

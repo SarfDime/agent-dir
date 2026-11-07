@@ -46,12 +46,14 @@ Three further fields describe *how* a tool was called, never what was passed:
 | `integration` / `integrationStatus` | Set for integration-backed tools (`codegraph_explore`), with the integration status at call time. |
 | `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `skipIfUnchanged`, `okExitCodes`, `limit`). Values are never recorded. |
 | `readLines` | `read_range` only: total lines requested, summed over `ranges`. A count, never content. `mode=summary` buckets it under `efficiency.readSpans`, which is how a large-byte read total is attributed to big reads or to many small ones. |
+| `resultCount` | Number of returned result items. For multi-query `search_code`, this is the aggregate returned count across all query groups. |
 | `errorReason` | Why a call failed, from a closed list: `unknown_argument`, `type_mismatch`, `missing_required`, `enum_mismatch`, `length_or_range`, `patch_text_not_found`, `patch_ambiguous`, `path_not_found`, `range_too_large`, `not_a_file`, `binary_file`, `file_too_large`, `command_invalid`, `command_not_allowed`, `command_blocked`, `command_timeout`, `command_aborted`, `command_spawn_failed`, `command_failed`, `integration_unavailable`, `integration_not_installed`, `integration_not_indexed`, `integration_not_running`, `integration_timeout`, `integration_request_too_large`, `integration_failed`, `other`. It refines `errorCategory` (which stays the coarse bucket) without ever carrying a message, an argument value, a path or patch text. A value that is not on the list is dropped rather than coerced. |
 | `argumentName` | For `type_mismatch` only: the schema argument path (for example `commands[0].args`). It is validated against a conservative identifier/path allowlist. |
 | `receivedType` | For `type_mismatch` only: the received JSON type (`string`, `number`, `boolean`, `object`, `array` or `null`). Argument values are never recorded. |
 | `argumentKeys` | Key names from a rejected call, recorded as sent, so an invented key such as `_raw` or `base64Args` is visible and a retry of the same bad shape is countable. A key that is not identifier-shaped or is longer than 64 characters is recorded as `<unknown>`. Values are never recorded. |
 
 `argShape` is what makes guidance experiments measurable: it shows whether agents actually use `paths`/`globs` to scope a search, or `context` instead of a follow-up read.
+Efficiency outcomes classify successful calls with `resultCount: 0` as `empty`; a truncated result is classified as `truncated` even when its returned count is zero.
 
 ### command_call
 
