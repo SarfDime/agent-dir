@@ -3,7 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createMcpHandler, validateToolArguments } from "../src/mcp.js";
+import { createMcpHandler } from "../src/mcp.js";
+import { validateToolArguments } from "../src/validation.js";
 
 const META = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
