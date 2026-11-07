@@ -250,7 +250,12 @@ test("MCP telemetry records command, session, and detailed project context", asy
           method: "tools/call",
           params: {
             name: "run_command_batch",
-            arguments: { commands: [{ command: "git", args: ["status", "--short"] }] },
+            arguments: {
+              commands: [
+                { command: "git", args: ["status", "--short"] },
+                { command: "curl", args: ["https://example.com"] },
+              ],
+            },
             _meta: META,
           },
         }),
@@ -267,6 +272,9 @@ test("MCP telemetry records command, session, and detailed project context", asy
     if (command?.event.event === "command_call") {
       assert.equal(command.event.commandFamily, "command");
       assert.equal(command.event.operation, "batch");
+      assert.equal(command.event.success, false);
+      assert.equal(command.event.errorCategory, "policy_denied");
+      assert.equal(command.event.errorReason, "command_not_allowed");
     }
     assert.ok(tool);
     assert.ok(session);

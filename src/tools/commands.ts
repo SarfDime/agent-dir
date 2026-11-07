@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { ToolFailure } from "./failure.js";
 import {
   blacklistCandidates,
   type CommandPolicyConfig,
@@ -215,24 +216,41 @@ export function checkCommand(
   args: string[],
   context: CommandCheckContext,
 ): string | undefined {
-  if (typeof command !== "string" || !SAFE_NAME.test(command)) return "Invalid command name.";
+  return checkCommandFailure(root, command, args, context)?.message;
+}
+
+export function checkCommandFailure(
+  root: string,
+  command: string,
+  args: string[],
+  context: CommandCheckContext,
+): ToolFailure | undefined {
+  if (typeof command !== "string" || !SAFE_NAME.test(command))
+    return new ToolFailure("command_invalid", "Invalid command name.");
   if (!context.allowedCommands.includes(command)) {
     const alternative = BUILT_IN_ALTERNATIVES[command];
-    return `Command '${command}' is not allowed by this profile.${
-      alternative
-        ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
-        : ""
-    }`;
+    return new ToolFailure(
+      "command_not_allowed",
+      `Command '${command}' is not allowed by this profile.${
+        alternative
+          ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
+          : ""
+      }`,
+    );
   }
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
-    return "Command arguments must be strings.";
+    return new ToolFailure("command_invalid", "Command arguments must be strings.");
   if (isCommandBlacklisted(command, args, context.blacklistedCommands ?? []))
-    return `Command '${[command, ...args].join(" ")}' is blocked by this profile.`;
-  return evaluateCommandPolicy(command, args, {
+    return new ToolFailure(
+      "command_blocked",
+      `Command '${[command, ...args].join(" ")}' is blocked by this profile.`,
+    );
+  const problem = evaluateCommandPolicy(command, args, {
     root,
     ...(context.allowedScripts ? { allowedScripts: context.allowedScripts } : {}),
     ...(context.policy ? { policy: context.policy } : {}),
   });
+  return problem ? new ToolFailure("command_blocked", problem) : undefined;
 }
 
 export async function runCommand(
@@ -245,19 +263,24 @@ export async function runCommand(
   signal?: AbortSignal,
   context: Omit<CommandCheckContext, "allowedCommands" | "blacklistedCommands"> = {},
 ): Promise<CommandResult> {
-  const problem = checkCommand(root, command, args, {
+  const problem = checkCommandFailure(root, command, args, {
     allowedCommands,
     blacklistedCommands,
     ...context,
   });
-  if (problem) throw new Error(problem);
+  if (problem) throw problem;
   const capture = await spawnCapture(root, command, args, {
     timeoutMs,
     ...(signal ? { signal } : {}),
   });
-  if (capture.aborted) throw new Error(`Command '${command}' was aborted.`);
-  if (capture.timedOut) throw new Error(`Command '${command}' timed out after ${timeoutMs}ms.`);
-  if (capture.error) throw new Error(capture.error);
+  if (capture.aborted)
+    throw new ToolFailure("command_aborted", `Command '${command}' was aborted.`);
+  if (capture.timedOut)
+    throw new ToolFailure(
+      "command_timeout",
+      `Command '${command}' timed out after ${timeoutMs}ms.`,
+    );
+  if (capture.error) throw new ToolFailure("command_spawn_failed", capture.error);
   return {
     command: [command, ...args].join(" "),
     exitCode: capture.exitCode ?? 1,

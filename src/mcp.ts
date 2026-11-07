@@ -895,9 +895,15 @@ export function createMcpHandler(
                   commandFamily: command.family,
                   operation: command.operation,
                   ...commandExecutables(toolName, argumentsValue),
-                  success: true,
+                  success: output.failure === undefined,
                   durationMs,
                   outputBytes,
+                  ...(output.failure
+                    ? {
+                        errorCategory: output.failure.category,
+                        errorReason: output.failure.reason,
+                      }
+                    : {}),
                 },
                 runtime,
                 telemetryProject,

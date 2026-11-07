@@ -10,6 +10,7 @@ import {
   runCommand,
   spawnCapture,
 } from "../src/tools/commands.js";
+import { ToolFailure } from "../src/tools/failure.js";
 import { runPackageScript } from "../src/tools/package-scripts.js";
 
 test("command output is bounded and marked when truncated", () => {
@@ -101,7 +102,13 @@ test("command timeout terminates descendant processes", async (t) => {
       `fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));`,
       "setInterval(()=>{},1000);",
     ].join("");
-    await assert.rejects(runCommand(root, "node", ["-e", script], ["node"], [], 250), /timed out/);
+    await assert.rejects(
+      runCommand(root, "node", ["-e", script], ["node"], [], 250),
+      (error: unknown) =>
+        error instanceof ToolFailure &&
+        error.reason === "command_timeout" &&
+        /timed out/.test(error.message),
+    );
     const childPid = Number(await readFile(pidFile, "utf8"));
     let terminated = false;
     for (let attempt = 0; attempt < 30; attempt += 1) {

@@ -41,6 +41,21 @@ export const TELEMETRY_ERROR_REASONS = [
   "not_a_file",
   "binary_file",
   "file_too_large",
+  "length_or_range",
+  "command_invalid",
+  "command_not_allowed",
+  "command_blocked",
+  "command_timeout",
+  "command_aborted",
+  "command_spawn_failed",
+  "command_failed",
+  "integration_unavailable",
+  "integration_not_installed",
+  "integration_not_indexed",
+  "integration_not_running",
+  "integration_timeout",
+  "integration_request_too_large",
+  "integration_failed",
   "other",
 ] as const;
 
@@ -182,6 +197,7 @@ export interface TelemetryCommandEvent {
   durationMs: number;
   outputBytes?: number;
   errorCategory?: TelemetryErrorCategory;
+  errorReason?: TelemetryErrorReason;
 }
 
 export interface TelemetryTunnelEvent {

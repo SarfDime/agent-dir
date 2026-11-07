@@ -7,7 +7,12 @@ import test from "node:test";
 import { migrateLegacyProfiles } from "../src/config.js";
 import { createMcpHandler } from "../src/mcp.js";
 import { type BatchTask, runBatch } from "../src/tools/batch.js";
-import { checkCommand, isCommandBlacklisted, spawnCapture } from "../src/tools/commands.js";
+import {
+  checkCommand,
+  checkCommandFailure,
+  isCommandBlacklisted,
+  spawnCapture,
+} from "../src/tools/commands.js";
 import {
   evaluateCommandPolicy,
   generalSearchWarning,
@@ -172,6 +177,19 @@ test("blacklist entries are not bypassed by global options before the subcommand
   assert.equal(isCommandBlacklisted("npm", ["--prefix", "x", "publish"], blacklist), true);
   assert.equal(isCommandBlacklisted("git", ["status"], blacklist), false);
   assert.equal(isCommandBlacklisted("git", ["-C", ".", "status"], blacklist), false);
+});
+
+test("command preflight failures carry typed telemetry reasons", () => {
+  assert.equal(
+    checkCommandFailure(ROOT, "curl", [], { allowedCommands: [] })?.reason,
+    "command_not_allowed",
+  );
+  assert.equal(
+    checkCommandFailure(ROOT, "git", ["-c", "core.sshCommand=x", "fetch"], {
+      allowedCommands: ["git"],
+    })?.reason,
+    "command_blocked",
+  );
 });
 
 test("git guardrails block execution vectors but keep normal use", () => {

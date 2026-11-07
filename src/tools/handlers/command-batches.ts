@@ -1,15 +1,26 @@
 import type { PackageManager } from "../../types.js";
 import { type BatchOnError, runBatch } from "../batch.js";
-import { checkCommand, spawnCapture } from "../commands.js";
+import type { CaptureResult } from "../commands.js";
+import { checkCommandFailure, spawnCapture } from "../commands.js";
+import { ToolFailure } from "../failure.js";
 import {
-  packageScriptArgsProblem,
+  packageScriptArgsFailure,
   packageScriptCapture,
+  packageScriptFailure,
   packageScriptLabel,
-  packageScriptProblem,
 } from "../package-scripts.js";
 import type { CommandPolicyConfig } from "../policy.js";
 import { objectArray, outputBytesArg } from "./arguments.js";
 import type { ToolCallOutput } from "./types.js";
+
+function captureFailure(capture: CaptureResult, okExitCodes = [0]): ToolFailure | undefined {
+  if (capture.aborted) return new ToolFailure("command_aborted", "Command was aborted.");
+  if (capture.timedOut) return new ToolFailure("command_timeout", "Command timed out.");
+  if (capture.error) return new ToolFailure("command_spawn_failed", capture.error);
+  if (capture.exitCode === null || !okExitCodes.includes(capture.exitCode))
+    return new ToolFailure("command_failed", "Command exited with a non-success status.");
+  return undefined;
+}
 
 function scriptRequests(value: unknown): Array<{ script: string; args?: string[] }> {
   if (!Array.isArray(value) || value.length === 0)
@@ -71,31 +82,39 @@ export async function handlePackageScriptsBatch(
 ): Promise<ToolCallOutput> {
   const requested = scriptRequests(args.scripts);
   const timeoutMs = timeoutMsArg(args.timeoutMs);
+  let failure: ToolFailure | undefined;
   if (requested.length > 10)
     throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
-  return {
-    payload: {
-      ...(await runBatch(
-        requested.map(({ script, args: scriptArgs }) => ({
-          label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
-          preflight: async () =>
-            (await packageScriptProblem(root, script, allowedScripts)) ??
-            packageScriptArgsProblem(script, scriptArgs, argumentScripts),
-          execute: () =>
-            packageScriptCapture(root, script, {
-              timeoutMs,
-              packageManager,
-              ...(scriptArgs?.length ? { args: scriptArgs } : {}),
-              ...(signal ? { signal } : {}),
-            }),
-        })),
-        {
-          onError: batchOnError(args.onError, "stop"),
-          maxBytes: outputBytesArg(args.maxBytes),
-          ...(args.maxBytes === undefined ? { successfulOutputLines: 20 } : {}),
-        },
-      )),
+  const payload = await runBatch(
+    requested.map(({ script, args: scriptArgs }) => ({
+      label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
+      preflight: async () => {
+        const problem =
+          (await packageScriptFailure(root, script, allowedScripts)) ??
+          packageScriptArgsFailure(script, scriptArgs, argumentScripts);
+        failure ??= problem;
+        return problem?.message;
+      },
+      execute: async () => {
+        const capture = await packageScriptCapture(root, script, {
+          timeoutMs,
+          packageManager,
+          ...(scriptArgs?.length ? { args: scriptArgs } : {}),
+          ...(signal ? { signal } : {}),
+        });
+        failure ??= captureFailure(capture);
+        return capture;
+      },
+    })),
+    {
+      onError: batchOnError(args.onError, "stop"),
+      maxBytes: outputBytesArg(args.maxBytes),
+      ...(args.maxBytes === undefined ? { successfulOutputLines: 20 } : {}),
     },
+  );
+  return {
+    payload: { ...payload },
+    ...(failure ? { failure } : {}),
   };
 }
 
@@ -123,37 +142,45 @@ export async function handleCommandBatch(
   if (commands.length > 10)
     throw new Error("run_command_batch accepts at most 10 commands per call.");
   const defaultOkExitCodes = okExitCodesArg(args.okExitCodes);
-  return {
-    payload: {
-      ...(await runBatch(
-        commands.map((item) => {
-          const command = typeof item.command === "string" ? item.command : "";
-          const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
-          const okExitCodes = okExitCodesArg(item.okExitCodes) ?? defaultOkExitCodes;
-          return {
-            label: [command, ...commandArgs.map(String)].join(" "),
-            ...(okExitCodes ? { okExitCodes } : {}),
-            preflight: () =>
-              typeof item.command !== "string"
-                ? "command must be a string."
-                : checkCommand(root, command, commandArgs, {
-                    allowedCommands,
-                    blacklistedCommands,
-                    allowedScripts,
-                    ...(commandPolicy ? { policy: commandPolicy } : {}),
-                  }),
-            execute: () =>
-              spawnCapture(root, command, commandArgs, {
-                timeoutMs,
-                ...(signal ? { signal } : {}),
-              }),
-          };
-        }),
-        {
-          onError: batchOnError(args.onError, "continue"),
-          maxBytes: outputBytesArg(args.maxBytes),
+  let failure: ToolFailure | undefined;
+  const payload = await runBatch(
+    commands.map((item) => {
+      const command = typeof item.command === "string" ? item.command : "";
+      const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
+      const okExitCodes = okExitCodesArg(item.okExitCodes) ?? defaultOkExitCodes;
+      return {
+        label: [command, ...commandArgs.map(String)].join(" "),
+        ...(okExitCodes ? { okExitCodes } : {}),
+        preflight: () => {
+          const problem =
+            typeof item.command !== "string"
+              ? new ToolFailure("command_invalid", "command must be a string.")
+              : checkCommandFailure(root, command, commandArgs, {
+                  allowedCommands,
+                  blacklistedCommands,
+                  allowedScripts,
+                  ...(commandPolicy ? { policy: commandPolicy } : {}),
+                });
+          failure ??= problem;
+          return problem?.message;
         },
-      )),
+        execute: async () => {
+          const capture = await spawnCapture(root, command, commandArgs, {
+            timeoutMs,
+            ...(signal ? { signal } : {}),
+          });
+          failure ??= captureFailure(capture, okExitCodes);
+          return capture;
+        },
+      };
+    }),
+    {
+      onError: batchOnError(args.onError, "continue"),
+      maxBytes: outputBytesArg(args.maxBytes),
     },
+  );
+  return {
+    payload: { ...payload },
+    ...(failure ? { failure } : {}),
   };
 }

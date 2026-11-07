@@ -126,8 +126,8 @@ live (P-12).
 `noUnusedLocals` and `noUnusedParameters` are on and an extra `tsc` run over the tree reports nothing. The
 remaining code debt is structural (C-01), not per-file.
 
-**C-05. Error classification was still string matching.** Open item O-2.09; it matters because the failure
-table above is built from those categories.
+**C-05. Error classification used string matching.** O-2.09 now gives command and integration failures
+typed categories and safe reasons; message matching remains only as a compatibility fallback.
 
 ## 3. Recommendations from the 2026-10-29 audit
 
@@ -149,7 +149,7 @@ table above is built from those categories.
 
 | ID | Pri | Eff | What remains | What would close it |
 | --- | --- | --- | --- | --- |
-| O-2.09 | P1 | M | Typed error classes instead of message matching. The six main classes are classified first, mostly by matching our own strings. Adopted for `apply_changes` (`ToolFailure` with `patch_text_not_found`, `patch_ambiguous`, `path_not_found`) and tool failures record a machine-readable `errorReason`. | Typed reasons for the command and integration tools; `read_range` reasons landed in P-02. |
+| O-2.09 | P1 | M | Typed error classes instead of message matching. Adopted for `apply_changes` and `read_range`; tool failures record a machine-readable `errorReason`. | **Closed:** command preflight, timeout, abort and spawn failures and CodeGraph integration failures use typed categories and allowlisted reasons; regression tests cover classification. |
 | O-2.05 | P2 | M | Streaming analytics reader. Retention, filtering, side-effect-free reads and `prune` are in place; `telemetry_analytics` still loads filtered files into memory, bounded by the retention cap. | Measure analytics latency above ~1 s on a large store, then stream. Without that measurement it is speculative. |
 | O-2.11 | P3 | S | Asynchronous telemetry appends. Directory creation and chmod already happen once per file; appends are still synchronous. | A measured latency effect, or an explicit decision to trade durability for speed. |
 | O-4.11 | P3 | M | Watcher-based file index. The 2 s cached file list is in place. | A large-repository measurement that justifies the invalidation complexity; none exists. |

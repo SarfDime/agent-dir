@@ -114,6 +114,7 @@ const COMMAND_CALL_RULES: FieldRules<TelemetryCommandEvent> = {
   durationMs: (value) => boundedNumber(value),
   outputBytes: (value) => boundedNumber(value),
   errorCategory: (value) => sanitizeErrorCategory(value),
+  errorReason: (value) => sanitizeErrorReason(value),
 };
 
 const TUNNEL_RULES: FieldRules<TelemetryTunnelEvent> = {
