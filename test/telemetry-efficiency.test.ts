@@ -71,6 +71,16 @@ test("efficiency summary measures duplicates, truncation, search-then-read and e
   });
 });
 
+test("telemetry summary uses the conventional median for an even read sample", () => {
+  const summary = summarizeTelemetry([
+    call(0, "read_range", { readLines: 60 }),
+    call(1_000, "read_range", { readLines: 21 }),
+    call(2_000, "read_range", { readLines: 11 }),
+    call(3_000, "read_range", { readLines: 11 }),
+  ]);
+  assert.equal(summary.configs.p?.efficiency.readSpans.medianLines, 16);
+});
+
 test("telemetry summary reports MCP request counts per method", () => {
   const request = (version: string, name: string, method: string): TelemetryEnvelope =>
     ({
