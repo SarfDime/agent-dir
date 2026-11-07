@@ -205,7 +205,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-09 | **Done** | Bounded per-session read history uses hashed path keys in memory, notes overlaps, supports opt-in unchanged-repeat stubs, and invalidates after `apply_changes`. |
 | P-10 | **Partial** | `validation.ts`, `classify-errors.ts`, `analytics-format.ts` and the per-tool handler table are extracted. `src/mcp.ts` is 2,135 lines (was 3,153), still above the target of under ~1,200. |
 | P-11 | **Done** | Added the opt-in `search-footer` guidance variant; telemetry can compare it against the existing table variant using read-span and search-to-read metrics. |
-| P-12 | Open | |
+| P-12 | **Done** | Moved the package-script test to a temporary fixture, added `test:coverage` with Node 24, and wired the source-only report into CI. Current `dist/src` coverage: 86.75% lines, 81.08% branches; `classify-errors.ts` is 100% line-covered. |
 | P-13 | **Decided** | Decisions in section 5; docs pending. |
 | P-14 | **Done** | With 11 tools (analytics disabled), `tools/list` fell from 11,427 to 8,982 bytes; description text fell from 3,364 to 1,855 bytes. The stable-key `toolSetHash` is unchanged and schema parameters were preserved. |
 | P-15 | **Done** | See below. |
