@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
+import { classifyTelemetryError, classifyTelemetryReason } from "./classify-errors.js";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
 import { summarizeTelemetry, type TelemetrySummary } from "./telemetry/aggregate.js";
@@ -29,7 +30,7 @@ import {
   searchCode,
 } from "./tools/code.js";
 import { checkCommand, spawnCapture } from "./tools/commands.js";
-import { applyFileChanges, readFile, ToolFailure } from "./tools/files.js";
+import { applyFileChanges, readFile } from "./tools/files.js";
 import { fileInfo, projectOverview } from "./tools/metadata.js";
 import {
   packageScriptArgsProblem,
@@ -2806,67 +2807,6 @@ function okExitCodesArg(value: unknown): number[] | undefined {
 function resultCount(payload: Record<string, unknown>): number | undefined {
   if (Array.isArray(payload.items)) return payload.items.length;
   return undefined;
-}
-
-function classifyTelemetryError(error: unknown): TelemetryErrorCategory {
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (error instanceof ToolFailure) {
-    switch (error.reason) {
-      case "range_too_large":
-      case "not_a_file":
-      case "binary_file":
-      case "file_too_large":
-        return "invalid_input";
-      default:
-        return "not_found";
-    }
-  }
-  if (message.startsWith("unknown tool")) return "unknown_tool";
-  if (
-    message.includes("integration is unavailable") ||
-    message.includes("is not installed") ||
-    message.includes("process is not running") ||
-    message.includes("analytics is disabled") ||
-    message.includes("not indexed")
-  )
-    return "unavailable_integration";
-  if (
-    message.includes("not found") ||
-    message.includes("enoent") ||
-    message.includes("no such file") ||
-    message.includes("does not exist")
-  )
-    return "not_found";
-  if (
-    message.includes("guardrail") ||
-    message.includes("is not allowed by this profile") ||
-    message.includes("is blocked by this profile") ||
-    message.includes("is protected") ||
-    message.includes("protected path")
-  )
-    return "policy_denied";
-  if (message.includes("invalid") || message.includes("must be")) return "invalid_input";
-  if (message.includes("blocked") || message.includes("not allowed")) return "authorization";
-  if (message.includes("timeout") || message.includes("timed out")) return "timeout";
-  if (message.includes("authentication") || message.includes("unauthorized"))
-    return "authentication";
-  return "execution";
-}
-
-/**
- * Machine-readable reason for a failure, from typed errors where they exist and from the message
- * otherwise. Never derived from, or containing, argument values or file contents.
- */
-function classifyTelemetryReason(error: unknown): TelemetryErrorReason | undefined {
-  if (error instanceof ToolFailure) return error.reason;
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (message.startsWith("unknown tool")) return undefined;
-  if (message.includes("enoent") || message.includes("does not exist")) return "path_not_found";
-  if (message.includes("patch text was not found")) return "patch_text_not_found";
-  if (message.includes("times in '")) return "patch_ambiguous";
-  if (message.includes("is required")) return "missing_required";
-  if (message.includes("must be") || message.includes("must contain")) return "type_mismatch";
-  return "other";
 }
 
 function isValidRequestId(value: unknown): value is string | number {
