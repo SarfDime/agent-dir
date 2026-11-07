@@ -17,6 +17,7 @@ import type {
   TelemetryEnvelope,
   TelemetryErrorCategory,
   TelemetryErrorReason,
+  TelemetryJsonType,
   TelemetryLevel,
 } from "./telemetry/types.js";
 import { type BatchOnError, runBatch } from "./tools/batch.js";
@@ -51,7 +52,7 @@ import {
 } from "./tools/skills.js";
 import { invalidateProjectFiles } from "./tools/walk.js";
 import type { CommandConfig } from "./types.js";
-import { isRecord, validateToolArguments } from "./validation.js";
+import { describeJsonType, isRecord, validateToolArguments } from "./validation.js";
 
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
@@ -718,7 +719,11 @@ export function createMcpHandler(
             tool: string,
             category: TelemetryErrorCategory,
             rejected?: unknown,
-            details: { reason?: TelemetryErrorReason } = {},
+            details: {
+              reason?: TelemetryErrorReason;
+              argumentName?: string;
+              receivedType?: TelemetryJsonType;
+            } = {},
           ): void => {
             const serialized = JSON.stringify(rejected ?? {});
             // Key names are recorded as sent: a client-invented `_raw` or `base64Args` is the whole
@@ -738,6 +743,8 @@ export function createMcpHandler(
                 inputFingerprint: telemetryHash(fingerprintInput(tool, rejected ?? {})),
                 errorCategory: category,
                 ...(details.reason ? { errorReason: details.reason } : {}),
+                ...(details.argumentName ? { argumentName: details.argumentName } : {}),
+                ...(details.receivedType ? { receivedType: details.receivedType } : {}),
                 ...(argumentKeys?.length ? { argumentKeys } : {}),
               },
               telemetryRuntime(
@@ -768,8 +775,11 @@ export function createMcpHandler(
           if (params.arguments !== undefined && !isRecord(params.arguments)) {
             telemetryRequestErrorCategory = "invalid_input";
             telemetryRequestErrorReason = "type_mismatch";
+            const receivedType = describeJsonType(params.arguments);
             recordRejectedToolCall(toolName, "invalid_input", params.arguments, {
               reason: "type_mismatch",
+              argumentName: "arguments",
+              ...(receivedType === undefined ? {} : { receivedType }),
             });
             return jsonRpcError(
               message.id ?? null,
@@ -805,6 +815,8 @@ export function createMcpHandler(
             telemetryRequestErrorReason = argumentError.reason;
             recordRejectedToolCall(toolName, "invalid_input", argumentsValue, {
               reason: argumentError.reason,
+              ...(argumentError.argumentName ? { argumentName: argumentError.argumentName } : {}),
+              ...(argumentError.receivedType ? { receivedType: argumentError.receivedType } : {}),
             });
             mcpSuccess = true;
             return trackedJson({

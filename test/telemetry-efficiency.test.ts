@@ -101,3 +101,31 @@ test("efficiency summary reports client and protocol usage from MCP requests", (
   });
   assert.equal(summary.configs.p?.efficiency.clients["Anthropic/ClaudeAI@1.0.0"], 2);
 });
+
+test("HTTP summaries exclude the expected GET /mcp 405 response from errors", () => {
+  const http = (method: string, route: "mcp" | "other"): TelemetryEnvelope =>
+    ({
+      schemaVersion: 1,
+      timestamp: new Date(START).toISOString(),
+      configId: "p",
+      sessionId: "s1",
+      level: "anonymous",
+      event: {
+        event: "http_request",
+        method,
+        route,
+        status: 405,
+        success: false,
+        durationMs: 1,
+        authenticated: true,
+      },
+    }) as TelemetryEnvelope;
+
+  const summary = summarizeTelemetry([
+    http("GET", "mcp"),
+    http("POST", "mcp"),
+    http("GET", "other"),
+  ]);
+  assert.equal(summary.configs.p?.httpRequests, 3);
+  assert.equal(summary.configs.p?.httpErrors, 2);
+});

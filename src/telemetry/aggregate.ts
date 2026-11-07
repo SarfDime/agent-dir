@@ -414,7 +414,11 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
       if (event.event === "http_request") {
         httpRequests += 1;
         if (event.status === 401) httpAuthFailures += 1;
-        if (event.status >= 400) httpErrors += 1;
+        if (
+          event.status >= 400 &&
+          !(event.route === "mcp" && event.method.toUpperCase() === "GET" && event.status === 405)
+        )
+          httpErrors += 1;
         sessions.set(envelope.sessionId, session);
         continue;
       }

@@ -1,4 +1,4 @@
-import type { TelemetryErrorReason } from "./telemetry/types.js";
+import type { TelemetryErrorReason, TelemetryJsonType } from "./telemetry/types.js";
 
 /** Narrows an unknown value to a plain object (not null, not an array). */
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -30,6 +30,8 @@ function typeMatches(type: unknown, value: unknown): boolean {
 export interface ToolArgumentProblem {
   message: string;
   reason: TelemetryErrorReason;
+  argumentName?: string;
+  receivedType?: TelemetryJsonType;
 }
 
 /** Keys shaped like a transport encoding wrapper, which Agent Dir does not accept anywhere. */
@@ -42,8 +44,12 @@ const ENCODING_ARGUMENT = /base64|b64|encod/i;
  */
 const WRAPPED_ARGUMENTS = /^_?raw([_-]?arg(s|uments?))?$|^(args|arguments)[_-]?(json|raw)$/i;
 
-function argumentProblem(message: string, reason: TelemetryErrorReason): ToolArgumentProblem {
-  return { message, reason };
+function argumentProblem(
+  message: string,
+  reason: TelemetryErrorReason,
+  details: Pick<ToolArgumentProblem, "argumentName" | "receivedType"> = {},
+): ToolArgumentProblem {
+  return { message, reason, ...details };
 }
 
 function withArticle(type: string): string {
@@ -51,9 +57,21 @@ function withArticle(type: string): string {
 }
 
 /** JSON type name of a received value, so a type error says what actually arrived. */
-function describeJsonType(value: unknown): string {
+export function describeJsonType(value: unknown): TelemetryJsonType | undefined {
   if (value === null) return "null";
-  return Array.isArray(value) ? "array" : typeof value;
+  if (Array.isArray(value)) return "array";
+  switch (typeof value) {
+    case "string":
+      return "string";
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "object":
+      return "object";
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -116,11 +134,14 @@ export function validateToolArguments(
       argumentProblem(`${label} does not match any allowed shape.`, "other")
     );
   }
-  if (schema.type !== undefined && !typeMatches(schema.type, value))
+  if (schema.type !== undefined && !typeMatches(schema.type, value)) {
+    const receivedType = describeJsonType(value);
     return argumentProblem(
-      `'${label}' must be ${schema.type === "integer" ? "an integer" : withArticle(String(schema.type))} (got ${describeJsonType(value)}).`,
+      `'${label}' must be ${schema.type === "integer" ? "an integer" : withArticle(String(schema.type))} (got ${receivedType ?? typeof value}).`,
       "type_mismatch",
+      { argumentName: label, ...(receivedType === undefined ? {} : { receivedType }) },
     );
+  }
   if (Array.isArray(schema.enum) && !schema.enum.includes(value))
     return argumentProblem(
       `'${label}' must be one of ${schema.enum.map(String).join(", ")}.`,

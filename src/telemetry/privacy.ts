@@ -4,11 +4,13 @@ import {
   type ArgShape,
   TELEMETRY_ERROR_CATEGORIES,
   TELEMETRY_ERROR_REASONS,
+  TELEMETRY_JSON_TYPES,
   type TelemetryCommandEvent,
   type TelemetryEnvelope,
   type TelemetryErrorCategory,
   type TelemetryErrorReason,
   type TelemetryHttpRequestEvent,
+  type TelemetryJsonType,
   type TelemetryLevel,
   type TelemetryMcpRequestEvent,
   type TelemetryProjectContext,
@@ -23,8 +25,10 @@ import {
 const SAFE_ERROR_CATEGORIES: ReadonlySet<string> = new Set(TELEMETRY_ERROR_CATEGORIES);
 const SAFE_ERROR_REASONS: ReadonlySet<string> = new Set(TELEMETRY_ERROR_REASONS);
 const SAFE_OUTCOMES: ReadonlySet<string> = new Set(TOOL_OUTCOMES);
+const SAFE_JSON_TYPES: ReadonlySet<string> = new Set(TELEMETRY_JSON_TYPES);
 
 const SAFE_TOOL_NAME = /^[a-z][a-z0-9_]*$/;
+const SAFE_ARGUMENT_NAME = /^[A-Za-z_][A-Za-z0-9_.\x5B\x5D]{0,127}$/;
 const SAFE_COMMAND_FAMILY = /^[a-z][a-z0-9_-]*$/;
 const SAFE_OPERATION = /^[a-z][a-z0-9_.-]*$/;
 const SAFE_VARIANT = /^[a-z][a-z0-9_-]*$/;
@@ -97,6 +101,8 @@ const TOOL_CALL_RULES: FieldRules<TelemetryToolEvent> = {
   readLines: (value) => boundedInteger(value),
   errorCategory: (value) => sanitizeErrorCategory(value),
   errorReason: (value) => sanitizeErrorReason(value),
+  argumentName: (value) => sanitizeArgumentName(value),
+  receivedType: (value) => sanitizeJsonType(value),
   argumentKeys: (value) => sanitizeArgumentKeys(value),
 };
 
@@ -351,6 +357,15 @@ function sanitizeErrorCategory(value: string): TelemetryErrorCategory {
 function sanitizeErrorReason(value: string): TelemetryErrorReason | undefined {
   const normalized = value.trim().toLowerCase();
   return SAFE_ERROR_REASONS.has(normalized) ? (normalized as TelemetryErrorReason) : undefined;
+}
+
+function sanitizeArgumentName(value: string): string | undefined {
+  const normalized = value.trim();
+  return SAFE_ARGUMENT_NAME.test(normalized) ? normalized : undefined;
+}
+
+function sanitizeJsonType(value: TelemetryJsonType): TelemetryJsonType | undefined {
+  return SAFE_JSON_TYPES.has(value) ? value : undefined;
 }
 
 /**

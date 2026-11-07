@@ -46,6 +46,17 @@ export const TELEMETRY_ERROR_REASONS = [
 
 export type TelemetryErrorReason = (typeof TELEMETRY_ERROR_REASONS)[number];
 
+export const TELEMETRY_JSON_TYPES = [
+  "string",
+  "number",
+  "boolean",
+  "object",
+  "array",
+  "null",
+] as const;
+
+export type TelemetryJsonType = (typeof TELEMETRY_JSON_TYPES)[number];
+
 /** Canonical tool outcomes; `toolOutcome` returns one of these. */
 export const TOOL_OUTCOMES = ["ok", "empty", "truncated", "error"] as const;
 
@@ -150,6 +161,9 @@ export interface TelemetryToolEvent {
   readLines?: number;
   errorCategory?: TelemetryErrorCategory;
   errorReason?: TelemetryErrorReason;
+  /** Schema path and JSON type for a rejected type mismatch; never contains the received value. */
+  argumentName?: string;
+  receivedType?: TelemetryJsonType;
   /**
    * Argument key names from a rejected call. Unknown keys are recorded as `<unknown>`, so a
    * misspelled or invented argument is visible without persisting the text that was sent.

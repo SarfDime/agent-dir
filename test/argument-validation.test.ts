@@ -57,6 +57,8 @@ test("properties declared next to an anyOf are still validated when a branch mat
     assert.deepEqual(validateToolArguments(schema, { query: "x", paths: "src" }), {
       message: "'paths' must be an array (got string).",
       reason: "type_mismatch",
+      argumentName: "paths",
+      receivedType: "string",
     });
     assert.deepEqual(validateToolArguments(schema, { query: "x", context: 6 }), {
       message: "'context' must be at most 5.",
@@ -65,6 +67,8 @@ test("properties declared next to an anyOf are still validated when a branch mat
     assert.deepEqual(validateToolArguments(schema, { query: "x", maxResults: "5" }), {
       message: "'maxResults' must be an integer (got string).",
       reason: "type_mismatch",
+      argumentName: "maxResults",
+      receivedType: "string",
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -79,6 +83,8 @@ test("when no anyOf branch matches, the error comes from the closest branch", as
     assert.deepEqual(validateToolArguments(schema, { queries: "needle" }), {
       message: "'queries' must be an array (got string).",
       reason: "type_mismatch",
+      argumentName: "queries",
+      receivedType: "string",
     });
     // Neither key is present: name both alternatives once.
     assert.deepEqual(validateToolArguments(schema, { paths: ["src"] }), {

@@ -8,6 +8,7 @@ import { telemetrySessionPath } from "../src/telemetry/storage.js";
 import type {
   TelemetryErrorCategory,
   TelemetryErrorReason,
+  TelemetryJsonType,
   ToolOutcome,
 } from "../src/telemetry/types.js";
 
@@ -603,10 +604,14 @@ test("privacy sanitizer keeps only known rejection reasons and safe argument key
     success: false,
     durationMs: 1,
     errorCategory: "invalid_input",
-    errorReason: "unknown_argument",
+    errorReason: "type_mismatch",
+    argumentName: "commands[0].args",
+    receivedType: "object",
     argumentKeys: ["base64Args", "not a key!", "changes"],
   });
-  assert.equal(valid.errorReason, "unknown_argument");
+  assert.equal(valid.errorReason, "type_mismatch");
+  assert.equal(valid.argumentName, "commands[0].args");
+  assert.equal(valid.receivedType, "object");
   assert.deepEqual(valid.argumentKeys, ["base64Args", "<unknown>", "changes"]);
 
   const unlisted = sanitizeAnonymousEvent({
@@ -615,7 +620,11 @@ test("privacy sanitizer keeps only known rejection reasons and safe argument key
     success: false,
     durationMs: 1,
     errorReason: "made_up_reason" as unknown as TelemetryErrorReason,
+    argumentName: "not a schema path",
+    receivedType: "credential" as unknown as TelemetryJsonType,
   });
   // An unlisted reason is dropped, not coerced, so it can never look classified.
   assert.equal("errorReason" in unlisted, false);
+  assert.equal("argumentName" in unlisted, false);
+  assert.equal("receivedType" in unlisted, false);
 });

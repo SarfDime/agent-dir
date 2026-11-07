@@ -325,6 +325,46 @@ test("MCP telemetry records malformed requests as invalid input", async () => {
   }
 });
 
+test("type-mismatch telemetry records only the argument name and JSON type", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-type-mismatch-"));
+  const configId = `test-mcp-type-mismatch-${process.pid}-${Date.now()}`;
+  const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+  try {
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "read_range",
+            arguments: { path: { secret: "do-not-record" }, startLine: 1, endLine: 1 },
+            _meta: META,
+          },
+        }),
+      }),
+    );
+    const body = (await response.json()) as { result: { isError?: boolean } };
+    assert.equal(body.result.isError, true);
+
+    const event = handler
+      .telemetrySnapshot()
+      .find(
+        (envelope) => envelope.configId === configId && envelope.event.event === "tool_call",
+      )?.event;
+    assert.ok(event?.event === "tool_call");
+    assert.equal(event.errorReason, "type_mismatch");
+    assert.equal(event.argumentName, "path");
+    assert.equal(event.receivedType, "object");
+    assert.doesNotMatch(JSON.stringify(event), /do-not-record/);
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("modern MCP discovery is stateless and advertises skills", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {
