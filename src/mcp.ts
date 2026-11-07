@@ -82,7 +82,7 @@ const stringSchema = { type: "string" };
 const stringArrayOrSingle = (maxItems: number) => ({
   anyOf: [{ type: "array", items: stringSchema, maxItems }, stringSchema],
 });
-const pathSchema = { type: "string", description: "Path relative to the exposed project root." };
+const pathSchema = { type: "string", description: "Project-relative path." };
 const objectOutput = (
   properties: Record<string, unknown>,
   required: string[] = [],
@@ -96,7 +96,7 @@ const timeoutMsSchema = {
   minimum: 1000,
   maximum: 600000,
   default: 120000,
-  description: "Timeout per item in milliseconds. A timed-out item fails with its partial output.",
+  description: "Per-item timeout.",
 };
 const okExitCodesSchema = {
   type: "array",
@@ -107,13 +107,12 @@ const okExitCodesSchema = {
 const onErrorSchema = {
   type: "string",
   enum: ["continue", "stop"],
-  description:
-    "What to do after an item fails. Every item always reports status success, failure or skipped (with a reason), so you never have to guess whether it ran.",
+  description: "Stop or continue after failure.",
 };
 
 const codeGraphTool: ToolDefinition = tool(
   "codegraph_explore",
-  "Use first for most non-trivial code-understanding tasks: explain behavior, trace call/data flow, map symbol relationships, or assess change impact. Prefer this over repeated grep/read loops for structural questions. Use search_code/find_symbol/read_range for exact-text lookup and targeted follow-up. Treat returned source as read; avoid re-verifying without a concrete gap. Output is capped; large responses return a preview.",
+  "Use first for structure: explain behavior, trace call flow, map symbols or assess impact. Prefer over repeated grep/read loops. Use search_code/find_symbol/read_range for exact-text follow-up; treat returned source as read.",
   {
     query: { type: "string", minLength: 1 },
     maxFiles: { type: "integer", minimum: 1, maximum: 100, default: 10 },
@@ -125,7 +124,7 @@ const codeGraphTool: ToolDefinition = tool(
 const baseTools: ToolDefinition[] = [
   tool(
     "read_range",
-    "Read a line range from one UTF-8 project file. Returns the text with a header, plus {path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine}. When truncated or not at the end, continue with nextStartLine. Pass ranges to read several ranges of the same file in one call. Overlapping reads add a note; opt in with skipIfUnchanged=true to omit unchanged exact repeats. Prefer search_code with context when you only need lines around a match.",
+    "Read UTF-8 ranges in a project file; pass up to 10. Continue with nextStartLine; use search_code context for nearby matches or skipIfUnchanged=true to omit unchanged repeats.",
     {
       path: pathSchema,
       startLine: { type: "integer", minimum: 1 },
@@ -137,13 +136,12 @@ const baseTools: ToolDefinition[] = [
           { startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } },
           ["startLine", "endLine"],
         ),
-        description: "Several ranges of the same file; replaces startLine/endLine.",
+        description: "Same-file ranges; replaces startLine/endLine.",
       },
       skipIfUnchanged: {
         type: "boolean",
         default: false,
-        description:
-          "Opt in to omitting content for an unchanged range already read in this MCP session.",
+        description: "Omit unchanged repeats in this session.",
       },
       maxBytes: {
         type: "integer",
@@ -190,7 +188,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_files",
-    "Find project paths by a glob pattern (`*`, `**`, `?`). A pattern without `/` matches file names at any depth (`mcp.ts` finds `src/mcp.ts`). Honors .gitignore inside git repositories. Returns {items, truncated}.",
+    "Find project paths by glob (`*`, `**`, `?`); bare names match any depth. Honors .gitignore. Empty results may suggest a nearby path.",
     {
       pattern: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -200,39 +198,35 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search project text files (source, docs and configuration) by literal text or regex. Results are grep-style lines `path:line:col text` after a one-line summary; pass format='json' for the object envelope. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. An empty result explains what was searched and what to try next; maxBytes truncation adds remaining match counts by file. Uses ripgrep when installed.",
+    "Search project text by literal or regex. Scope with paths/globs and use context to avoid follow-up reads. Honors .gitignore; skips binaries and files over 1 MB. Lockfiles and minified files require includeGenerated. Truncation includes per-file counts.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
       caseSensitive: { type: "boolean", default: false },
       paths: {
         ...stringArrayOrSingle(20),
-        description: "A project-relative file or directory, or an array of paths to search.",
+        description: "Project-relative path(s) to search.",
       },
       globs: {
         ...stringArrayOrSingle(20),
-        description:
-          "An include or exclude glob, or an array. Prefix exclude globs with !, such as !**/*.test.ts.",
+        description: "Include or exclude glob; prefix exclusions with !.",
       },
       context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
       multiline: {
         type: "boolean",
         default: false,
-        description:
-          "Let the pattern span lines; with regex, '.' then also matches newlines. Works with both backends.",
+        description: "Allow multiline matches in either backend.",
       },
       includeGenerated: { type: "boolean", default: false },
       format: {
         type: "string",
         enum: ["text", "json"],
         default: "text",
-        description:
-          "text: grep-style lines. json: {items, returned, truncated, truncationReason}.",
+        description: "Text or JSON output.",
       },
       queries: {
         ...stringArrayOrSingle(5),
-        description:
-          "A pattern or array of patterns; each result group is labelled. Divides maxBytes between groups.",
+        description: "Patterns share maxBytes across result groups.",
       },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
@@ -250,7 +244,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_symbol",
-    "Find likely definitions of a symbol by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Heuristic and case-sensitive. Returns {items, returned, truncated, backend}. Use read_range for context and find_references to trace usage.",
+    "Find likely case-sensitive definitions by pattern (JS/TS, Python, Rust, Go, Java, C#, Kotlin, Swift, Ruby, PHP). Use read_range for context.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 500, default: 100 },
@@ -260,7 +254,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "find_references",
-    "Find whole-identifier occurrences of a symbol (case-sensitive text matching). This is lexical: it includes comments, strings and unrelated same-named identifiers. Returns {items, returned, truncated, backend}.",
+    "Find case-sensitive whole-identifier matches, including comments, strings and unrelated same-named identifiers. Use find_symbol for likely definitions.",
     {
       symbol: stringSchema,
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
@@ -280,7 +274,7 @@ const baseTools: ToolDefinition[] = [
   ]),
   tool(
     "run_package_scripts_batch",
-    "Run one or more explicitly allowed package scripts sequentially. Successful output defaults to the last 20 lines; provide maxBytes to return full output up to that cap. Prefer the narrowest relevant script and avoid running full check/test when a targeted check answers the question. Default onError is stop: later scripts are reported as skipped after a failure. The whole batch is validated before anything runs.",
+    "Run allowed package scripts sequentially without a shell. Success output defaults to the last 20 lines; maxBytes can return more. Prefer targeted scripts. Default onError=stop; validate the full batch first.",
     {
       scripts: {
         type: "array",
@@ -295,8 +289,7 @@ const baseTools: ToolDefinition[] = [
             ),
           ],
         },
-        description:
-          "Script names, or { script, args } to pass extra arguments (for example a test path). Arguments are only accepted for scripts listed in the profile as argumentScripts.",
+        description: "Names or {script,args}; extra arguments require argumentScripts.",
       },
       onError: onErrorSchema,
       timeoutMs: timeoutMsSchema,
@@ -306,7 +299,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "run_command_batch",
-    "Run one or more explicitly allowed commands sequentially without a shell. Prefer dedicated Agent Dir tools over generic commands because they return structured, bounded results with less token overhead. Default onError is continue, so independent inspection commands still run after one fails. Use okExitCodes (for example [0, 1] for rg or grep) when a non-zero exit is a normal outcome.",
+    "Run up to 10 allowlisted commands sequentially without a shell. Prefer dedicated tools; default onError=continue. Set okExitCodes for expected non-zero results; item values override the batch default.",
     {
       commands: {
         type: "array",
@@ -316,8 +309,7 @@ const baseTools: ToolDefinition[] = [
             args: { type: "array", items: stringSchema },
             okExitCodes: {
               ...okExitCodesSchema,
-              description:
-                "Exit codes that count as success for this item, overriding the batch default.",
+              description: "Overrides the batch default.",
             },
           },
           ["command"],
@@ -327,8 +319,7 @@ const baseTools: ToolDefinition[] = [
       },
       okExitCodes: {
         ...okExitCodesSchema,
-        description:
-          "Default exit codes that count as success for every command. An item-level value overrides this; default [0].",
+        description: "Success codes (default [0]); item values override.",
       },
       onError: onErrorSchema,
       timeoutMs: timeoutMsSchema,

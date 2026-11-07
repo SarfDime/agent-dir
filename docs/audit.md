@@ -203,11 +203,11 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | **Done** | Summary defaults to compact rates, top issues and a bounded per-client split; `view=full`, failure grouping and `excludeClients` are covered by tests. |
 | P-09 | **Done** | Bounded per-session read history uses hashed path keys in memory, notes overlaps, supports opt-in unchanged-repeat stubs, and invalidates after `apply_changes`. |
-| P-10 | **Partial** | `validation.ts`, `classify-errors.ts`, `analytics-format.ts` and the per-tool handler table are extracted. `src/mcp.ts` is 2,144 lines (was 3,153), still above the target of under ~1,200. |
+| P-10 | **Partial** | `validation.ts`, `classify-errors.ts`, `analytics-format.ts` and the per-tool handler table are extracted. `src/mcp.ts` is 2,135 lines (was 3,153), still above the target of under ~1,200. |
 | P-11 | **Done** | Added the opt-in `search-footer` guidance variant; telemetry can compare it against the existing table variant using read-span and search-to-read metrics. |
 | P-12 | Open | |
 | P-13 | **Decided** | Decisions in section 5; docs pending. |
-| P-14 | Open | Gated on P-05 and P-06, which change schema text. |
+| P-14 | **Done** | With 11 tools (analytics disabled), `tools/list` fell from 11,427 to 8,982 bytes; description text fell from 3,364 to 1,855 bytes. The stable-key `toolSetHash` is unchanged and schema parameters were preserved. |
 | P-15 | **Done** | See below. |
 
 ### P-01, as shipped
@@ -330,7 +330,7 @@ release. `feat(tools):` (minor). Ships after P-05, P-06 and P-15.
 | `run_command_batch` `unknown_argument` (ClaudeAI) | 2 | 0 |
 | `httpErrors` from `GET /mcp` 405 | most of 107 | 0 |
 | Default analytics summary | ~9k tokens | ~2k tokens |
-| `mcp.ts` lines | 3,153 (now 2,144) | under ~1,200 |
+| `mcp.ts` lines | 3,153 (now 2,135) | under ~1,200 |
 | `tools/list` size | 11.7 KB (~2.9k tokens) | ~8.5 to 9 KB after P-14 and P-15 |
 | `validate` share of calls | 0.8% | 0 (code done) |
 
