@@ -36,7 +36,7 @@ agent-dir config add my-project \
   --tunnel wormhole \
   --subdomain my-project-x7k4m2 \
   --scripts typecheck,lint,format,test,build \
-  --command grep,find,rg,git \
+  --command git \
   --blacklist "git commit,git push --force"
 ```
 
@@ -172,10 +172,12 @@ Allow package scripts:
 Allow executables:
 
 ```text
---command grep,find,rg,git
+--command git
 ```
 
-Commands are launched with `shell: false`; executable and arguments are passed separately. Git uses the same allowlisted command interface as other executables; there are no dedicated Git MCP tools.
+Commands are launched with `shell: false`; executable and arguments are passed separately. `search_code`, `find_files` and `read_range` cover project search and reads without allowing general-purpose `grep`, `find` or `rg`. Search and discovery honor `.gitignore`; there is no `includeIgnored` option. Use `read_range` for a known ignored path, or explicitly allow `rg` before using `rg --no-ignore`. General executables are not a filesystem sandbox; keep their arguments scoped to the project.
+
+Git is optional and uses the same allowlisted command interface; there are no dedicated Git MCP tools. To block shell-based Git search while retaining other Git commands, add an optional profile rule:
 
 A configured `blacklistedCommands` entry overrides the allowlist and blocks matching command/argument prefixes. For example, allowing `git` while blacklisting `git commit` and `git push --force` still permits `git status`. Prefix entries are separated by commas.
 
@@ -189,6 +191,7 @@ Built-in argument-aware guardrails are on by default; see `docs/SECURITY.md` for
   "rules": {
     "git": {
       "allowSubcommands": ["status", "diff", "log", "show"],
+      "denySubcommands": ["grep", "log -S"],
       "denyOptions": ["--force"]
     },
     "npm": { "denySubcommands": ["install"] }
