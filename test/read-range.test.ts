@@ -132,6 +132,127 @@ test("read_range returns plain text, structured data and supports several ranges
   });
 });
 
+test("read_range notes overlaps, skips opted-in repeats per session, and invalidates after edits", async () => {
+  await withFile("line 1\nline 2\nline 3", async (root) => {
+    const handler = createMcpHandler(root, {}, { level: "anonymous" });
+    let id = 0;
+    const call = async (
+      name: string,
+      args: Record<string, unknown>,
+      session = "session-a",
+    ): Promise<string> => {
+      const response = await handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "mcp-session-id": session,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: ++id,
+            method: "tools/call",
+            params: { name, arguments: args, _meta: META },
+          }),
+        }),
+      );
+      const body = (await response.json()) as {
+        result?: { content?: Array<{ text: string }> };
+      };
+      return body.result?.content?.[0]?.text ?? "";
+    };
+
+    try {
+      const first = await call("read_range", { path: "f.txt", startLine: 1, endLine: 2 });
+      assert.match(first, /line 1\nline 2/);
+
+      const multiRange = {
+        path: "f.txt",
+        ranges: [
+          { startLine: 1, endLine: 1 },
+          { startLine: 3, endLine: 3 },
+        ],
+      };
+      const multi = await call("read_range", multiRange);
+      assert.match(multi, /line 1/);
+      assert.match(multi, /line 3/);
+      assert.equal((multi.match(/\[note:/g) ?? []).length, 1);
+      const repeatedMulti = await call("read_range", {
+        ...multiRange,
+        skipIfUnchanged: true,
+      });
+      assert.equal((repeatedMulti.match(/unchanged range skipped/g) ?? []).length, 2);
+
+      const otherSession = await call(
+        "read_range",
+        { path: "f.txt", startLine: 1, endLine: 2, skipIfUnchanged: true },
+        "session-b",
+      );
+      assert.match(otherSession, /line 1\nline 2/);
+      assert.doesNotMatch(otherSession, /unchanged range skipped/);
+
+      const overlap = await call("read_range", { path: "f.txt", startLine: 2, endLine: 3 });
+      assert.match(overlap, /line 2\nline 3/);
+      assert.match(overlap, /overlaps lines already read/);
+
+      const repeated = await call("read_range", {
+        path: "f.txt",
+        startLine: 2,
+        endLine: 3,
+        skipIfUnchanged: true,
+      });
+      assert.match(repeated, /unchanged range skipped/);
+      assert.doesNotMatch(repeated, /line 2\nline 3/);
+
+      await call("apply_changes", {
+        changes: [{ kind: "write", path: "f.txt", content: "line 1\nupdated 2\nupdated 3" }],
+      });
+      const afterEdit = await call("read_range", {
+        path: "f.txt",
+        startLine: 2,
+        endLine: 3,
+        skipIfUnchanged: true,
+      });
+      assert.match(afterEdit, /updated 2\nupdated 3/);
+      assert.doesNotMatch(afterEdit, /unchanged range skipped/);
+
+      await writeFile(
+        path.join(root, "f.txt"),
+        "line 1\nexternal change line 2\nexternal change line 3",
+      );
+      const afterExternalEdit = await call("read_range", {
+        path: "f.txt",
+        startLine: 2,
+        endLine: 3,
+        skipIfUnchanged: true,
+      });
+      assert.match(afterExternalEdit, /external change line 2\nexternal change line 3/);
+      assert.doesNotMatch(afterExternalEdit, /unchanged range skipped/);
+
+      await writeFile(path.join(root, "large.txt"), "x".repeat(2000));
+      const truncated = await call("read_range", {
+        path: "large.txt",
+        startLine: 1,
+        endLine: 1,
+        maxBytes: 1024,
+      });
+      assert.match(truncated, /cut by byte budget/);
+      const truncatedRepeat = await call("read_range", {
+        path: "large.txt",
+        startLine: 1,
+        endLine: 1,
+        maxBytes: 1024,
+        skipIfUnchanged: true,
+      });
+      assert.match(truncatedRepeat, /cut by byte budget/);
+      assert.doesNotMatch(truncatedRepeat, /unchanged range skipped/);
+      assert.doesNotMatch(JSON.stringify(handler.telemetrySnapshot()), /f\.txt/);
+    } finally {
+      handler.closeSubscriptions();
+    }
+  });
+});
+
 test("read_range failures record a typed reason and invalid-input category", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-read-errors-"));
   const configId = `test-read-errors-${process.pid}-${Date.now()}`;

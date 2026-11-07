@@ -44,7 +44,7 @@ Three further fields describe *how* a tool was called, never what was passed:
 | --- | --- |
 | `skippedCount` | Batch tools only: items reported as `skipped`, i.e. never started because an earlier item failed or was rejected. |
 | `integration` / `integrationStatus` | Set for integration-backed tools (`codegraph_explore`), with the integration status at call time. |
-| `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `okExitCodes`, `limit`). Values are never recorded. |
+| `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `skipIfUnchanged`, `okExitCodes`, `limit`). Values are never recorded. |
 | `readLines` | `read_range` only: total lines requested, summed over `ranges`. A count, never content. `mode=summary` buckets it under `efficiency.readSpans`, which is how a large-byte read total is attributed to big reads or to many small ones. |
 | `errorReason` | Why a call failed, from a closed list: `unknown_argument`, `type_mismatch`, `missing_required`, `enum_mismatch`, `length_or_range`, `patch_text_not_found`, `patch_ambiguous`, `path_not_found`, `range_too_large`, `not_a_file`, `binary_file`, `file_too_large`, `other`. It refines `errorCategory` (which stays the coarse bucket) without ever carrying a message, an argument value, a path or patch text. A value that is not on the list is dropped rather than coerced. |
 | `argumentName` | For `type_mismatch` only: the schema argument path (for example `commands[0].args`). It is validated against a conservative identifier/path allowlist. |

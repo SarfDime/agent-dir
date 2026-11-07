@@ -136,7 +136,7 @@ table above is built from those categories.
 | R-E01 | Explain empty and truncated results: files scanned, match mode, ignore rules, one next step. | F-04 | removes a class of wasted retries; 63 empty searches alone | S | **Done** |
 | R-E02 | Render `search_code` results as `path:line:col text` by default, JSON on request. | F-03 | −43% of search bytes; measured 2,028→964 B and 8,643→3,962 B (−52%, −54%) | S | **Done** |
 | R-E03 | Record the read span as a bucketed telemetry field. | F-02 | turns the largest cost into a measured question | S | **Done**: `readLines` per call, `efficiency.readSpans` buckets (1-40, 41-200, 201-800, 801+) |
-| R-E04 | Note repeated identical calls in the result so the client can skip re-reading. | F-07 | low risk, targets 4% of calls | M | **Open** (P-09) |
+| R-E04 | Note repeated identical calls in the result so the client can skip re-reading. | F-07 | low risk, targets 4% of calls | M | **Done**: overlapping reads add one note; unchanged exact repeats can be omitted with `skipIfUnchanged: true` |
 | R-E05 | Suggest the closest existing path on `apply_changes` `not_found`. | F-05 | recovers 39 failures in one turn instead of two | S | **Done** |
 | R-E06 | `validate` default: severity and per-file summary plus the first errors per file. | F-06 | removed the 47% truncated case | M | **Done**, then the tool itself was removed |
 | R-E07 | `search_code` accepts `queries: string[]` with labelled groups. | O-4c-3 | fewer round trips for multi-pattern work | S | **Done**: two patterns in one call, 1,024 B vs 1,157 B plus a round trip |
@@ -202,7 +202,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | **Done** | Summary defaults to compact rates, top issues and a bounded per-client split; `view=full`, failure grouping and `excludeClients` are covered by tests. |
-| P-09 | Open | Unblocked: validation extraction landed. |
+| P-09 | **Done** | Bounded per-session read history uses hashed path keys in memory, notes overlaps, supports opt-in unchanged-repeat stubs, and invalidates after `apply_changes`. |
 | P-10 | **Partial** | `validation.ts` extracted. Remaining: `classify-errors.ts`, `analytics-format.ts`, one handler module per tool. `src/mcp.ts` is 2,871 lines (was 3,153); target under ~1,200. |
 | P-11 | Open | Unblocked: validation extraction landed. |
 | P-12 | Open | |

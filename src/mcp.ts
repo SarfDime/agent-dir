@@ -39,7 +39,13 @@ import {
 } from "./tools/package-scripts.js";
 import type { CommandPolicyConfig } from "./tools/policy.js";
 import type { PathProtectionConfig } from "./tools/protected-paths.js";
-import { formatRangeText, type ReadRangeResult, readRange } from "./tools/read.js";
+import {
+  formatRangeText,
+  ReadRangeHistory,
+  type ReadRangeResult,
+  type ReadRangeSelection,
+  readRange,
+} from "./tools/read.js";
 import { detectSearchBackend } from "./tools/search.js";
 import {
   getSkill,
@@ -146,7 +152,7 @@ const codeGraphTool: ToolDefinition = tool(
 const baseTools: ToolDefinition[] = [
   tool(
     "read_range",
-    "Read a line range from one UTF-8 project file. Returns the text with a header, plus {path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine}. When truncated or not at the end, continue with nextStartLine. Pass ranges to read several ranges of the same file in one call. Prefer search_code with context when you only need lines around a match.",
+    "Read a line range from one UTF-8 project file. Returns the text with a header, plus {path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine}. When truncated or not at the end, continue with nextStartLine. Pass ranges to read several ranges of the same file in one call. Overlapping reads add a note; opt in with skipIfUnchanged=true to omit unchanged exact repeats. Prefer search_code with context when you only need lines around a match.",
     {
       path: pathSchema,
       startLine: { type: "integer", minimum: 1 },
@@ -159,6 +165,12 @@ const baseTools: ToolDefinition[] = [
           ["startLine", "endLine"],
         ),
         description: "Several ranges of the same file; replaces startLine/endLine.",
+      },
+      skipIfUnchanged: {
+        type: "boolean",
+        default: false,
+        description:
+          "Opt in to omitting content for an unchanged range already read in this MCP session.",
       },
       maxBytes: {
         type: "integer",
@@ -404,6 +416,22 @@ export function createMcpHandler(
   let sessionOutputBytes = 0;
   let sessionEstimatedOutputTokens = 0;
   const seenOutputFingerprints = new Set<string>();
+  const readHistories = new Map<string, ReadRangeHistory>();
+  const readHistoryForSession = (sessionKey: string): ReadRangeHistory => {
+    let history = readHistories.get(sessionKey);
+    if (!history) history = new ReadRangeHistory(telemetryHash);
+    readHistories.delete(sessionKey);
+    readHistories.set(sessionKey, history);
+    while (readHistories.size > MAX_TRACKED_READ_SESSIONS) {
+      const oldest = readHistories.keys().next().value;
+      if (oldest === undefined) break;
+      readHistories.delete(oldest);
+    }
+    return history;
+  };
+  const invalidateReadHistory = async (relativePath: string): Promise<void> => {
+    for (const history of readHistories.values()) await history.invalidate(root, relativePath);
+  };
   // Session summaries are snapshotted periodically (last one wins in aggregation) so a killed
   // process still leaves a summary behind, and written again on graceful close.
   const sessionSnapshotMs = telemetry.sessionSnapshotMs ?? 60_000;
@@ -842,6 +870,8 @@ export function createMcpHandler(
               pathProtection,
               argumentScripts,
               notify,
+              readHistoryForSession(clientContext.sessionKey),
+              invalidateReadHistory,
               request.signal,
               codeGraph,
               analyticsEnabled,
@@ -1674,6 +1704,8 @@ async function callTool(
   pathProtection: PathProtectionConfig | undefined,
   argumentScripts: string[],
   notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
+  readHistory: ReadRangeHistory,
+  invalidateReadHistory: (relativePath: string) => Promise<void>,
   signal?: AbortSignal,
   codeGraph?: CodeGraphIntegration,
   analyticsEnabled = false,
@@ -1853,6 +1885,22 @@ async function callTool(
     case "read_range": {
       const maxBytes = outputBytesArg(args.maxBytes, READ_RANGE_DEFAULT_BYTES);
       const filePath = String(args.path);
+      const requestedRanges: ReadRangeSelection[] =
+        args.ranges === undefined
+          ? [{ startLine: Number(args.startLine), endLine: Number(args.endLine) }]
+          : objectArray(args.ranges, "ranges").map((range) => ({
+              startLine: Number(range.startLine),
+              endLine: Number(range.endLine),
+            }));
+      const observation = await readHistory.inspect(root, filePath, requestedRanges);
+      const skipRepeated = args.skipIfUnchanged === true && observation?.repeatedUnchanged === true;
+      const note = skipRepeated
+        ? "Unchanged range content omitted because skipIfUnchanged is true."
+        : observation?.overlapsPrevious
+          ? "This read overlaps lines already read in this session."
+          : undefined;
+      let completedRanges: ReadRangeSelection[] = [];
+      let readCompleted = false;
       if (args.ranges !== undefined) {
         const ranges = objectArray(args.ranges, "ranges");
         if (ranges.length === 0 || ranges.length > 10)
@@ -1871,21 +1919,49 @@ async function callTool(
           results.push(result);
           remaining -= Buffer.byteLength(result.content, "utf8") + 200;
         }
-        payload = { items: results, truncated: results.some((item) => item.truncated) };
-        contentText = results.map(formatRangeText).join("\n\n");
+        completedRanges = results
+          .filter((result) => result.endLine >= result.startLine)
+          .map(({ startLine, endLine }) => ({ startLine, endLine }));
+        readCompleted = results.every((result) => !result.truncated);
+        const outputResults = skipRepeated
+          ? results.map((result) => ({ ...result, content: "", skipped: true as const }))
+          : results;
+        payload = {
+          items: outputResults,
+          truncated: results.some((item) => item.truncated),
+          ...(skipRepeated ? { skipped: true } : {}),
+          ...(note ? { note } : {}),
+        };
+        contentText = [
+          outputResults.map(formatRangeText).join("\n\n"),
+          ...(note ? [`[note: ${note}]`] : []),
+        ]
+          .filter(Boolean)
+          .join("\n\n");
       } else {
         if (args.startLine === undefined || args.endLine === undefined)
           throw new Error("startLine and endLine are required unless ranges is provided.");
-        const result = await readRange(
+        const readResult = await readRange(
           root,
           filePath,
           Number(args.startLine),
           Number(args.endLine),
           Math.max(1, maxBytes - 256),
         );
-        payload = { ...result };
-        contentText = formatRangeText(result);
+        if (readResult.endLine >= readResult.startLine)
+          completedRanges = [{ startLine: readResult.startLine, endLine: readResult.endLine }];
+        readCompleted = !readResult.truncated;
+        const result = skipRepeated
+          ? { ...readResult, content: "", skipped: true as const }
+          : readResult;
+        payload = {
+          ...result,
+          ...(skipRepeated ? { skipped: true } : {}),
+          ...(note ? { note } : {}),
+        };
+        contentText = [formatRangeText(result), ...(note ? [`[note: ${note}]`] : [])].join("\n");
       }
+      readHistory.record(observation, completedRanges, readCompleted);
       break;
     }
     case "apply_changes": {
@@ -1935,7 +2011,10 @@ async function callTool(
       if (!dryRun) {
         invalidateProjectFiles(root);
         invalidateSkillDiscoveryCache(root);
-        for (const p of affected) await notifyResourceChange(notify, root, p, before.get(p) ?? []);
+        for (const p of affected) {
+          await invalidateReadHistory(p);
+          await notifyResourceChange(notify, root, p, before.get(p) ?? []);
+        }
       }
       break;
     }
@@ -2363,6 +2442,7 @@ interface ClientRegistry {
 }
 
 const MAX_TRACKED_CLIENT_SESSIONS = 32;
+const MAX_TRACKED_READ_SESSIONS = 32;
 
 function createClientRegistry(): ClientRegistry {
   return { bySession: new Map() };
@@ -2566,6 +2646,7 @@ function argumentShape(argumentsValue: unknown): {
     ...(nonEmpty("ranges") ? { ranges: true } : {}),
     ...(nonEmpty("queries") ? { queries: true } : {}),
     ...(argumentsValue.dryRun === true ? { dryRun: true } : {}),
+    ...(argumentsValue.skipIfUnchanged === true ? { skipIfUnchanged: true } : {}),
     ...(present("okExitCodes") ? { okExitCodes: true } : {}),
     ...(present("maxResults") || present("limit") ? { limit: true } : {}),
   };

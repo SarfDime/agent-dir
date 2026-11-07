@@ -73,6 +73,7 @@ export const ARG_SHAPE_KEYS = [
   "ranges",
   "queries",
   "dryRun",
+  "skipIfUnchanged",
   "okExitCodes",
   "limit",
 ] as const;

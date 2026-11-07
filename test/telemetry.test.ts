@@ -254,14 +254,14 @@ test("privacy sanitizer keeps every field declared on the event types", () => {
     skippedCount: 3,
     integration: "codegraph",
     integrationStatus: "indexed",
-    argShape: { regex: true, caseSensitive: false, paths: true },
+    argShape: { regex: true, caseSensitive: false, paths: true, skipIfUnchanged: true },
   });
   assert.equal(toolEvent.outcome, "truncated");
   assert.equal(toolEvent.skippedCount, 3);
   assert.equal(toolEvent.integration, "codegraph");
   assert.equal(toolEvent.integrationStatus, "indexed");
   // Only flags that were set are kept; unset flags are omitted to keep events small.
-  assert.deepEqual(toolEvent.argShape, { regex: true, paths: true });
+  assert.deepEqual(toolEvent.argShape, { regex: true, paths: true, skipIfUnchanged: true });
 
   const requestEvent = sanitizeAnonymousEvent({
     event: "mcp_request",

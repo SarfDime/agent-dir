@@ -79,7 +79,7 @@ The core public tool set is intentionally small:
 
 ### Reading, editing and validating
 
-- **`read_range`** returns the text with a header (`path lines a-b of N`) and a continuation hint, plus structured `{ path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine }`. When `truncated` is true or `nextStartLine` is present, continue from `nextStartLine`. `ranges: [{ startLine, endLine }]` reads several ranges of one file in one call. The default budget is 16 KB; binary files are rejected; files up to 20 MB can be read.
+- **`read_range`** returns the text with a header (`path lines a-b of N`) and a continuation hint, plus structured `{ path, startLine, endLine, content, truncated, eof, totalLines, nextStartLine }` (with `skipped`/`note` when applicable). When `truncated` is true or `nextStartLine` is present, continue from `nextStartLine`. `ranges: [{ startLine, endLine }]` reads several ranges of one file in one call. Re-reads that overlap earlier reads in the same MCP session keep their content and add one note; opt in with `skipIfUnchanged: true` to omit content for an unchanged exact repeat. Edits through `apply_changes` invalidate the history. The default budget is 16 KB; binary files are rejected; files up to 20 MB can be read.
 - **`apply_changes`** is all-or-nothing: every change is validated first, files are written through a temporary file and renamed into place (keeping their mode), and a failure while applying restores earlier changes byte-for-byte, including binary files. A patch whose text occurs more than once is rejected with the line numbers unless `count` is set; a patch whose text is not found returns the closest matching lines. Missing files are reported as `'path' does not exist.`
 - **Script arguments:** `run_package_scripts_batch` accepts `{ script, args }` items. Arguments are appended after `--` and are only accepted for scripts listed in `scripts.argumentScripts` in the profile (for example `["test"]` to run one test file).
 
@@ -95,7 +95,7 @@ Agent Dir is not a security boundary against a hostile agent; see `docs/SECURITY
 
 ### Argument validation and errors
 
-Arguments are validated against the advertised `inputSchema` before the tool runs. An unknown argument is rejected with the valid names (`Unknown argument 'nope'. Valid arguments: path, startLine, endLine, ranges, maxBytes.`), and type, `enum`, `minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`, `required` and `anyOf` are enforced, so a mistake names the argument instead of surfacing as a coercion artefact inside the tool.
+Arguments are validated against the advertised `inputSchema` before the tool runs. An unknown argument is rejected with the valid names (`Unknown argument 'nope'. Valid arguments: path, startLine, endLine, ranges, skipIfUnchanged, maxBytes.`), and type, `enum`, `minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`, `required` and `anyOf` are enforced, so a mistake names the argument instead of surfacing as a coercion artefact inside the tool.
 
 Rejections return a normal tool result with `isError: true` and a single JSON text block (`{"error": "..."}`) rather than a protocol error, so the calling agent sees the message and can correct the call in the same turn. Calling an unknown tool returns `isError` too, with close matches when there are any (`Unknown tool: read_rang. Closest tools: read_range.`).
 

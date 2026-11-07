@@ -3,6 +3,144 @@ import { closestPathHint, safePath, ToolFailure } from "./files.js";
 
 const MAX_READ_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_RANGE_LINES = 2000;
+const MAX_TRACKED_READS = 200;
+const MAX_TRACKED_RANGES_PER_FILE = 50;
+const MAX_TRACKED_READ_SIGNATURES_PER_FILE = 50;
+
+export interface ReadRangeSelection {
+  startLine: number;
+  endLine: number;
+}
+
+interface ReadHistoryEntry {
+  mtimeMs: number;
+  size: number;
+  ranges: ReadRangeSelection[];
+  signatures: Map<string, number>;
+}
+
+export interface ReadRangeObservation {
+  key: string;
+  mtimeMs: number;
+  size: number;
+  generation: number;
+  signature: string;
+  ranges: ReadRangeSelection[];
+  overlapsPrevious: boolean;
+  repeatedUnchanged: boolean;
+}
+
+/** Bounded, memory-only history for reads in one MCP session. */
+export class ReadRangeHistory {
+  private readonly entries = new Map<string, ReadHistoryEntry>();
+  private callIndex = 0;
+  private generation = 0;
+
+  constructor(private readonly pathKey: (resolvedPath: string) => string) {}
+
+  async inspect(
+    root: string,
+    relativePath: string,
+    ranges: ReadRangeSelection[],
+  ): Promise<ReadRangeObservation | undefined> {
+    let target: string;
+    try {
+      target = await safePath(root, relativePath);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      throw error;
+    }
+
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stat = await fs.stat(target);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+      throw error;
+    }
+    if (!stat.isFile()) return undefined;
+
+    const key = this.pathKey(target);
+    const previous = this.entries.get(key);
+    if (previous && (previous.mtimeMs !== stat.mtimeMs || previous.size !== stat.size))
+      this.entries.delete(key);
+    const current = this.entries.get(key);
+    const signature = JSON.stringify(ranges);
+    const overlapsPrevious =
+      current?.ranges.some((prior) =>
+        ranges.some(
+          (range) => range.startLine <= prior.endLine && range.endLine >= prior.startLine,
+        ),
+      ) ?? false;
+    const repeatedUnchanged = current?.signatures.has(signature) ?? false;
+
+    if (current) {
+      this.entries.delete(key);
+      this.entries.set(key, current);
+    }
+    return {
+      key,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      generation: this.generation,
+      signature,
+      ranges,
+      overlapsPrevious,
+      repeatedUnchanged,
+    };
+  }
+
+  record(
+    observation: ReadRangeObservation | undefined,
+    returnedRanges: ReadRangeSelection[],
+    complete: boolean,
+  ): void {
+    if (!observation || observation.generation !== this.generation) return;
+    const existing = this.entries.get(observation.key);
+    const entry =
+      existing && existing.mtimeMs === observation.mtimeMs && existing.size === observation.size
+        ? existing
+        : {
+            mtimeMs: observation.mtimeMs,
+            size: observation.size,
+            ranges: [],
+            signatures: new Map(),
+          };
+    const sorted = [...entry.ranges, ...returnedRanges].sort(
+      (left, right) => left.startLine - right.startLine || left.endLine - right.endLine,
+    );
+    const merged: ReadRangeSelection[] = [];
+    for (const range of sorted) {
+      const last = merged.at(-1);
+      if (last && range.startLine <= last.endLine + 1)
+        last.endLine = Math.max(last.endLine, range.endLine);
+      else merged.push({ ...range });
+    }
+    entry.ranges = merged.slice(-MAX_TRACKED_RANGES_PER_FILE);
+    if (complete) {
+      entry.signatures.delete(observation.signature);
+      entry.signatures.set(observation.signature, ++this.callIndex);
+      while (entry.signatures.size > MAX_TRACKED_READ_SIGNATURES_PER_FILE) {
+        const oldest = entry.signatures.keys().next().value;
+        if (oldest === undefined) break;
+        entry.signatures.delete(oldest);
+      }
+    }
+    this.entries.delete(observation.key);
+    this.entries.set(observation.key, entry);
+    while (this.entries.size > MAX_TRACKED_READS) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+  }
+
+  async invalidate(root: string, relativePath: string): Promise<void> {
+    const target = await safePath(root, relativePath, true);
+    this.generation += 1;
+    this.entries.delete(this.pathKey(target));
+  }
+}
 
 export interface ReadRangeResult {
   path: string;
@@ -17,6 +155,8 @@ export interface ReadRangeResult {
   totalLines: number;
   /** Where to continue reading; absent at the end of the file. */
   nextStartLine?: number;
+  /** True when unchanged content was intentionally omitted by the caller's opt-in. */
+  skipped?: true;
 }
 
 function clipLine(line: string, maxBytes: number): string {
@@ -118,7 +258,8 @@ export function formatRangeText(result: ReadRangeResult): string {
   const header = `${result.path} lines ${result.startLine}-${result.endLine} of ${result.totalLines}${
     result.eof ? " (end of file)" : ""
   }${result.truncated ? " (cut by byte budget)" : ""}`;
+  const content = result.skipped ? "[unchanged range skipped]" : result.content;
   const footer =
     result.nextStartLine === undefined ? "" : `\n[continue with startLine=${result.nextStartLine}]`;
-  return `${header}\n${result.content}${footer}`;
+  return `${header}\n${content}${footer}`;
 }
