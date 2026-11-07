@@ -100,6 +100,9 @@ interface ToolDefinition {
 }
 
 const stringSchema = { type: "string" };
+const stringArrayOrSingle = (maxItems: number) => ({
+  anyOf: [{ type: "array", items: stringSchema, maxItems }, stringSchema],
+});
 const pathSchema = { type: "string", description: "Path relative to the exposed project root." };
 const objectOutput = (
   properties: Record<string, unknown>,
@@ -218,17 +221,13 @@ const baseTools: ToolDefinition[] = [
       regex: { type: "boolean", default: false },
       caseSensitive: { type: "boolean", default: false },
       paths: {
-        type: "array",
-        items: stringSchema,
-        maxItems: 20,
-        description: "Project-relative files or directories to search.",
+        ...stringArrayOrSingle(20),
+        description: "A project-relative file or directory, or an array of paths to search.",
       },
       globs: {
-        type: "array",
-        items: stringSchema,
-        maxItems: 20,
+        ...stringArrayOrSingle(20),
         description:
-          "Include globs such as *.ts, or exclude globs prefixed with ! such as !**/*.test.ts.",
+          "An include or exclude glob, or an array. Prefix exclude globs with !, such as !**/*.test.ts.",
       },
       context: { type: "integer", minimum: 0, maximum: 5, default: 0 },
       multiline: {
@@ -246,11 +245,9 @@ const baseTools: ToolDefinition[] = [
           "text: grep-style lines. json: {items, returned, truncated, truncationReason}.",
       },
       queries: {
-        type: "array",
-        items: stringSchema,
-        maxItems: 5,
+        ...stringArrayOrSingle(5),
         description:
-          "Several patterns in one call instead of a single query; each result group is labelled with its pattern. Divides maxBytes between the groups.",
+          "A pattern or array of patterns; each result group is labelled. Divides maxBytes between groups.",
       },
       maxResults: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       maxBytes: { type: "integer", minimum: 1024, maximum: 64000, default: DEFAULT_OUTPUT_BYTES },
@@ -261,7 +258,7 @@ const baseTools: ToolDefinition[] = [
         { required: ["query"], properties: { query: stringSchema } },
         {
           required: ["queries"],
-          properties: { queries: { type: "array", items: stringSchema, maxItems: 5 } },
+          properties: { queries: stringArrayOrSingle(5) },
         },
       ],
     },
@@ -1830,9 +1827,7 @@ async function callTool(
     case "search_code": {
       const paths = optionalStringArray(args.paths, "paths", 20);
       const globs = optionalStringArray(args.globs, "globs", 20);
-      const queries = Array.isArray(args.queries)
-        ? optionalStringArray(args.queries, "queries", 5)
-        : undefined;
+      const queries = optionalStringArray(args.queries, "queries", 5);
       const maxBytes = outputBytesArg(args.maxBytes);
       const options = {
         regex: args.regex === true,
@@ -2537,10 +2532,17 @@ async function buildTelemetryProjectContext(
 
 function optionalStringArray(value: unknown, name: string, max: number): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
-    throw new Error(`${name} must be an array of strings.`);
-  if (value.length > max) throw new Error(`${name} accepts at most ${max} items.`);
-  return value as string[];
+  const entries: unknown[] | undefined =
+    typeof value === "string" ? [value] : Array.isArray(value) ? value : undefined;
+  if (entries === undefined || entries.length > max)
+    throw new Error(`${name} must be a string or an array of at most ${max} strings.`);
+  const strings: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== "string")
+      throw new Error(`${name} must be a string or an array of at most ${max} strings.`);
+    strings.push(entry);
+  }
+  return strings;
 }
 
 function intArg(value: unknown, fallback: number, min: number, max: number, name: string): number {
