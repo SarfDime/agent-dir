@@ -203,7 +203,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | **Done** | Summary defaults to compact rates, top issues and a bounded per-client split; `view=full`, failure grouping and `excludeClients` are covered by tests. |
 | P-09 | **Done** | Bounded per-session read history uses hashed path keys in memory, notes overlaps, supports opt-in unchanged-repeat stubs, and invalidates after `apply_changes`. |
-| P-10 | **Partial** | `validation.ts` and `classify-errors.ts` extracted. Remaining: `analytics-format.ts` and one handler module per tool. `src/mcp.ts` is 3,057 lines (was 3,153); target under ~1,200. |
+| P-10 | **Partial** | `validation.ts`, `classify-errors.ts` and `analytics-format.ts` extracted. Remaining: one handler module per tool. `src/mcp.ts` is 2,904 lines (was 3,153); target under ~1,200. |
 | P-11 | Open | Unblocked: validation extraction landed. |
 | P-12 | Open | |
 | P-13 | **Decided** | Decisions in section 5; docs pending. |
@@ -330,7 +330,7 @@ release. `feat(tools):` (minor). Ships after P-05, P-06 and P-15.
 | `run_command_batch` `unknown_argument` (ClaudeAI) | 2 | 0 |
 | `httpErrors` from `GET /mcp` 405 | most of 107 | 0 |
 | Default analytics summary | ~9k tokens | ~2k tokens |
-| `mcp.ts` lines | 3,153 (now 3,057) | under ~1,200 |
+| `mcp.ts` lines | 3,153 (now 2,904) | under ~1,200 |
 | `tools/list` size | 11.7 KB (~2.9k tokens) | ~8.5 to 9 KB after P-14 and P-15 |
 | `validate` share of calls | 0.8% | 0 (code done) |
 
