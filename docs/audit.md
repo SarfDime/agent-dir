@@ -153,7 +153,7 @@ typed categories and safe reasons; message matching remains only as a compatibil
 | O-2.05 | P2 | M | Streaming analytics reader. Retention, filtering, side-effect-free reads and `prune` are in place; `telemetry_analytics` still loads filtered files into memory, bounded by the retention cap. | Measure analytics latency above ~1 s on a large store, then stream. Without that measurement it is speculative. |
 | O-2.11 | P3 | S | Asynchronous telemetry appends. Directory creation and chmod already happen once per file; appends are still synchronous. | A measured latency effect, or an explicit decision to trade durability for speed. |
 | O-4.11 | P3 | M | Watcher-based file index. The 2 s cached file list is in place. | A large-repository measurement that justifies the invalidation complexity; none exists. |
-| O-6.03 | P1 | S | Behavioural re-baseline. Structural metrics are done; the historical windows mix builds. Reports showing older versions are from older sessions; profiles use whichever build was opened, and the user reports always opening the latest build. | After this branch is released, aggregate a fresh window from the current build only, comparing `toolSetHash` first. No need to verify profile build selection for old sessions. |
+| O-6.03 | P1 | S | Behavioural re-baseline. Structural metrics are done; the historical windows mix builds. Profiles use whichever build was opened; reports showing older versions are from older sessions, not evidence that current profiles run an old build. | After this branch is released, aggregate a fresh window from the current build only, comparing `toolSetHash` first. No need to verify profile build selection for old sessions. |
 | O-4c-1 | P1 | M | Ignored trees are invisible to `search_code` and `find_files`. **Decided 2026-11-06:** no `includeIgnored`; `read_range` and `rg --no-ignore` stay the routes to a known ignored path. | **Closed:** both docs state the boundary, and a scoped empty `search_code` result names a Git-ignored path. |
 | O-4c-2 | P2 | S | `git grep` and `git log -S` bypass the removal of shell search commands while `git` stays allowed. **Decided 2026-11-06:** document only, no default rule. | **Closed:** documented the optional `denySubcommands` / `denyOptions` snippet and tested that it parses and denies `git grep`. |
 | O-4c-3 | P2 | S | Several unrelated patterns needed several round trips. | **Closed:** `queries: string[]` (up to 5), one labelled group each, `maxBytes` split between them. |
@@ -180,8 +180,8 @@ typed categories and safe reasons; message matching remains only as a compatibil
 
 ## 6. Refactor plan and progress
 
-Branch `feature/mcp-refactor`, branched from `main`. `npm run check` and `npm test` pass after each commit;
-the final pass count was not captured.
+Branch `feature/mcp-refactor`, branched from `main`. `npm run check`, `npm test` and
+`npm pack --dry-run` passed before each commit; the latest test run passed all 218 tests.
 
 | Commit | Subject | Item |
 | --- | --- | --- |
@@ -193,7 +193,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 
 | Item | Status | Notes |
 | --- | --- | --- |
-| P-00 | Open | Re-baseline only after this branch is released; three commits change `toolSetHash`. Same work as O-6.03. |
+| P-00 | Open | After this branch is released, aggregate a fresh window from the current build and compare `toolSetHash` first. Older-version telemetry describes old sessions; no per-profile version check is needed. |
 | P-01 | **Done** | See below. |
 | P-02 | **Done** | `read_range` failures use `ToolFailure` reasons and classify as `invalid_input`; regression coverage verifies all four reasons. |
 | P-03 | **Done** | Exported `closestPathHint` now suggests bounded project-relative paths in `read_range`, `file_info`, and empty `find_files` results; traversal paths receive no hint. |
@@ -203,7 +203,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | **Done** | Summary defaults to compact rates, top issues and a bounded per-client split; `view=full`, failure grouping and `excludeClients` are covered by tests. |
 | P-09 | **Done** | Bounded per-session read history uses hashed path keys in memory, notes overlaps, supports opt-in unchanged-repeat stubs, and invalidates after `apply_changes`. |
-| P-10 | **Partial** | `validation.ts`, `classify-errors.ts`, `analytics-format.ts` and the per-tool handler table are extracted. `src/mcp.ts` is 2,135 lines (was 3,153), still above the target of under ~1,200. |
+| P-10 | **Done** | Validation, error classification, analytics formatting, tool definitions/selection, capabilities, telemetry, protocol helpers and the per-tool handler table are extracted. `src/mcp.ts` is 976 lines (was 3,153) and now contains MCP routing and request/envelope wiring. |
 | P-11 | **Done** | Added the opt-in `search-footer` guidance variant; telemetry can compare it against the existing table variant using read-span and search-to-read metrics. |
 | P-12 | **Done** | Moved the package-script test to a temporary fixture, added `test:coverage` with Node 24, and wired the source-only report into CI. Current `dist/src` coverage: 86.75% lines, 81.08% branches; `classify-errors.ts` is 100% line-covered. |
 | P-13 | **Done** | Documented ignored-tree behavior and command boundaries; the optional Git policy example is parsed and tested to deny `git grep`. |
@@ -238,86 +238,17 @@ updated: `docs/MCP.md`, `docs/MIGRATION.md` (removed in 3.0), `skills/agent-dir-
 squash-merged, that message must be `feat!:` with a `BREAKING CHANGE:` footer, or the removal ships as a
 patch/minor. Merging with commits preserved avoids it. Never hand-bump the version or tag.
 
-### Remaining work packages
+### Remaining work
 
-**P-00. Single-build re-baseline (O-6.03, no code).** Confirm which build each profile runs now (scriptr
-reported `agentDirVersion` 2.1.0 on Nov 2-3 while `package.json` is 2.2.0), then re-run the aggregation on a
-window from the current build only, comparing `toolSetHash` first, and replace section 1.
+**P-00 / O-6.03.** After this branch is released, aggregate a fresh window from the current build only,
+compare `toolSetHash` first, and update section 1. Earlier versions in telemetry are from old sessions; the
+profile starts whichever build was opened, and the user reports opening the latest build. Do not spend time
+checking each profile or re-aggregating old sessions.
 
-**P-02. Typed errors for `read_range` (part of O-2.09, C-05).** `read.ts` throws plain `Error` for a range
-over 2,000 lines, "is not a file", binary file and over 20 MB, which classify as `execution/other`. Use
-`ToolFailure` with `range_too_large`, `not_a_file`, `binary_file`, `file_too_large`, added to
-`TELEMETRY_ERROR_REASONS` in `src/telemetry/types.ts` and to the privacy allowlist, mapped to `invalid_input`
-where the caller can correct the call. `fix(read):` (patch). Done when no `read_range` failure lands in
-`execution/other`, with a regression test per reason.
-
-**P-03. "Did you mean" outside `apply_changes`.** Export `closestPathHint` and use it in `read_range`,
-`file_info` and `find_files` empty results. Hints stay inside the project root and are bounded.
-`feat(files):` (minor). Test covers a path that would escape the root (no hint, no leak).
-
-**P-04. Successful batch output: keep the tail.** `applyOutputBudget` (`src/tools/batch.ts`) keeps the head
-of successful output; for lint, typecheck and test runs the useful line is at the end, so a clean run reports
-`truncated: true` and gets re-run. Return status plus the last ~20 lines by default, full output through
-`maxBytes`, and set `truncated` only when something that matters was cut. Add a `shortcut:` comment for the
-512 KB capture in `commands.ts`, or keep head and tail. `feat(batch):` (minor). Done when a passing
-`run_package_scripts_batch` is a few hundred bytes with `truncated: false`.
-
-**P-05. `search_code` leniency and truncation footer.** Accept a single string for `paths`, `globs`,
-`queries` and wrap it. When truncated at `maxBytes`, append per-file match counts for the remainder (path and
-count only) so the next call can target the right file. `feat(search):` ×2 (minor). Done when string inputs
-work and the truncated rate target is met.
-
-**P-06. `run_command_batch` top-level `okExitCodes`.** Accept it as the default for every item, an item's own
-value winning, and declare it in the schema. `feat(commands):` (minor).
-
-**P-07. Telemetry correctness.** Count `GET /mcp` 405 as expected rather than an error. On `type_mismatch`,
-record the argument name and the received JSON type (never the value) via the privacy allowlist in
-`src/telemetry/privacy.ts`. Add per-method request counts to the summary (1,742 MCP requests vs 514 tool
-calls on scriptr). Add the instrumentation gaps in section 8. `fix(telemetry):` plus `feat(telemetry):`;
-update `docs/telemetry.md`.
-
-**P-08. `telemetry_analytics` output size.** Compact default (rates, top issues, per-client split), a `view`
-or `sections` option for full tables, run-length encoding of repeated identical failures (`event`, `count`,
-`first`, `last`), and a client exclusion option. `feat(telemetry):` (minor). Done when the default summary for
-the Nov 6 window fits in ~2k tokens.
-
-**P-09. Repeated and overlapping reads (R-E04).** Bound the expectation: 14% of reads repeat a file, at most
-~7% of all output tokens if every one were skipped. Design: per-session map of
-`path key -> {mtime, size, ranges, call index}`, capped (for example 200 entries, LRU), memory only, no
-content stored. Default stays "content plus one note line"; the stub is only when the caller opts in (for
-example `skipIfUnchanged: true`), because most repeats are re-reads after context compaction. Invalidate on
-mtime or size change and after any `apply_changes` on that path. `feat(read):` (minor). Risks: bounded
-session growth; path keys must not be logged (use the existing fingerprint hashing).
-
-**P-10. Decompose `src/mcp.ts` (C-01).** Remaining extractions, one `refactor:` PR each, no behaviour change,
-tests green before and after: `classify-errors.ts` (with the P-02 reasons), `analytics-format.ts`, then one
-handler module per tool under `src/tools/` registered through a table instead of a growing `switch`. Branches
-`feature/mcp-extract-analytics`, `feature/mcp-tool-handlers`. Done when `mcp.ts` is routing and envelope code
-only.
-
-**P-11. Reduce read volume through guidance, measured.** 55 search-then-read transitions and 126 reads of 41
-to 200 lines suggest agents read around a hit instead of using `context`. Use the existing guidance-variant
-mechanism (`docs/telemetry.md`) to test a one-line hint in the `search_code` footer against the current text
-and compare read-span buckets. An experiment, no behaviour change. `feat(guidance):`.
-
-**P-12. Tests and coverage (C-02, C-03).** Move the working-tree-coupled test to a temporary fixture project
-with a stand-in script. Add a coverage script and report it in CI; confirm the Node 24 flag before wiring it,
-and target the error paths behind the failure classes above. Optional: quote the glob in the `test` script.
-`test:` and `chore(ci):`.
-
-**P-13. O-4c docs.** State the ignored-tree boundary in `docs/MCP.md` and `docs/CONFIGURATION.md`; replace the
-`--command grep,find,rg,git` example and document the optional `git` rule with a test that it parses and
-denies `git grep`. `docs:` and `test:`.
-
-**P-14. Trim tool descriptions and schema text.** Measure first with a small script that reports bytes per
-tool split into name, description, schema and parameters (descriptions are ~3.5 KB of the 11.7 KB list).
-Cut result-shape restatements and duplicated parameter notes; keep the sentences that steer behaviour. Start
-from these targets: `search_code` 690→270, `codegraph_explore` 470→220, `run_command_batch` 400→220,
-`read_range` 365→175, `run_package_scripts_batch` 545→200, `find_symbol`/`find_references` 265/235→150,
-`find_files` 230→150. ~1.4 KB, about 650 tokens once per session: cheap and low-risk, not the main lever.
-Descriptions steer behaviour, so compare read and search patterns before and after via `toolSetHash`. Dropping
-schema parameters is breaking (`additionalProperties: false`); check `argShape` and defer to a `feat!:`
-release. `feat(tools):` (minor). Ships after P-05, P-06 and P-15.
+**Measurement-gated, not currently scheduled:** O-2.05 (stream analytics only if large-store latency exceeds
+about one second), O-2.11 (async telemetry only with a measured latency effect or explicit durability
+trade-off), and O-4.11 (watcher-based indexing only if a large-repository measurement justifies invalidation
+complexity).
 
 ## 7. Targets
 
@@ -330,7 +261,7 @@ release. `feat(tools):` (minor). Ships after P-05, P-06 and P-15.
 | `run_command_batch` `unknown_argument` (ClaudeAI) | 2 | 0 |
 | `httpErrors` from `GET /mcp` 405 | most of 107 | 0 |
 | Default analytics summary | ~9k tokens | ~2k tokens |
-| `mcp.ts` lines | 3,153 (now 2,135) | under ~1,200 |
+| `mcp.ts` lines | 3,153 (now 976) | under ~1,200 (met) |
 | `tools/list` size | 11.7 KB (~2.9k tokens) | ~8.5 to 9 KB after P-14 and P-15 |
 | `validate` share of calls | 0.8% | 0 (code done) |
 
@@ -347,11 +278,10 @@ Percentage targets are judgment calls, not measured limits; revisit after P-00.
 
 ## 9. Sequencing
 
-1. P-00 after the refactor branch is released; in parallel P-02, P-06, P-07. (P-01 and P-15 are done.)
-2. P-03, P-04, P-05, P-08.
-3. P-09 and P-11 now that the validation extraction has landed; P-10 continues alongside.
-4. P-14 after P-05 and P-06; P-12 and P-13 any time; each PR carries its own regression test.
-5. After each release, re-aggregate on the new build only and update section 1.
+1. After this branch is released, perform P-00/O-6.03 using a fresh single-build telemetry window.
+2. Pursue O-2.05, O-2.11 or O-4.11 only if their measurement gates are met.
+3. Keep section 1 historical until that new-build window is available; do not infer current profile versions
+   from older sessions.
 
 ## 10. Checked and left alone
 

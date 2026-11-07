@@ -10,10 +10,25 @@ import {
   efficiencyModel,
   INSTRUCTIONS_URI,
 } from "./mcp-capabilities.js";
+import { validateMcpParamHeaders } from "./mcp-headers.js";
+import type { JsonRpcRequest, Subscription } from "./mcp-protocol.js";
+import {
+  isValidRequestId,
+  jsonRpcError,
+  paginate,
+  SERVER_INFO,
+  SERVER_INFO_META,
+  SUBSCRIPTION_ID_META,
+  subscriptionNotifications,
+  subscriptionResponse,
+  writeSse,
+} from "./mcp-protocol.js";
 import type { ToolDefinition } from "./mcp-tools.js";
 import { availableTools, isToolDisabled, nearestNames, REMOVED_TOOL_HINTS } from "./mcp-tools.js";
 import { fingerprintInput, usePersistentTelemetryKey } from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
+
+export { validateMcpParamHeaders } from "./mcp-headers.js";
 
 export { isToolDisabled, nearestNames, toolAnnotations } from "./mcp-tools.js";
 
@@ -52,35 +67,13 @@ import {
 } from "./tools/skills.js";
 import type { CommandConfig } from "./types.js";
 import { describeJsonType, isRecord, validateToolArguments } from "./validation.js";
-import { packageVersion } from "./version.js";
 
 const PROTOCOL_VERSION = "2026-07-28";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const SUPPORTED_PROTOCOL_VERSIONS = [PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION];
-const SERVER_INFO = { name: "agent-dir", version: packageVersion };
-const SERVER_INFO_META = { "io.modelcontextprotocol/serverInfo": SERVER_INFO };
 const PROTOCOL_META = "io.modelcontextprotocol/protocolVersion";
-const PAGE_SIZE = 50;
 const DISCOVERY_CACHE_TTL_MS = 300_000;
-const SUBSCRIPTION_ID_META = "io.modelcontextprotocol/subscriptionId";
 
-interface Subscription {
-  id: string | number | null | undefined;
-  controller: ReadableStreamDefaultController<Uint8Array>;
-  notifications: {
-    toolsListChanged: boolean;
-    promptsListChanged: boolean;
-    resourcesListChanged: boolean;
-    resourceSubscriptions: Set<string>;
-  };
-}
-
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id?: string | number | null;
-  method: string;
-  params?: Record<string, unknown>;
-}
 interface McpHandler {
   (request: Request): Promise<Response>;
   closeSubscriptions: () => void;
@@ -968,127 +961,6 @@ async function callTool(
   return handler(args, request);
 }
 
-const MCP_PARAM_PREFIX = "Mcp-Param-";
-const X_MCP_HEADER = "x-mcp-header";
-
-export function validateMcpParamHeaders(
-  inputSchema: Record<string, unknown>,
-  args: Record<string, unknown>,
-  headers: Headers,
-): string | undefined {
-  const annotations = collectMcpHeaderAnnotations(inputSchema);
-  for (const annotation of annotations) {
-    const value = valueAtPath(args, annotation.path);
-    const headerName = `${MCP_PARAM_PREFIX}${annotation.headerName}`;
-    const headerValue = headers.get(headerName);
-
-    if (value === undefined || value === null) {
-      if (headerValue !== null)
-        return `${headerName} must be absent when the annotated argument is absent.`;
-      continue;
-    }
-
-    const rendered = renderMcpHeaderValue(value);
-    if (rendered === undefined)
-      return `${headerName} can only mirror string, integer, or boolean arguments.`;
-    if (headerValue === null) return `${headerName} is required for the annotated argument.`;
-
-    const decoded = decodeMcpHeaderValue(headerValue);
-    if (decoded === undefined || !mcpHeaderValuesEqual(annotation.type, rendered, decoded))
-      return `${headerName} does not match the annotated argument.`;
-  }
-  return undefined;
-}
-
-interface McpHeaderAnnotation {
-  path: string[];
-  headerName: string;
-  type: "string" | "integer" | "boolean";
-}
-
-function collectMcpHeaderAnnotations(schema: Record<string, unknown>): McpHeaderAnnotation[] {
-  const result: McpHeaderAnnotation[] = [];
-  const visit = (node: unknown, path: string[]) => {
-    if (typeof node !== "object" || node === null || Array.isArray(node)) return;
-    const record = node as Record<string, unknown>;
-    const properties = record.properties;
-    if (typeof properties !== "object" || properties === null || Array.isArray(properties)) return;
-
-    for (const [name, child] of Object.entries(properties as Record<string, unknown>)) {
-      if (typeof child !== "object" || child === null || Array.isArray(child)) continue;
-      const property = child as Record<string, unknown>;
-      if (property[X_MCP_HEADER] !== undefined) {
-        const headerName = property[X_MCP_HEADER];
-        if (
-          typeof headerName !== "string" ||
-          !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(headerName) ||
-          !headerName
-        ) {
-          throw new Error(
-            `Invalid x-mcp-header annotation for property ${[...path, name].join(".")}.`,
-          );
-        }
-        if (
-          property.type !== "string" &&
-          property.type !== "integer" &&
-          property.type !== "boolean"
-        )
-          throw new Error(`Invalid x-mcp-header type for property ${[...path, name].join(".")}.`);
-        if (result.some((item) => item.headerName.toLowerCase() === headerName.toLowerCase()))
-          throw new Error(`Duplicate x-mcp-header annotation: ${headerName}.`);
-        result.push({
-          path: [...path, name],
-          headerName,
-          type: property.type as "string" | "integer" | "boolean",
-        });
-      }
-      visit(property, [...path, name]);
-    }
-  };
-  visit(schema, []);
-  return result;
-}
-
-function valueAtPath(value: unknown, path: string[]): unknown {
-  let current: unknown = value;
-  for (const key of path) {
-    if (typeof current !== "object" || current === null || Array.isArray(current)) return undefined;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
-}
-
-function renderMcpHeaderValue(value: unknown): string | undefined {
-  if (typeof value === "string") return value;
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (typeof value === "number" && Number.isInteger(value)) return String(value);
-  return undefined;
-}
-
-function decodeMcpHeaderValue(value: string): string | undefined {
-  const prefix = "=?base64?";
-  const suffix = "?=";
-  if (!value.startsWith(prefix) || !value.endsWith(suffix)) return value;
-  try {
-    const encoded = value.slice(prefix.length, -suffix.length);
-    const decoded = Buffer.from(encoded, "base64").toString("utf8");
-    if (Buffer.from(decoded, "utf8").toString("base64") !== encoded) return undefined;
-    return decoded;
-  } catch {
-    return undefined;
-  }
-}
-
-function mcpHeaderValuesEqual(
-  type: McpHeaderAnnotation["type"],
-  bodyValue: string,
-  headerValue: string,
-): boolean {
-  if (type === "integer")
-    return Number.isSafeInteger(Number(headerValue)) && Number(headerValue) === Number(bodyValue);
-  return bodyValue === headerValue;
-}
-
 /**
  * One representation per result. MCP requires a `content` block and treats `structuredContent`
  * as an optional duplicate; sending both doubled every tool response, so the payload is emitted
@@ -1101,129 +973,4 @@ function toolResult(payload: Record<string, unknown>, text?: string): Record<str
     resultType: "complete",
     content: [{ type: "text", text: text ?? JSON.stringify(payload) }],
   };
-}
-function isValidRequestId(value: unknown): value is string | number {
-  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
-}
-function jsonRpcError(
-  id: string | number | null,
-  code: number,
-  message: string,
-  status: number,
-  data?: unknown,
-): Response {
-  return json(
-    { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } },
-    status,
-  );
-}
-function paginate<T>(items: T[], cursorValue: unknown): { items: T[]; nextCursor?: string } {
-  const offset = decodeCursor(cursorValue);
-  const page = items.slice(offset, offset + PAGE_SIZE);
-  const nextOffset = offset + page.length;
-  return nextOffset < items.length
-    ? { items: page, nextCursor: encodeCursor(nextOffset) }
-    : { items: page };
-}
-
-function encodeCursor(offset: number): string {
-  return Buffer.from(String(offset), "utf8").toString("base64url");
-}
-
-function decodeCursor(value: unknown): number {
-  if (value === undefined) return 0;
-  if (typeof value !== "string" || value.length > 128)
-    throw new Error("Invalid pagination cursor.");
-  let decoded: string;
-  try {
-    decoded = Buffer.from(value, "base64url").toString("utf8");
-  } catch {
-    throw new Error("Invalid pagination cursor.");
-  }
-  if (!/^(?:0|[1-9]\d*)$/.test(decoded)) throw new Error("Invalid pagination cursor.");
-  const offset = Number(decoded);
-  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid pagination cursor.");
-  return offset;
-}
-
-function subscriptionNotifications(value: unknown): Subscription["notifications"] {
-  if (!isRecord(value)) throw new Error("subscriptions/listen notifications are required.");
-  for (const key of ["toolsListChanged", "promptsListChanged", "resourcesListChanged"]) {
-    if (value[key] !== undefined && typeof value[key] !== "boolean")
-      throw new Error(`subscriptions/listen ${key} must be a boolean.`);
-  }
-  if (
-    value.resourceSubscriptions !== undefined &&
-    (!Array.isArray(value.resourceSubscriptions) ||
-      value.resourceSubscriptions.some((uri) => typeof uri !== "string" || uri.length === 0))
-  )
-    throw new Error(
-      "subscriptions/listen resourceSubscriptions must be an array of non-empty strings.",
-    );
-
-  const resourceSubscriptions =
-    value.resourceSubscriptions === undefined ? [] : (value.resourceSubscriptions as string[]);
-  return {
-    toolsListChanged: value.toolsListChanged === true,
-    promptsListChanged: value.promptsListChanged === true,
-    resourcesListChanged: value.resourcesListChanged === true,
-    resourceSubscriptions: new Set(resourceSubscriptions),
-  };
-}
-
-function subscriptionResponse(
-  id: string | number | null | undefined,
-  notifications: Subscription["notifications"],
-  subscriptions: Set<Subscription>,
-): Response {
-  let subscription: Subscription | undefined;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const honored = {
-        toolsListChanged: notifications.toolsListChanged,
-        promptsListChanged: notifications.promptsListChanged,
-        resourcesListChanged: notifications.resourcesListChanged,
-        resourceSubscriptions: notifications.resourceSubscriptions,
-      };
-      subscription = { id, controller, notifications: honored };
-      subscriptions.add(subscription);
-      writeSse(controller, {
-        jsonrpc: "2.0",
-        method: "notifications/subscriptions/acknowledged",
-        params: {
-          notifications: {
-            ...(honored.toolsListChanged ? { toolsListChanged: true } : {}),
-            ...(honored.promptsListChanged ? { promptsListChanged: true } : {}),
-            ...(honored.resourcesListChanged ? { resourcesListChanged: true } : {}),
-            ...(honored.resourceSubscriptions.size
-              ? { resourceSubscriptions: [...honored.resourceSubscriptions] }
-              : {}),
-          },
-        },
-        _meta: { ...SERVER_INFO_META, [SUBSCRIPTION_ID_META]: id },
-      });
-    },
-    cancel() {
-      if (subscription) subscriptions.delete(subscription);
-    },
-  });
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    },
-  });
-}
-
-function writeSse(controller: ReadableStreamDefaultController<Uint8Array>, message: unknown): void {
-  controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(message)}\n\n`));
-}
-
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
-  });
 }
