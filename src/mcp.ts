@@ -2,67 +2,33 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, release, userInfo } from "node:os";
-import {
-  compactAnalyticsConfig,
-  fitAnalyticsResult,
-  sessionFailureGroups,
-} from "./analytics-format.js";
 import { classifyTelemetryError, classifyTelemetryReason } from "./classify-errors.js";
 import type { CodeGraphCapability } from "./codegraph.js";
 import { CodeGraphIntegration } from "./codegraph.js";
-import { summarizeTelemetry } from "./telemetry/aggregate.js";
 import {
   fingerprintInput,
   telemetryHmac,
   usePersistentTelemetryKey,
 } from "./telemetry/fingerprint.js";
 import { TelemetryRecorder } from "./telemetry/recorder.js";
-import { readTelemetryEvents } from "./telemetry/storage.js";
 import type {
   TelemetryConfig,
-  TelemetryEnvelope,
   TelemetryErrorCategory,
   TelemetryErrorReason,
   TelemetryJsonType,
   TelemetryLevel,
 } from "./telemetry/types.js";
-import { type BatchOnError, runBatch } from "./tools/batch.js";
-import {
-  findFiles,
-  findReferences,
-  findSymbol,
-  formatSearchEnvelope,
-  searchCode,
-} from "./tools/code.js";
-import { checkCommand, spawnCapture } from "./tools/commands.js";
-import { applyFileChanges, readFile } from "./tools/files.js";
-import { fileInfo, projectOverview } from "./tools/metadata.js";
-import {
-  packageScriptArgsProblem,
-  packageScriptCapture,
-  packageScriptLabel,
-  packageScriptProblem,
-} from "./tools/package-scripts.js";
-import type { CommandPolicyConfig } from "./tools/policy.js";
-import type { PathProtectionConfig } from "./tools/protected-paths.js";
-import {
-  formatRangeText,
-  ReadRangeHistory,
-  type ReadRangeResult,
-  type ReadRangeSelection,
-  readRange,
-} from "./tools/read.js";
-import { detectSearchBackend } from "./tools/search.js";
+import { createToolHandlerTable } from "./tools/handlers/index.js";
+import type { ToolCallOutput, ToolHandler, ToolRequestContext } from "./tools/handlers/types.js";
+import { projectOverview } from "./tools/metadata.js";
+import { ReadRangeHistory } from "./tools/read.js";
 import {
   getSkill,
-  invalidateSkillDiscoveryCache,
   listSkillResources,
   listSkills,
   readSkillDirectory,
   readSkillResource,
-  skillResourceUrisForPath,
 } from "./tools/skills.js";
-import { invalidateProjectFiles } from "./tools/walk.js";
 import type { CommandConfig } from "./types.js";
 import { describeJsonType, isRecord, validateToolArguments } from "./validation.js";
 
@@ -483,8 +449,6 @@ export function createMcpHandler(
   const packageManager = commandConfig.packageManager ?? "npm";
   const allowedCommands = commandConfig.commands ?? [];
   const blacklistedCommands = commandConfig.blacklistedCommands ?? [];
-  const commandPolicy = commandConfig.commandPolicy;
-  const pathProtection = commandConfig.protectedPaths;
   const subscriptions = new Set<Subscription>();
   const notify = (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => {
     for (const subscription of subscriptions) {
@@ -516,6 +480,23 @@ export function createMcpHandler(
       }
     }
   };
+  const toolHandlers = createToolHandlerTable({
+    root,
+    allowedScripts,
+    packageManager,
+    allowedCommands,
+    blacklistedCommands,
+    commandPolicy: commandConfig.commandPolicy,
+    pathProtection: commandConfig.protectedPaths,
+    argumentScripts,
+    notify,
+    readHistoryForSession,
+    invalidateReadHistory,
+    codeGraph,
+    analyticsEnabled,
+    efficiencyModel,
+    measureEnvelope: (value) => Buffer.byteLength(JSON.stringify(toolResult(value)), "utf8"),
+  });
 
   const handler = async (request: Request): Promise<Response> => {
     const requestStartedAt = performance.now();
@@ -864,24 +845,10 @@ export function createMcpHandler(
           sessionToolCallCount += 1;
           const startedAt = performance.now();
           try {
-            const output = await callTool(
-              toolName,
-              argumentsValue,
-              root,
-              allowedScripts,
-              packageManager,
-              allowedCommands,
-              blacklistedCommands,
-              commandPolicy,
-              pathProtection,
-              argumentScripts,
-              notify,
-              readHistoryForSession(clientContext.sessionKey),
-              invalidateReadHistory,
-              request.signal,
-              codeGraph,
-              analyticsEnabled,
-            );
+            const output = await callTool(toolName, argumentsValue, toolHandlers, {
+              sessionKey: clientContext.sessionKey,
+              ...(request.signal ? { signal: request.signal } : {}),
+            });
             const result = toolResult(output.payload, output.text);
             const durationMs = performance.now() - startedAt;
             const count = resultCount(output.payload);
@@ -1325,28 +1292,6 @@ export function nearestNames(name: string, available: string[], limit = 3): stri
     .map((entry) => entry.candidate);
 }
 
-/** True when an event came from the named client, as `name` or `name@version`. */
-function matchesClient(event: TelemetryEnvelope, filter: string): boolean {
-  const name = event.runtime?.mcpClientName?.toLowerCase();
-  if (!name) return false;
-  if (name === filter) return true;
-  const version = event.runtime?.mcpClientVersion?.toLowerCase();
-  if (version !== undefined && `${name}@${version}` === filter) return true;
-  return name.startsWith(`${filter}@`) || name.startsWith(filter);
-}
-
-/** Most frequent client identity in a session, so sessions mode says who was driving. */
-function sessionClient(events: TelemetryEnvelope[]): string | undefined {
-  const counts = new Map<string, number>();
-  for (const event of events) {
-    const name = event.runtime?.mcpClientName;
-    if (!name) continue;
-    const label = `${name}@${event.runtime?.mcpClientVersion ?? "?"}`;
-    counts.set(label, (counts.get(label) ?? 0) + 1);
-  }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-}
-
 /** True when the profile's tool selection removes this tool. */
 export function isToolDisabled(name: string, selection: CommandConfig["tools"]): boolean {
   if (selection?.disabled?.includes(name)) return true;
@@ -1592,514 +1537,12 @@ function capabilities(): Record<string, unknown> {
 async function callTool(
   name: string,
   args: Record<string, unknown>,
-  root: string,
-  allowedScripts: string[],
-  packageManager: "npm" | "pnpm" | "yarn" | "bun",
-  allowedCommands: string[],
-  blacklistedCommands: string[],
-  commandPolicy: CommandPolicyConfig | undefined,
-  pathProtection: PathProtectionConfig | undefined,
-  argumentScripts: string[],
-  notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
-  readHistory: ReadRangeHistory,
-  invalidateReadHistory: (relativePath: string) => Promise<void>,
-  signal?: AbortSignal,
-  codeGraph?: CodeGraphIntegration,
-  analyticsEnabled = false,
+  handlers: Record<string, ToolHandler>,
+  request: ToolRequestContext,
 ): Promise<ToolCallOutput> {
-  let payload: Record<string, unknown> = {};
-  let contentText: string | undefined;
-  if (name === "codegraph_explore") {
-    if (!codeGraph) throw new Error("CodeGraph integration is unavailable.");
-    if (typeof args.query !== "string" || args.query.trim().length === 0)
-      throw new Error("query must be a non-empty string.");
-    if (
-      args.maxFiles !== undefined &&
-      (!Number.isInteger(args.maxFiles) || Number(args.maxFiles) < 1 || Number(args.maxFiles) > 100)
-    )
-      throw new Error("maxFiles must be an integer between 1 and 100.");
-    const maxBytes = outputBytesArg(args.maxBytes);
-    const result = await codeGraph.explore(
-      args.query,
-      args.maxFiles === undefined ? 10 : Number(args.maxFiles),
-    );
-    return { payload: boundCodeGraphResult(result, maxBytes) };
-  }
-  if (name === "telemetry_analytics") {
-    if (!analyticsEnabled)
-      throw new Error("Telemetry analytics is disabled; start Agent Dir with --analytics.");
-    const mode = typeof args.mode === "string" ? args.mode : "summary";
-    if (!["summary", "sessions", "events"].includes(mode))
-      throw new Error("mode must be summary, sessions, or events.");
-    const limit = Math.max(
-      1,
-      Math.min(500, Number.isInteger(args.limit) ? Number(args.limit) : 100),
-    );
-    const since =
-      typeof args.since === "string" ? Date.parse(args.since) : Number.NEGATIVE_INFINITY;
-    const until =
-      typeof args.until === "string" ? Date.parse(args.until) : Number.POSITIVE_INFINITY;
-    if (Number.isNaN(since) || Number.isNaN(until))
-      throw new Error("since and until must be valid ISO timestamps.");
-    const clientFilter =
-      typeof args.client === "string" && args.client.trim()
-        ? args.client.trim().toLowerCase()
-        : undefined;
-    const excludedClientFilters: string[] = [];
-    if (args.excludeClients !== undefined) {
-      if (!Array.isArray(args.excludeClients) || args.excludeClients.length > 20)
-        throw new Error("excludeClients must be an array of at most 20 client names.");
-      for (const client of args.excludeClients) {
-        if (typeof client !== "string" || client.length > 100)
-          throw new Error("excludeClients must contain strings of at most 100 characters.");
-        if (client.trim()) excludedClientFilters.push(client.trim().toLowerCase());
-      }
-    }
-    const all = readTelemetryEvents({
-      ...(typeof args.profile === "string" && args.profile ? { profile: args.profile } : {}),
-      ...(typeof args.session === "string" && args.session ? { session: args.session } : {}),
-      ...(Number.isFinite(since) ? { sinceMs: since } : {}),
-    }).filter(
-      (event) =>
-        (!args.profile || event.configId === args.profile) &&
-        (!args.session || event.sessionId === args.session) &&
-        (!clientFilter || matchesClient(event, clientFilter)) &&
-        !excludedClientFilters.some((filter) => matchesClient(event, filter)) &&
-        Date.parse(event.timestamp) >= since &&
-        Date.parse(event.timestamp) <= until,
-    );
-    let result: Record<string, unknown>;
-    if (mode === "summary") {
-      const view = typeof args.view === "string" ? args.view : "compact";
-      if (!["compact", "full"].includes(view)) throw new Error("view must be compact or full.");
-      const summary = summarizeTelemetry(all);
-      result = {
-        mode,
-        view,
-        matchedEvents: all.length,
-        configCount: summary.configCount,
-        totalEvents: summary.totalEvents,
-        configs: Object.fromEntries(
-          Object.entries(summary.configs).map(([configId, config]) => [
-            configId,
-            view === "full"
-              ? {
-                  eventCount: config.eventCount,
-                  httpRequests: config.httpRequests,
-                  httpAuthFailures: config.httpAuthFailures,
-                  httpErrors: config.httpErrors,
-                  mcpRequests: config.mcpRequests,
-                  mcpRequestsByMethod: config.mcpRequestsByMethod,
-                  toolCalls: config.toolCalls,
-                  commandCalls: config.commandCalls,
-                  tunnelEvents: config.tunnelEvents,
-                  tunnelDisconnects: config.tunnelDisconnects,
-                  tunnelReconnects: config.tunnelReconnects,
-                  tunnelFailures: config.tunnelFailures,
-                  mcpSuccessRate: config.mcpSuccessRate,
-                  toolSuccessRate: config.toolSuccessRate,
-                  commandSuccessRate: config.commandSuccessRate,
-                  failuresByCategory: config.failuresByCategory,
-                  tools: config.tools,
-                  commands: config.commands,
-                  sessionCount: Object.keys(config.sessions).length,
-                  legacySessionEvents: config.legacySessionEvents,
-                  efficiency: config.efficiency,
-                }
-              : compactAnalyticsConfig(config),
-          ]),
-        ),
-      };
-    } else if (mode === "sessions") {
-      const groups = new Map<string, typeof all>();
-      for (const event of all) {
-        const key = `${event.configId}/${event.sessionId}`;
-        const group = groups.get(key) ?? [];
-        group.push(event);
-        groups.set(key, group);
-      }
-      result = {
-        mode,
-        matchedEvents: all.length,
-        sessions: [...groups.entries()].slice(-limit).map(([key, events]) => ({
-          key,
-          client: sessionClient(events),
-          eventCount: events.length,
-          start: events[0]?.timestamp,
-          end: events.at(-1)?.timestamp,
-          tools: events
-            .filter((event) => event.event.event === "tool_call")
-            .reduce<Record<string, number>>((counts, event) => {
-              if (event.event.event === "tool_call")
-                counts[event.event.tool] = (counts[event.event.tool] ?? 0) + 1;
-              return counts;
-            }, {}),
-          failures: sessionFailureGroups(events),
-        })),
-      };
-    } else {
-      result = {
-        mode,
-        matchedEvents: all.length,
-        events: all.slice(-limit).map((item) => ({
-          timestamp: item.timestamp,
-          configId: item.configId,
-          sessionId: item.sessionId,
-          level: item.level,
-          event:
-            item.event.event === "tool_call"
-              ? Object.fromEntries(
-                  Object.entries(item.event).filter(([key]) => key !== "diagnosticDetails"),
-                )
-              : item.event,
-          runtime: item.runtime
-            ? {
-                agentDirVersion: item.runtime.agentDirVersion,
-                nodeMajor: item.runtime.nodeMajor,
-                os: item.runtime.os,
-                arch: item.runtime.arch,
-                mcpClientName: item.runtime.mcpClientName,
-                mcpClientVersion: item.runtime.mcpClientVersion,
-                mcpProtocolVersion: item.runtime.mcpProtocolVersion,
-              }
-            : undefined,
-          project: item.project
-            ? {
-                language: item.project.language,
-                framework: item.project.framework,
-                packageManager: item.project.packageManager,
-                hasGit: item.project.hasGit,
-                hasCodegraph: item.project.hasCodegraph,
-                projectSize: item.project.projectSize,
-              }
-            : undefined,
-        })),
-      };
-    }
-    return {
-      payload: fitAnalyticsResult(result, outputBytesArg(args.maxBytes), (value) =>
-        Buffer.byteLength(JSON.stringify(toolResult(value)), "utf8"),
-      ),
-    };
-  }
-  switch (name) {
-    case "read_range": {
-      const maxBytes = outputBytesArg(args.maxBytes, READ_RANGE_DEFAULT_BYTES);
-      const filePath = String(args.path);
-      const requestedRanges: ReadRangeSelection[] =
-        args.ranges === undefined
-          ? [{ startLine: Number(args.startLine), endLine: Number(args.endLine) }]
-          : objectArray(args.ranges, "ranges").map((range) => ({
-              startLine: Number(range.startLine),
-              endLine: Number(range.endLine),
-            }));
-      const observation = await readHistory.inspect(root, filePath, requestedRanges);
-      const skipRepeated = args.skipIfUnchanged === true && observation?.repeatedUnchanged === true;
-      const note = skipRepeated
-        ? "Unchanged range content omitted because skipIfUnchanged is true."
-        : observation?.overlapsPrevious
-          ? "This read overlaps lines already read in this session."
-          : undefined;
-      let completedRanges: ReadRangeSelection[] = [];
-      let readCompleted = false;
-      if (args.ranges !== undefined) {
-        const ranges = objectArray(args.ranges, "ranges");
-        if (ranges.length === 0 || ranges.length > 10)
-          throw new Error("ranges must contain 1 to 10 items.");
-        const results: ReadRangeResult[] = [];
-        let remaining = maxBytes - 256;
-        for (const [index, range] of ranges.entries()) {
-          const share = Math.max(256, Math.floor(remaining / (ranges.length - index)));
-          const result = await readRange(
-            root,
-            filePath,
-            Number(range.startLine),
-            Number(range.endLine),
-            share,
-          );
-          results.push(result);
-          remaining -= Buffer.byteLength(result.content, "utf8") + 200;
-        }
-        completedRanges = results
-          .filter((result) => result.endLine >= result.startLine)
-          .map(({ startLine, endLine }) => ({ startLine, endLine }));
-        readCompleted = results.every((result) => !result.truncated);
-        const outputResults = skipRepeated
-          ? results.map((result) => ({ ...result, content: "", skipped: true as const }))
-          : results;
-        payload = {
-          items: outputResults,
-          truncated: results.some((item) => item.truncated),
-          ...(skipRepeated ? { skipped: true } : {}),
-          ...(note ? { note } : {}),
-        };
-        contentText = [
-          outputResults.map(formatRangeText).join("\n\n"),
-          ...(note ? [`[note: ${note}]`] : []),
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-      } else {
-        if (args.startLine === undefined || args.endLine === undefined)
-          throw new Error("startLine and endLine are required unless ranges is provided.");
-        const readResult = await readRange(
-          root,
-          filePath,
-          Number(args.startLine),
-          Number(args.endLine),
-          Math.max(1, maxBytes - 256),
-        );
-        if (readResult.endLine >= readResult.startLine)
-          completedRanges = [{ startLine: readResult.startLine, endLine: readResult.endLine }];
-        readCompleted = !readResult.truncated;
-        const result = skipRepeated
-          ? { ...readResult, content: "", skipped: true as const }
-          : readResult;
-        payload = {
-          ...result,
-          ...(skipRepeated ? { skipped: true } : {}),
-          ...(note ? { note } : {}),
-        };
-        contentText = [formatRangeText(result), ...(note ? [`[note: ${note}]`] : [])].join("\n");
-      }
-      readHistory.record(observation, completedRanges, readCompleted);
-      break;
-    }
-    case "apply_changes": {
-      const changes = objectArray(args.changes, "changes").map((change) => {
-        const kind = String(change.kind);
-        if (kind !== "write" && kind !== "patch" && kind !== "delete")
-          throw new Error("Change kind must be write, patch, or delete.");
-        if (kind === "write" && typeof change.content !== "string")
-          throw new Error("write changes require content.");
-        if (kind === "patch" && !Array.isArray(change.patches))
-          throw new Error("patch changes require patches.");
-        return {
-          kind,
-          path: String(change.path),
-          ...(kind === "write" ? { content: String(change.content) } : {}),
-          ...(kind === "patch"
-            ? {
-                patches: objectArray(change.patches, "patches").map((patch) => ({
-                  search: String(patch.search),
-                  replace: String(patch.replace),
-                  ...(patch.count === undefined ? {} : { count: Number(patch.count) }),
-                })),
-              }
-            : {}),
-        } as
-          | { kind: "write"; path: string; content: string }
-          | {
-              kind: "patch";
-              path: string;
-              patches: Array<{ search: string; replace: string; count?: number }>;
-            }
-          | { kind: "delete"; path: string };
-      });
-      const dryRun = args.dryRun === true;
-      const affected = [...new Set(changes.map((change) => change.path))];
-      const before = new Map<string, string[]>();
-      for (const p of affected) before.set(p, await skillResourceUrisForPath(root, p));
-      const applied = await applyFileChanges(root, changes, dryRun, pathProtection);
-      payload = {
-        items: applied.map((item) => {
-          if (!isRecord(item)) return item;
-          const { content: _content, previousContent: _previousContent, ...summary } = item;
-          return summary;
-        }),
-        dryRun,
-      };
-      if (!dryRun) {
-        invalidateProjectFiles(root);
-        invalidateSkillDiscoveryCache(root);
-        for (const p of affected) {
-          await invalidateReadHistory(p);
-          await notifyResourceChange(notify, root, p, before.get(p) ?? []);
-        }
-      }
-      break;
-    }
-    case "find_files": {
-      const maxResults = numberArg(args.maxResults, 200, 1000);
-      const found = await findFiles(root, String(args.pattern), maxResults);
-      const bounded = boundedItems(found.files, outputBytesArg(args.maxBytes));
-      payload = {
-        items: bounded.items,
-        truncated: bounded.truncated || found.truncated,
-        ...(found.note && !bounded.truncated ? { note: found.note } : {}),
-      };
-      break;
-    }
-    case "search_code": {
-      const paths = optionalStringArray(args.paths, "paths", 20);
-      const globs = optionalStringArray(args.globs, "globs", 20);
-      const queries = optionalStringArray(args.queries, "queries", 5);
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const options = {
-        regex: args.regex === true,
-        caseSensitive: args.caseSensitive === true,
-        includeGenerated: args.includeGenerated === true,
-        multiline: args.multiline === true,
-        context: intArg(args.context, 0, 0, 5, "context"),
-        maxResults: numberArg(args.maxResults, 200, 1000),
-        ...(paths ? { paths } : {}),
-        ...(globs ? { globs } : {}),
-      };
-      const asText = args.format !== "json";
-      if (queries && queries.length > 0) {
-        // One call for several patterns keeps the round trips down; each group gets a share.
-        const share = Math.max(1024, Math.floor(maxBytes / queries.length));
-        const envelopes = await Promise.all(
-          queries.map((query) => searchCode(root, query, { ...options, maxBytes: share })),
-        );
-        payload = {
-          queries,
-          returned: envelopes.reduce((total, envelope) => total + envelope.returned, 0),
-          groups: envelopes,
-          truncated: envelopes.some((envelope) => envelope.truncated),
-        };
-        if (asText)
-          contentText = envelopes
-            .map((envelope, index) => `## ${queries[index]}\n${formatSearchEnvelope(envelope)}`)
-            .join("\n\n");
-        break;
-      }
-      const envelope = await searchCode(root, String(args.query), { ...options, maxBytes });
-      payload = { ...envelope };
-      if (asText) contentText = formatSearchEnvelope(envelope);
-      break;
-    }
-    case "find_symbol":
-      payload = {
-        ...(await findSymbol(root, String(args.symbol), {
-          maxResults: numberArg(args.maxResults, 100, 500),
-          maxBytes: outputBytesArg(args.maxBytes),
-        })),
-      };
-      break;
-    case "find_references":
-      payload = {
-        ...(await findReferences(root, String(args.symbol), {
-          maxResults: numberArg(args.maxResults, 200, 1000),
-          maxBytes: outputBytesArg(args.maxBytes),
-        })),
-      };
-      break;
-    case "project_context": {
-      const overview = await projectOverview(root);
-      let pkg: Record<string, unknown> = { path: "package.json", exists: false };
-      try {
-        const packageJson = JSON.parse(await readFile(root, "package.json")) as Record<
-          string,
-          unknown
-        >;
-        pkg = {
-          path: "package.json",
-          name: packageJson.name ?? null,
-          version: packageJson.version ?? null,
-          description: packageJson.description ?? null,
-          packageManager: packageJson.packageManager ?? null,
-          scripts: packageJson.scripts ?? {},
-        };
-      } catch {
-        // Package metadata is optional; project context remains useful without it.
-      }
-      const maxBytes = outputBytesArg(args.maxBytes);
-      const graphAvailable = (await codeGraph?.capability())?.status === "available";
-      const bounded = truncateText(
-        JSON.stringify({
-          ...overview,
-          package: pkg,
-          execution: {
-            allowedScripts: [...allowedScripts],
-            commands: [...allowedCommands],
-            blacklistedCommands: [...blacklistedCommands],
-          },
-          efficiency: efficiencyModel(graphAvailable, analyticsEnabled),
-          search: detectSearchBackend(),
-        }),
-        Math.max(1, maxBytes - 128),
-      );
-      payload = bounded.truncated
-        ? { result: bounded.text, truncated: true }
-        : JSON.parse(bounded.text);
-      break;
-    }
-    case "file_info":
-      payload = await fileInfo(root, String(args.path));
-      break;
-    case "run_package_scripts_batch": {
-      const requested = scriptRequests(args.scripts);
-      const timeoutMs = timeoutMsArg(args.timeoutMs);
-      if (requested.length > 10)
-        throw new Error("run_package_scripts_batch accepts at most 10 scripts per call.");
-      payload = {
-        ...(await runBatch(
-          requested.map(({ script, args: scriptArgs }) => ({
-            label: packageScriptLabel(packageManager, script, scriptArgs ?? []),
-            preflight: async () =>
-              (await packageScriptProblem(root, script, allowedScripts)) ??
-              packageScriptArgsProblem(script, scriptArgs, argumentScripts),
-            execute: () =>
-              packageScriptCapture(root, script, {
-                timeoutMs,
-                packageManager,
-                ...(scriptArgs?.length ? { args: scriptArgs } : {}),
-                ...(signal ? { signal } : {}),
-              }),
-          })),
-          {
-            onError: batchOnError(args.onError, "stop"),
-            maxBytes: outputBytesArg(args.maxBytes),
-            ...(args.maxBytes === undefined ? { successfulOutputLines: 20 } : {}),
-          },
-        )),
-      };
-      break;
-    }
-    case "run_command_batch": {
-      const commands = objectArray(args.commands, "commands");
-      const timeoutMs = timeoutMsArg(args.timeoutMs);
-      if (commands.length > 10)
-        throw new Error("run_command_batch accepts at most 10 commands per call.");
-      const defaultOkExitCodes = okExitCodesArg(args.okExitCodes);
-      payload = {
-        ...(await runBatch(
-          commands.map((item) => {
-            const command = typeof item.command === "string" ? item.command : "";
-            const commandArgs = Array.isArray(item.args) ? (item.args as string[]) : [];
-            const okExitCodes = okExitCodesArg(item.okExitCodes) ?? defaultOkExitCodes;
-            return {
-              label: [command, ...commandArgs.map(String)].join(" "),
-              ...(okExitCodes ? { okExitCodes } : {}),
-              preflight: () =>
-                typeof item.command !== "string"
-                  ? "command must be a string."
-                  : checkCommand(root, command, commandArgs, {
-                      allowedCommands,
-                      blacklistedCommands,
-                      allowedScripts,
-                      ...(commandPolicy ? { policy: commandPolicy } : {}),
-                    }),
-              execute: () =>
-                spawnCapture(root, command, commandArgs, {
-                  timeoutMs,
-                  ...(signal ? { signal } : {}),
-                }),
-            };
-          }),
-          {
-            onError: batchOnError(args.onError, "continue"),
-            maxBytes: outputBytesArg(args.maxBytes),
-          },
-        )),
-      };
-      break;
-    }
-    default:
-      throw new Error(`Unknown tool: ${name}`);
-  }
-  return contentText === undefined ? { payload } : { payload, text: contentText };
+  const handler = handlers[name];
+  if (!handler) throw new Error(`Unknown tool: ${name}`);
+  return handler(args, request);
 }
 
 const MCP_PARAM_PREFIX = "Mcp-Param-";
@@ -2228,12 +1671,6 @@ function mcpHeaderValuesEqual(
  * as an optional duplicate; sending both doubled every tool response, so the payload is emitted
  * once as compact JSON (or as pre-rendered text when the tool produces a better reading form).
  */
-interface ToolCallOutput {
-  payload: Record<string, unknown>;
-  /** Pre-rendered reading form; omitted tools fall back to compact JSON. */
-  text?: string;
-}
-
 function toolResult(payload: Record<string, unknown>, text?: string): Record<string, unknown> {
   // No `_meta`: the client already learned the server name and version from `initialize` or
   // `server/discover`, and repeating it costs 84 bytes on every tool result.
@@ -2585,72 +2022,6 @@ async function buildTelemetryProjectContext(
   };
 }
 
-function optionalStringArray(value: unknown, name: string, max: number): string[] | undefined {
-  if (value === undefined) return undefined;
-  const entries: unknown[] | undefined =
-    typeof value === "string" ? [value] : Array.isArray(value) ? value : undefined;
-  if (entries === undefined || entries.length > max)
-    throw new Error(`${name} must be a string or an array of at most ${max} strings.`);
-  const strings: string[] = [];
-  for (const entry of entries) {
-    if (typeof entry !== "string")
-      throw new Error(`${name} must be a string or an array of at most ${max} strings.`);
-    strings.push(entry);
-  }
-  return strings;
-}
-
-function intArg(value: unknown, fallback: number, min: number, max: number, name: string): number {
-  if (value === undefined) return fallback;
-  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max)
-    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
-  return value as number;
-}
-
-/** Accepts script names or `{ script, args }` objects. */
-function scriptRequests(value: unknown): Array<{ script: string; args?: string[] }> {
-  if (!Array.isArray(value) || value.length === 0)
-    throw new Error(
-      "scripts must be a non-empty array of script names or { script, args } objects.",
-    );
-  return value.map((item) => {
-    if (typeof item === "string") return { script: item };
-    if (isRecord(item) && typeof item.script === "string")
-      return {
-        script: item.script,
-        ...(item.args === undefined ? {} : { args: item.args as string[] }),
-      };
-    throw new Error(
-      "Each script must be a name or an object with a script name and optional args.",
-    );
-  });
-}
-
-function timeoutMsArg(value: unknown): number {
-  if (value === undefined) return 120000;
-  if (!Number.isInteger(value) || (value as number) < 1000 || (value as number) > 600000)
-    throw new Error("timeoutMs must be an integer between 1000 and 600000.");
-  return value as number;
-}
-
-function batchOnError(value: unknown, fallback: BatchOnError): BatchOnError {
-  if (value === undefined) return fallback;
-  if (value === "continue" || value === "stop") return value;
-  throw new Error("onError must be 'continue' or 'stop'.");
-}
-
-function okExitCodesArg(value: unknown): number[] | undefined {
-  if (value === undefined) return undefined;
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.length > 8 ||
-    value.some((code) => !Number.isInteger(code) || code < 0 || code > 255)
-  )
-    throw new Error("okExitCodes must be 1 to 8 integers between 0 and 255.");
-  return value as number[];
-}
-
 function resultCount(payload: Record<string, unknown>): number | undefined {
   if (Array.isArray(payload.items)) return payload.items.length;
   return undefined;
@@ -2658,110 +2029,6 @@ function resultCount(payload: Record<string, unknown>): number | undefined {
 
 function isValidRequestId(value: unknown): value is string | number {
   return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
-}
-function objectArray(value: unknown, name: string): Record<string, unknown>[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "object" || item === null))
-    throw new Error(`${name} must be an array of objects.`);
-  return value as Record<string, unknown>[];
-}
-function outputBytesArg(value: unknown, fallback = DEFAULT_OUTPUT_BYTES): number {
-  const result = value === undefined ? fallback : Number(value);
-  if (!Number.isInteger(result) || result < 1024 || result > 64_000)
-    throw new Error("maxBytes must be an integer between 1024 and 64000.");
-  return result;
-}
-
-function truncateText(value: string, maxBytes: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return { text: value, truncated: false };
-  if (maxBytes <= 32) return { text: "", truncated: true };
-  const buffer = Buffer.from(value, "utf8");
-  return {
-    text: `${buffer.subarray(0, Math.max(0, maxBytes - 32)).toString("utf8")}\n…[truncated]`,
-    truncated: true,
-  };
-}
-
-function boundCodeGraphResult(
-  value: Record<string, unknown>,
-  maxBytes: number,
-): Record<string, unknown> {
-  const originalBytes = Buffer.byteLength(JSON.stringify(value), "utf8");
-  if (originalBytes <= maxBytes) return value;
-
-  const trim = (item: unknown, budget: number): unknown => {
-    if (typeof item === "string") return truncateText(item, Math.max(0, budget - 24)).text;
-    if (Array.isArray(item)) {
-      const output: unknown[] = [];
-      for (const entry of item) {
-        const candidate = [
-          ...output,
-          trim(entry, Math.max(128, Math.floor(budget / Math.max(1, item.length)))),
-        ];
-        if (Buffer.byteLength(JSON.stringify(candidate), "utf8") > budget) break;
-        output.push(candidate[candidate.length - 1]);
-      }
-      return output;
-    }
-    if (isRecord(item)) {
-      const output: Record<string, unknown> = {};
-      for (const [key, entry] of Object.entries(item)) {
-        const remaining =
-          budget - Buffer.byteLength(JSON.stringify(output), "utf8") - key.length - 8;
-        if (remaining < 64) break;
-        output[key] = trim(
-          entry,
-          Math.min(
-            remaining,
-            Math.max(128, Math.floor(budget / Math.max(1, Object.keys(item).length))),
-          ),
-        );
-        if (Buffer.byteLength(JSON.stringify(output), "utf8") > budget) {
-          delete output[key];
-          break;
-        }
-      }
-      return output;
-    }
-    return item;
-  };
-
-  const result = trim(value, Math.max(256, maxBytes - 256)) as Record<string, unknown>;
-  const bounded: Record<string, unknown> = {
-    ...result,
-    truncated: true,
-    originalBytes,
-    budgetBytes: maxBytes,
-    message:
-      "CodeGraph output was trimmed to fit maxBytes. Narrow the query or lower maxFiles for more complete results.",
-  };
-  if (Buffer.byteLength(JSON.stringify(bounded), "utf8") <= maxBytes) return bounded;
-  return {
-    truncated: true,
-    originalBytes,
-    budgetBytes: maxBytes,
-    message: "CodeGraph output exceeded maxBytes. Narrow the query or lower maxFiles.",
-  };
-}
-
-function boundedItems<T>(items: T[], maxBytes: number): { items: T[]; truncated: boolean } {
-  const selected: T[] = [];
-  let bytes = 2;
-  for (const item of items) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8");
-    const separatorBytes = selected.length ? 1 : 0;
-    if (selected.length && bytes + separatorBytes + itemBytes > maxBytes) break;
-    if (!selected.length && bytes + itemBytes > maxBytes) break;
-    selected.push(item);
-    bytes += separatorBytes + itemBytes;
-  }
-  return { items: selected, truncated: selected.length < items.length };
-}
-
-function numberArg(value: unknown, fallback: number, max: number): number {
-  const result = value === undefined ? fallback : Number(value);
-  if (!Number.isInteger(result) || result < 1 || result > max)
-    throw new Error(`Value must be an integer between 1 and ${max}.`);
-  return result;
 }
 function jsonRpcError(
   id: string | number | null,
@@ -2802,23 +2069,6 @@ function decodeCursor(value: unknown): number {
   const offset = Number(decoded);
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid pagination cursor.");
   return offset;
-}
-
-async function notifyResourceChange(
-  notify: (event: { type: "tools" | "prompts" | "resources"; uri?: string }) => void,
-  root: string,
-  pathValue: string,
-  before: string[],
-): Promise<void> {
-  const after = await skillResourceUrisForPath(root, pathValue);
-  if (before.length === 0 && after.length === 0) return;
-
-  if (before.length === 0 || after.length === 0) {
-    notify({ type: "resources" });
-    return;
-  }
-
-  for (const uri of after) notify({ type: "resources", uri });
 }
 
 function subscriptionNotifications(value: unknown): Subscription["notifications"] {
