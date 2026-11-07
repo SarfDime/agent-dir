@@ -4,7 +4,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { findFiles, findReferences, findSymbol, searchCode } from "../src/tools/code.js";
+import {
+  findFiles,
+  findReferences,
+  findSymbol,
+  formatSearchEnvelope,
+  searchCode,
+} from "../src/tools/code.js";
 import { detectSearchBackend } from "../src/tools/search.js";
 import { invalidateProjectFiles } from "../src/tools/walk.js";
 
@@ -118,6 +124,7 @@ for (const backend of backends) {
     const root = await mkdtemp(path.join(tmpdir(), "agent-dir-search-trunc-"));
     try {
       await put(root, "many.txt", Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
+      await put(root, "other.txt", Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
       const capped = await searchCode(root, "needle", { backend, maxResults: 10 });
       assert.equal(capped.items.length, 10);
       assert.equal(capped.truncated, true);
@@ -127,6 +134,10 @@ for (const backend of backends) {
       assert.equal(bytes.truncated, true);
       assert.equal(bytes.truncationReason, "maxBytes");
       assert.ok(Buffer.byteLength(JSON.stringify(bytes), "utf8") <= 1024);
+      const remainder = bytes.notes?.find((note) => note.startsWith("Unreturned matches by file"));
+      assert.match(remainder ?? "", /"many\.txt":\d+/);
+      assert.match(remainder ?? "", /"other\.txt":\d+/);
+      assert.match(formatSearchEnvelope(bytes), /note: Unreturned matches by file/);
 
       const complete = await searchCode(root, "needle 49", { backend });
       assert.equal(complete.truncated, false);

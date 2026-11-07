@@ -198,7 +198,7 @@ Diff against `main`: 12 files changed, 384 insertions, 703 deletions.
 | P-02 | **Done** | `read_range` failures use `ToolFailure` reasons and classify as `invalid_input`; regression coverage verifies all four reasons. |
 | P-03 | **Done** | Exported `closestPathHint` now suggests bounded project-relative paths in `read_range`, `file_info`, and empty `find_files` results; traversal paths receive no hint. |
 | P-04 | **Done** | Successful package scripts return the last 20 lines by default; `maxBytes` returns full output up to its cap. |
-| P-05 | Open | |
+| P-05 | **Done** | `search_code` wraps single-string `paths`, `globs` and `queries`; `maxBytes` truncation includes bounded per-file counts for unreturned matches. |
 | P-06 | **Done** | `okExitCodes` is accepted at the batch level as a default; item-level values override it, with regression coverage. |
 | P-07 | **Done** | Expected `GET /mcp` 405s no longer count as HTTP errors; type-mismatch telemetry records allowlisted argument names and JSON types; analytics summaries count MCP requests by method. |
 | P-08 | Open | |

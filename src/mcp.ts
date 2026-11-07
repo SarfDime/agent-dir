@@ -215,7 +215,7 @@ const baseTools: ToolDefinition[] = [
   ),
   tool(
     "search_code",
-    "Search project text files (source, docs and configuration) by literal text or regex. Results are grep-style lines `path:line:col text` after a one-line summary; pass format='json' for the object envelope. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. An empty result explains what was searched and what to try next. Uses ripgrep when installed.",
+    "Search project text files (source, docs and configuration) by literal text or regex. Results are grep-style lines `path:line:col text` after a one-line summary; pass format='json' for the object envelope. Use paths/globs to scope the search and context to include surrounding lines so a follow-up read is rarely needed. Honors .gitignore inside git repositories; lockfiles and minified files are skipped unless includeGenerated is true; binary files and files over 1 MB are skipped. An empty result explains what was searched and what to try next; maxBytes truncation adds remaining match counts by file. Uses ripgrep when installed.",
     {
       query: stringSchema,
       regex: { type: "boolean", default: false },
