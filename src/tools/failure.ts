@@ -7,12 +7,15 @@ export type ToolFailureReason = Exclude<
 
 const FAILURE_CATEGORIES: Record<ToolFailureReason, TelemetryErrorCategory> = {
   patch_text_not_found: "not_found",
-  patch_ambiguous: "not_found",
+  patch_ambiguous: "conflict",
   path_not_found: "not_found",
+  path_outside_root: "invalid_input",
+  protected_path: "policy_denied",
   range_too_large: "invalid_input",
   not_a_file: "invalid_input",
   binary_file: "invalid_input",
   file_too_large: "invalid_input",
+  invalid_pattern: "invalid_input",
   command_invalid: "invalid_input",
   command_not_allowed: "policy_denied",
   command_blocked: "policy_denied",

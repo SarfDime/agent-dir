@@ -373,6 +373,56 @@ test("type-mismatch telemetry records only the argument name and JSON type", asy
   }
 });
 
+test("read range validation and root-boundary failures have typed telemetry reasons", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-read-failures-"));
+  const configId = `test-mcp-read-failures-${process.pid}-${Date.now()}`;
+  const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+  try {
+    for (const [id, filePath, startLine, endLine] of [
+      [1, "inside.txt", 30, 10],
+      [2, "../outside.txt", 1, 1],
+    ] as const) {
+      await handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: {
+              name: "read_range",
+              arguments: { path: filePath, startLine, endLine },
+              _meta: META,
+            },
+          }),
+        }),
+      );
+    }
+
+    const failures = handler
+      .telemetrySnapshot()
+      .filter(
+        (envelope) =>
+          envelope.configId === configId &&
+          envelope.event.event === "tool_call" &&
+          !envelope.event.success,
+      )
+      .map((envelope) =>
+        envelope.event.event === "tool_call"
+          ? [envelope.event.errorCategory, envelope.event.errorReason]
+          : [],
+      );
+    assert.deepEqual(failures, [
+      ["invalid_input", "length_or_range"],
+      ["invalid_input", "path_outside_root"],
+    ]);
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("modern MCP discovery is stateless and advertises skills", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-"));
   try {

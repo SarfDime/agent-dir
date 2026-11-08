@@ -153,5 +153,9 @@ test("apply_changes failures carry a reason instead of only a message", async ()
       }),
       "patch_ambiguous",
     );
+    assert.equal(
+      await reasonOf({ kind: "write" as const, path: ".env", content: "secret" }),
+      "protected_path",
+    );
   });
 });

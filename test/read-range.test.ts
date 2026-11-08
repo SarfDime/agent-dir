@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createMcpHandler } from "../src/mcp.js";
+import { ToolFailure } from "../src/tools/failure.js";
 import { formatRangeText, readRange } from "../src/tools/read.js";
 
 async function withFile(
@@ -51,7 +52,7 @@ test("readRange past the end returns an explicit empty result", async () => {
       { content: past.content, eof: past.eof, total: past.totalLines, end: past.endLine },
       { content: "", eof: true, total: 10, end: 98 },
     );
-    assert.match(formatRangeText(past), /of 10 \(end of file\)/);
+    assert.match(formatRangeText(past), /starts at line 99 past end of file \(10 total lines\)/);
   });
 });
 
@@ -73,7 +74,13 @@ test("readRange rejects binary files and oversized ranges", async () => {
   });
   await withFile(LINES, async (root) => {
     await assert.rejects(readRange(root, "f.txt", 1, 5000), /at most 2000 lines/);
-    await assert.rejects(readRange(root, "f.txt", 5, 2), /startLine and endLine/);
+    await assert.rejects(
+      readRange(root, "f.txt", 5, 2),
+      (error: unknown) =>
+        error instanceof ToolFailure &&
+        error.reason === "length_or_range" &&
+        /startLine and endLine/.test(error.message),
+    );
   });
 });
 

@@ -7,7 +7,12 @@ import { ToolFailure } from "../src/tools/failure.js";
 test("telemetry error categories preserve typed and message-based classification", () => {
   const cases: Array<[unknown, TelemetryErrorCategory]> = [
     [new ToolFailure("range_too_large", ""), "invalid_input"],
+    [new ToolFailure("length_or_range", ""), "invalid_input"],
     [new ToolFailure("path_not_found", ""), "not_found"],
+    [new ToolFailure("path_outside_root", ""), "invalid_input"],
+    [new ToolFailure("protected_path", ""), "policy_denied"],
+    [new ToolFailure("patch_ambiguous", ""), "conflict"],
+    [new ToolFailure("invalid_pattern", ""), "invalid_input"],
     [new ToolFailure("command_not_allowed", ""), "policy_denied"],
     [new ToolFailure("command_timeout", ""), "timeout"],
     [new ToolFailure("integration_not_indexed", ""), "unavailable_integration"],
@@ -29,6 +34,13 @@ test("telemetry error categories preserve typed and message-based classification
 test("telemetry error reasons preserve typed tool reasons and safe fallbacks", () => {
   const typed = new ToolFailure("binary_file", "message with no persisted details");
   assert.equal(classifyTelemetryReason(typed), "binary_file");
+  assert.equal(classifyTelemetryReason(new ToolFailure("length_or_range", "")), "length_or_range");
+  assert.equal(
+    classifyTelemetryReason(new ToolFailure("path_outside_root", "")),
+    "path_outside_root",
+  );
+  assert.equal(classifyTelemetryReason(new ToolFailure("protected_path", "")), "protected_path");
+  assert.equal(classifyTelemetryReason(new ToolFailure("invalid_pattern", "")), "invalid_pattern");
   assert.equal(
     classifyTelemetryReason(new ToolFailure("command_not_allowed", "")),
     "command_not_allowed",

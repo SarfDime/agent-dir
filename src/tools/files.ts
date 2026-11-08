@@ -14,12 +14,12 @@ export async function safePath(
   const resolvedRoot = await fs.realpath(root);
   const target = path.resolve(resolvedRoot, relativePath);
   if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${path.sep}`))
-    throw new Error("Path escapes the exposed project directory.");
+    throw new ToolFailure("path_outside_root", "Path escapes the exposed project directory.");
 
   try {
     const resolvedTarget = await fs.realpath(target);
     if (resolvedTarget !== resolvedRoot && !resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`))
-      throw new Error("Path escapes the exposed project directory.");
+      throw new ToolFailure("path_outside_root", "Path escapes the exposed project directory.");
     return resolvedTarget;
   } catch (error) {
     if (!allowMissing || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -31,7 +31,7 @@ export async function safePath(
           resolvedAncestor !== resolvedRoot &&
           !resolvedAncestor.startsWith(`${resolvedRoot}${path.sep}`)
         )
-          throw new Error("Path escapes the exposed project directory.");
+          throw new ToolFailure("path_outside_root", "Path escapes the exposed project directory.");
         return path.join(resolvedAncestor, path.relative(ancestor, target));
       } catch (ancestorError) {
         if ((ancestorError as NodeJS.ErrnoException).code !== "ENOENT") throw ancestorError;
@@ -259,7 +259,7 @@ export async function applyFileChanges(
       throw error;
     }
     const protectedProblem = protectedPathProblem(path.relative(resolvedRoot, target), protection);
-    if (protectedProblem) throw new Error(protectedProblem);
+    if (protectedProblem) throw new ToolFailure("protected_path", protectedProblem);
     if (seen.has(target)) throw new Error(`Duplicate change path: '${change.path}'.`);
     seen.add(target);
 

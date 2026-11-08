@@ -5,7 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import { authenticate } from "../src/auth.js";
 import { findFiles, searchCode } from "../src/tools/code.js";
-import { applyFileChanges, closestPathHint, listFiles, readFile } from "../src/tools/files.js";
+import {
+  applyFileChanges,
+  closestPathHint,
+  listFiles,
+  readFile,
+  ToolFailure,
+} from "../src/tools/files.js";
 import { fileInfo } from "../src/tools/metadata.js";
 import { readRange } from "../src/tools/read.js";
 
@@ -64,7 +70,12 @@ test("filesystem access and code search stay inside project root", async () => {
     ]);
     await assert.rejects(
       () => readFile(root, "../outside.txt"),
-      /Path escapes the exposed project directory\./,
+      (error: unknown) => {
+        assert.ok(error instanceof ToolFailure);
+        assert.equal(error.reason, "path_outside_root");
+        assert.match(error.message, /Path escapes the exposed project directory\./);
+        return true;
+      },
     );
 
     const outside = await mkdtemp(path.join(tmpdir(), "agent-dir-outside-"));

@@ -181,8 +181,12 @@ export async function readRange(
     !Number.isInteger(endLine) ||
     startLine < 1 ||
     endLine < startLine
-  )
-    throw new Error("startLine and endLine must be integers with 1 <= startLine <= endLine.");
+  ) {
+    throw new ToolFailure(
+      "length_or_range",
+      "startLine and endLine must be integers with 1 <= startLine <= endLine.",
+    );
+  }
   if (endLine - startLine + 1 > MAX_RANGE_LINES)
     throw new ToolFailure(
       "range_too_large",
@@ -255,9 +259,12 @@ export async function readRange(
 
 /** Plain-text rendering used as the model-facing text block. */
 export function formatRangeText(result: ReadRangeResult): string {
-  const header = `${result.path} lines ${result.startLine}-${result.endLine} of ${result.totalLines}${
-    result.eof ? " (end of file)" : ""
-  }${result.truncated ? " (cut by byte budget)" : ""}`;
+  const header =
+    result.startLine > result.totalLines
+      ? `${result.path} starts at line ${result.startLine} past end of file (${result.totalLines} total lines)`
+      : `${result.path} lines ${result.startLine}-${result.endLine} of ${result.totalLines}${
+          result.eof ? " (end of file)" : ""
+        }${result.truncated ? " (cut by byte budget)" : ""}`;
   const content = result.skipped ? "[unchanged range skipped]" : result.content;
   const footer =
     result.nextStartLine === undefined ? "" : `\n[continue with startLine=${result.nextStartLine}]`;

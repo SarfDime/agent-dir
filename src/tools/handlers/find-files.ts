@@ -22,12 +22,17 @@ export async function handleFindFiles(
 ): Promise<ToolCallOutput> {
   const maxResults = numberArg(args.maxResults, 200, 1000);
   const found = await findFiles(root, String(args.pattern), maxResults);
-  const bounded = boundedItems(found.files, outputBytesArg(args.maxBytes));
+  const bounded = boundedItems(found.files, Math.max(2, outputBytesArg(args.maxBytes) - 256));
+  const note = bounded.truncated
+    ? found.truncated
+      ? `Output byte limit reached after ${bounded.items.length} results; at least ${found.files.length} files matched and maxResults also limits the listing. Increase maxBytes and/or maxResults.`
+      : `Output byte limit reached; showing ${bounded.items.length} of ${found.files.length} matching files. Increase maxBytes.`
+    : found.note;
   return {
     payload: {
       items: bounded.items,
       truncated: bounded.truncated || found.truncated,
-      ...(found.note && !bounded.truncated ? { note: found.note } : {}),
+      ...(note ? { note } : {}),
     },
   };
 }

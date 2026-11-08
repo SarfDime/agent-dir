@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { closestPathHint, listFiles } from "./files.js";
+import { closestPathHint, listFiles, ToolFailure } from "./files.js";
 import { gitStatus } from "./git.js";
 
 export interface ProjectOverview {
@@ -20,7 +20,7 @@ export async function fileInfo(
   const resolvedRoot = await fs.realpath(root);
   const target = path.resolve(resolvedRoot, relativePath);
   if (target !== resolvedRoot && !target.startsWith(`${resolvedRoot}${path.sep}`))
-    throw new Error("Path escapes the exposed project directory.");
+    throw new ToolFailure("path_outside_root", "Path escapes the exposed project directory.");
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
     stat = await fs.lstat(target);
