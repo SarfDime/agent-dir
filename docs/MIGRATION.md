@@ -48,7 +48,7 @@ Result sizes respect `maxBytes` end to end (1.01–1.13x of the requested budget
 | `find_files`                                     | `{ items, truncated }`                                                                                                |
 | `apply_changes`                                  | `{ items, dryRun }` (per-file status only, never contents or diffs)                                                   |
 | `read_range`                                     | Plain text with a header plus `eof`, `totalLines`, `nextStartLine`; 16 KB default; `ranges: [...]` for several ranges |
-| `validate`                                       | `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }`; `diagnostics` now has `summary` and `byFile`, and `issues` only when it fits |
+| `validate`                                       | (removed in 3.0, see the end of this page) `{ level, ok, diagnostics, scripts?, scriptsRequested, truncated, note? }`; `diagnostics` now has `summary` and `byFile`, and `issues` only when it fits |
 | `run_command_batch`, `run_package_scripts_batch` | `{ ok, onError, summary, items, truncated }` with a per-item `status`                                                 |
 
 `search_code` also gained `multiline` (patterns can span lines; identical on the ripgrep and built-in
@@ -107,3 +107,14 @@ still sees the preferred workflow and the anti-patterns to avoid.
 5. Confirm the advertised set: `tools/list` should be about 11.9 KB with every optional integration
    enabled, and `tools/list` telemetry now records `toolCount` and `toolSetHash` so size changes can
    be attributed to a tool appearing or disappearing.
+
+## Agent Dir 3.0: `validate` removed
+
+`validate` is no longer advertised. It ran lightweight diagnostics (broken symlinks, invalid JSON, merge-conflict markers) and, at `level` `scripts` or `full`, package scripts, and it made up under 1% of tool calls. A call to it now fails with `Unknown tool: validate.` and a pointer to `run_package_scripts_batch`.
+
+| Was | Now |
+| --- | --- |
+| `validate` with `level: scripts` or `full` | `run_package_scripts_batch` with the scripts to run, for example `["check"]` or `["check", "test"]` |
+| `validate` with `level: diagnostics` | `run_package_scripts_batch` with `check`, which covers whatever your `check` script runs; `search_code` for `<<<<<<<` finds merge-conflict markers. Broken symlinks have no replacement |
+
+Update saved prompts and agent instructions that name `validate`. An instance now advertises 10 tools, plus `codegraph_explore` and `telemetry_analytics` when enabled. `toolSetHash` changes with the upgrade, so telemetry windows split cleanly at it.

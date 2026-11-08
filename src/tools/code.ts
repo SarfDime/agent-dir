@@ -1,3 +1,4 @@
+import { closestPathHint } from "./files.js";
 import { matchesGlob } from "./glob.js";
 import { runSearch, type SearchBackend, type SearchRequest } from "./search.js";
 import { listProjectFiles } from "./walk.js";
@@ -49,6 +50,7 @@ const DEFAULT_OUTPUT_BYTES = 8_000;
 const MAX_TEXT_BYTES = 512;
 const MAX_CONTEXT_BYTES = 256;
 const ENVELOPE_OVERHEAD_BYTES = 200;
+const MAX_REMAINDER_NOTE_BYTES = 280;
 
 function truncateUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
@@ -107,17 +109,46 @@ function toItem(match: {
   return item;
 }
 
+function remainderCountsNote(items: SearchItem[]): string {
+  const counts = new Map<string, number>();
+  for (const item of items) counts.set(item.path, (counts.get(item.path) ?? 0) + 1);
+  const entries = [...counts].map(([file, count]) => `${JSON.stringify(file)}:${count}`);
+  const prefix = "Unreturned matches by file (path:count): ";
+  const render = (included: string[], omitted: number): string =>
+    `${prefix}${included.join(", ")}${
+      omitted > 0 ? `; ${omitted} more file(s) omitted by the output budget.` : ""
+    }`;
+  let includedCount = 0;
+  for (let index = 0; index < entries.length; index += 1) {
+    const candidate = render(entries.slice(0, index + 1), entries.length - index - 1);
+    if (Buffer.byteLength(candidate, "utf8") > MAX_REMAINDER_NOTE_BYTES) break;
+    includedCount += 1;
+  }
+  let omittedCount = entries.length - includedCount;
+  while (
+    includedCount > 0 &&
+    Buffer.byteLength(render(entries.slice(0, includedCount), omittedCount), "utf8") >
+      MAX_REMAINDER_NOTE_BYTES
+  ) {
+    includedCount -= 1;
+    omittedCount += 1;
+  }
+  if (includedCount === 0)
+    return `Unreturned per-file match counts for ${entries.length} file(s) exceed the output budget.`;
+  return render(entries.slice(0, includedCount), omittedCount);
+}
+
 async function search<T extends SearchItem>(
   root: string,
   request: SearchRequest,
-  options: { maxBytes?: number; backend?: SearchBackend },
+  options: { maxBytes?: number; backend?: SearchBackend; remainderCounts?: boolean },
   decorate: (item: SearchItem) => T,
 ): Promise<SearchEnvelope<T>> {
   const outcome = await runSearch(root, request, options.backend);
   const items = outcome.matches.map((match) => decorate(toItem(match)));
   const maxBytes = options.maxBytes ?? DEFAULT_OUTPUT_BYTES;
   // Notes explain empty and truncated results; they come out of the same budget as the items.
-  const NOTES_RESERVE_BYTES = 420;
+  const NOTES_RESERVE_BYTES = options.remainderCounts ? 620 : 420;
   const fitted = fitItems(items, Math.max(256, maxBytes - NOTES_RESERVE_BYTES));
   const truncated = fitted.cut || outcome.moreAvailable;
   const notes = [...outcome.notes];
@@ -127,11 +158,12 @@ async function search<T extends SearchItem>(
         outcome.scanned === 1 ? "file" : "files"
       }. Literal match unless regex is set; case-insensitive unless caseSensitive is set; generated files, binaries and files over 1 MB are skipped. Check the spelling, widen paths/globs, set includeGenerated, or use find_symbol for definitions.`,
     );
-  if (truncated && fitted.cut)
+  if (truncated && fitted.cut) {
     notes.push(
       `Results were cut by maxBytes after ${fitted.kept.length} of ${items.length} matches; raise maxBytes, lower context, or narrow with paths/globs.`,
     );
-  else if (truncated)
+    if (options.remainderCounts) notes.push(remainderCountsNote(items.slice(fitted.kept.length)));
+  } else if (truncated)
     notes.push(
       `More than ${fitted.kept.length} matches exist; narrow with paths/globs or raise maxResults.`,
     );
@@ -159,7 +191,10 @@ function describeQuery(request: SearchRequest): string {
  * Renders a search envelope as grep-style lines instead of JSON. Matched text is what an agent
  * uses; the JSON keys around it were 43% of the payload on a measured sample.
  */
-export function formatSearchEnvelope(envelope: SearchEnvelope): string {
+export function formatSearchEnvelope(
+  envelope: SearchEnvelope,
+  options: { searchFooterHint?: boolean } = {},
+): string {
   const files = new Set(envelope.items.map((item) => item.path)).size;
   const header = `${envelope.returned} ${
     envelope.returned === 1 ? "match" : "matches"
@@ -174,6 +209,10 @@ export function formatSearchEnvelope(envelope: SearchEnvelope): string {
     for (const after of item.after ?? []) lines.push(`  | ${after}`);
   }
   for (const note of envelope.notes ?? []) lines.push(`note: ${note}`);
+  if (options.searchFooterHint)
+    lines.push(
+      "Search tip: set context for nearby lines; use paths or globs to narrow follow-up searches.",
+    );
   return lines.join("\n");
 }
 
@@ -198,6 +237,7 @@ export function searchCode(
     {
       ...(options.maxBytes === undefined ? {} : { maxBytes: options.maxBytes }),
       ...(options.backend ? { backend: options.backend } : {}),
+      remainderCounts: true,
     },
     (item) => item,
   );
@@ -214,9 +254,10 @@ export async function findFiles(
   const matching = listing.files.filter((file) => matchesGlob(pattern, file));
   const truncated = matching.length > maxResults;
   const files = matching.slice(0, maxResults);
+  const hint = matching.length === 0 ? await closestPathHint(root, pattern) : "";
   const note =
     matching.length === 0
-      ? `No file matched '${pattern}' among ${listing.files.length} project files. Patterns match project-relative paths; '*' does not cross '/', so use '**' or a bare name such as 'mcp.ts'. Files ignored by .gitignore, node_modules and build output are not listed.`
+      ? `No file matched '${pattern}' among ${listing.files.length} project files.${hint} Patterns match project-relative paths; '*' does not cross '/', so use '**' or a bare name such as 'mcp.ts'. Files ignored by .gitignore, node_modules and build output are not listed.`
       : truncated
         ? `Showing ${files.length} of ${matching.length} matching files; raise maxResults or narrow the pattern.`
         : undefined;

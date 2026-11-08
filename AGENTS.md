@@ -15,7 +15,7 @@ Entry point for agents working in this repository. Load only the scoped document
 | Security policy and vulnerability reporting | [docs/SECURITY.md](docs/SECURITY.md) |
 | Code of conduct | [docs/CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) |
 | Full release invariants | [docs/RELEASING.md](docs/RELEASING.md) |
-| Configuration, MCP surface, migration, telemetry | [docs/CONFIGURATION.md](docs/CONFIGURATION.md), [docs/MCP.md](docs/MCP.md), [docs/MIGRATION.md](docs/MIGRATION.md), [docs/telemetry.md](docs/telemetry.md) |
+| Configuration, MCP surface, migration, telemetry | [docs/CONFIGURATION.md](docs/CONFIGURATION.md), [docs/MCP.md](docs/MCP.md), [docs/MIGRATION.md](docs/MIGRATION.md), [docs/TELEMETRY.md](docs/TELEMETRY.md) |
 
 ## Where the rest of the docs live
 
@@ -34,11 +34,11 @@ Project reference:
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) - profiles, tunnels, tokens, command allowlists.
 - [docs/MCP.md](docs/MCP.md) - MCP endpoint, protocol behavior, tools, authentication.
 - [docs/MIGRATION.md](docs/MIGRATION.md) - breaking changes when upgrading to 2.0.
-- [docs/telemetry.md](docs/telemetry.md) - privacy levels, event model, metrics.
+- [docs/TELEMETRY.md](docs/TELEMETRY.md) - privacy levels, event model, metrics.
 - [docs/RELEASING.md](docs/RELEASING.md) - full release invariants.
 - [docs/SECURITY.md](docs/SECURITY.md) - security policy and private vulnerability reporting.
 - [docs/CODE_OF_CONDUCT.md](docs/CODE_OF_CONDUCT.md) - community expectations.
-- [docs/AUDIT-EFFICIENCY.md](docs/AUDIT-EFFICIENCY.md), [docs/AUDIT-PROGRESS.md](docs/AUDIT-PROGRESS.md) - audit notes.
+- [docs/AUDIT.md](docs/AUDIT.md) - future telemetry baseline and measurement-gated work.
 
 Agent skills live under `skills/`:
 

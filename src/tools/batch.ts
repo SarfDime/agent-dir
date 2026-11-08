@@ -78,14 +78,32 @@ function allocate(sizes: number[], budget: number): number[] {
   return allocation;
 }
 
-function applyOutputBudget(items: BatchItem[], maxBytes: number): boolean {
+function keepLastLines(value: string, maxLines: number): string {
+  const lines = value.split(/\r?\n/);
+  return lines.length > maxLines ? lines.slice(-maxLines).join("\n") : value;
+}
+
+function applyOutputBudget(
+  items: BatchItem[],
+  maxBytes: number,
+  successfulOutputLines?: number,
+): boolean {
+  if (successfulOutputLines !== undefined) {
+    for (const item of items) {
+      if (item.status !== "success") continue;
+      if (item.stdout !== undefined)
+        item.stdout = keepLastLines(item.stdout, successfulOutputLines);
+      if (item.stderr !== undefined)
+        item.stderr = keepLastLines(item.stderr, successfulOutputLines);
+    }
+  }
   const withOutput = items.filter((item) => item.stdout !== undefined || item.stderr !== undefined);
   const budget = maxBytes - RESULT_OVERHEAD_BYTES - items.length * ITEM_OVERHEAD_BYTES;
   const sizes = withOutput.map(
     (item) => byteLength(item.stdout ?? "") + byteLength(item.stderr ?? ""),
   );
   const allocation = allocate(sizes, budget);
-  let truncated = false;
+  let truncated = items.some((item) => item.outputTruncated === true);
   withOutput.forEach((item, position) => {
     const granted = allocation[position] ?? 0;
     const stdout = item.stdout ?? "";
@@ -96,7 +114,7 @@ function applyOutputBudget(items: BatchItem[], maxBytes: number): boolean {
     const stdoutCap = granted - stderrCap;
     if (byteLength(stdout) < stdoutCap)
       stderrCap = Math.min(byteLength(stderr), granted - byteLength(stdout));
-    const keep = item.status === "failure" ? "tail" : "head";
+    const keep = item.status === "failure" || successfulOutputLines !== undefined ? "tail" : "head";
     item.stdout = truncateUtf8(stdout, Math.max(0, granted - stderrCap), keep);
     item.stderr = truncateUtf8(stderr, stderrCap, keep);
     item.outputTruncated = true;
@@ -107,7 +125,7 @@ function applyOutputBudget(items: BatchItem[], maxBytes: number): boolean {
 
 export async function runBatch(
   tasks: BatchTask[],
-  options: { onError: BatchOnError; maxBytes: number },
+  options: { onError: BatchOnError; maxBytes: number; successfulOutputLines?: number },
 ): Promise<BatchResult> {
   const { onError } = options;
   const problems: Array<string | undefined> = [];
@@ -165,6 +183,7 @@ export async function runBatch(
         durationMs: capture.durationMs,
         stdout: capture.stdout,
         stderr: capture.stderr,
+        ...(capture.outputTruncated ? { outputTruncated: true } : {}),
       };
       if (capture.exitCode !== null) item.exitCode = capture.exitCode;
       if (!succeeded) {
@@ -181,7 +200,7 @@ export async function runBatch(
     }
   }
 
-  const truncated = applyOutputBudget(items, options.maxBytes);
+  const truncated = applyOutputBudget(items, options.maxBytes, options.successfulOutputLines);
   const summary = {
     total: items.length,
     success: items.filter((item) => item.status === "success").length,

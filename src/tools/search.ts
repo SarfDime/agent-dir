@@ -2,10 +2,10 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { commandEnvironment } from "./commands.js";
-import { safePath } from "./files.js";
+import { safePath, ToolFailure } from "./files.js";
 import { matchesGlob } from "./glob.js";
 import { RipgrepFallback, searchBuiltin, searchRipgrep } from "./search-backends.js";
-import { listProjectFiles } from "./walk.js";
+import { ignoredProjectPaths, listProjectFiles } from "./walk.js";
 
 /**
  * Text search with two interchangeable backends. ripgrep is used when installed (recommended);
@@ -120,7 +120,10 @@ function normalizeScope(value: string): string {
     .replace(/\/+$/, "");
   if (normalized === "." || normalized === "") return "";
   if (normalized === ".." || normalized.startsWith("../") || path.posix.isAbsolute(normalized))
-    throw new Error(`Search path '${value}' escapes the exposed project directory.`);
+    throw new ToolFailure(
+      "path_outside_root",
+      `Search path '${value}' escapes the exposed project directory.`,
+    );
   return normalized;
 }
 
@@ -132,25 +135,41 @@ async function candidateFiles(
   const notes: string[] = [];
   let files = listing.files;
   const scopes = request.paths.map(normalizeScope);
+  const unmatchedScopes = scopes.filter(
+    (scope) =>
+      scope && !listing.files.some((file) => file === scope || file.startsWith(`${scope}/`)),
+  );
+  const ignoredScopes =
+    listing.source === "git" ? await ignoredProjectPaths(root, unmatchedScopes) : new Set<string>();
   if (scopes.length > 0 && !scopes.includes("")) {
     files = files.filter((file) =>
       scopes.some((scope) => file === scope || file.startsWith(`${scope}/`)),
     );
     for (const [index, scope] of scopes.entries()) {
-      if (!listing.files.some((file) => file === scope || file.startsWith(`${scope}/`)))
-        notes.push(`Path '${request.paths[index]}' matched no project files.`);
+      if (!listing.files.some((file) => file === scope || file.startsWith(`${scope}/`))) {
+        const ignoredPath = scope
+          .split("/")
+          .map((_, part, segments) => segments.slice(0, part + 1).join("/"))
+          .find((candidate) => ignoredScopes.has(candidate));
+        notes.push(
+          ignoredPath
+            ? `Path '${request.paths[index]}' is excluded from project search because Git ignores '${ignoredPath}'.`
+            : `Path '${request.paths[index]}' matched no project files.`,
+        );
+      }
     }
   }
   const include = request.globs.filter((glob) => !glob.startsWith("!"));
   const exclude = request.globs.filter((glob) => glob.startsWith("!")).map((glob) => glob.slice(1));
+  const filesBeforeGlobs = files.length;
   if (include.length > 0)
     files = files.filter((file) => include.some((glob) => matchesGlob(glob, file)));
   if (exclude.length > 0)
     files = files.filter((file) => !exclude.some((glob) => matchesGlob(glob, file)));
+  if (request.globs.length > 0 && filesBeforeGlobs > 0 && files.length === 0)
+    notes.push("The supplied globs matched no candidate project files.");
   if (!request.includeGenerated) {
-    files = files.filter(
-      (file) => scopes.includes(file) || !GENERATED_FILES.some((glob) => matchesGlob(glob, file)),
-    );
+    files = files.filter((file) => !GENERATED_FILES.some((glob) => matchesGlob(glob, file)));
   }
   return { files, incomplete: listing.incomplete, notes };
 }

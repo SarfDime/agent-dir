@@ -7,7 +7,12 @@ import test from "node:test";
 import { migrateLegacyProfiles } from "../src/config.js";
 import { createMcpHandler } from "../src/mcp.js";
 import { type BatchTask, runBatch } from "../src/tools/batch.js";
-import { checkCommand, isCommandBlacklisted, spawnCapture } from "../src/tools/commands.js";
+import {
+  checkCommand,
+  checkCommandFailure,
+  isCommandBlacklisted,
+  spawnCapture,
+} from "../src/tools/commands.js";
 import {
   evaluateCommandPolicy,
   generalSearchWarning,
@@ -174,6 +179,19 @@ test("blacklist entries are not bypassed by global options before the subcommand
   assert.equal(isCommandBlacklisted("git", ["-C", ".", "status"], blacklist), false);
 });
 
+test("command preflight failures carry typed telemetry reasons", () => {
+  assert.equal(
+    checkCommandFailure(ROOT, "curl", [], { allowedCommands: [] })?.reason,
+    "command_not_allowed",
+  );
+  assert.equal(
+    checkCommandFailure(ROOT, "git", ["-c", "core.sshCommand=x", "fetch"], {
+      allowedCommands: ["git"],
+    })?.reason,
+    "command_blocked",
+  );
+});
+
 test("git guardrails block execution vectors but keep normal use", () => {
   const deny = (args: string[]) => evaluateCommandPolicy("git", args, CONTEXT);
   assert.match(deny(["-c", "core.sshCommand=x", "fetch"]) ?? "", /guardrail/);
@@ -187,6 +205,18 @@ test("git guardrails block execution vectors but keep normal use", () => {
   assert.equal(deny(["config", "--get", "user.name"]), undefined);
   assert.equal(deny(["commit", "-m", "message"]), undefined);
   assert.equal(deny(["push", "origin", "main"]), undefined);
+});
+
+test("optional Git policy parses and denies git grep", () => {
+  const policy: unknown = JSON.parse(
+    '{"builtinGuardrails":true,"rules":{"git":{"allowSubcommands":["status","diff","log","show"],"denySubcommands":["grep","log -S"],"denyOptions":["--force"]}}}',
+  );
+  assert.equal(isCommandPolicy(policy), true);
+  if (!isCommandPolicy(policy)) throw new Error("Documented Git command policy did not parse");
+  assert.match(
+    evaluateCommandPolicy("git", ["grep", "needle"], { ...CONTEXT, policy }) ?? "",
+    /git grep is denied by this profile/,
+  );
 });
 
 test("package manager guardrails block publishing, remote execution and unlisted scripts", () => {
@@ -301,8 +331,17 @@ const META = {
 
 type BatchPayload = {
   ok: boolean;
+  truncated: boolean;
   summary: { success: number; failure: number; skipped: number };
-  items: Array<{ status: string; ran: boolean; reason?: string; command: string }>;
+  items: Array<{
+    status: string;
+    ran: boolean;
+    reason?: string;
+    command: string;
+    stdout?: string;
+    stderr?: string;
+    outputTruncated?: boolean;
+  }>;
 };
 
 type BatchBody = {
@@ -366,6 +405,29 @@ test("run_command_batch applies guardrails per item and reports every status", a
   }
 });
 
+test("run_command_batch applies top-level okExitCodes unless an item overrides it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-batch-exit-codes-"));
+  const handler = createMcpHandler(root, { commands: ["node"] }, { level: "none" });
+  try {
+    const result = await callBatch(handler, "run_command_batch", {
+      commands: [
+        { command: "node", args: ["-e", "process.exit(1)"] },
+        { command: "node", args: ["-e", "process.exit(1)"], okExitCodes: [0] },
+      ],
+      okExitCodes: [0, 1],
+    });
+
+    assert.deepEqual(
+      result.items.map((item) => item.status),
+      ["success", "failure"],
+    );
+    assert.equal(result.ok, false);
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("run_package_scripts_batch stops by default and can continue", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-dir-scripts-"));
   try {
@@ -407,6 +469,61 @@ test("run_package_scripts_batch stops by default and can continue", async () => 
       ],
     );
     assert.match(rejected.items[1]?.reason ?? "", /does not exist/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("successful package scripts return a tail summary by default and full output with maxBytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-script-output-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        scripts: {
+          report: `node -e "for(let i=1;i<=25;i++)console.log('entry-'+i)"`,
+          "large-report": `node -e "for(let i=1;i<=20;i++)console.log('entry-'+i+' '+'x'.repeat(1000)+' END_'+i)"`,
+          "capped-report": `node -e "process.stdout.write('x'.repeat(600000))"`,
+        },
+      }),
+    );
+    const handler = createMcpHandler(
+      root,
+      { scripts: { allowedScripts: ["report", "large-report", "capped-report"] } },
+      { level: "none" },
+    );
+    const summary = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: ["report"],
+    });
+    const summaryOutput = summary.items[0]?.stdout ?? "";
+    assert.equal(summary.truncated, false);
+    assert.equal(summary.items[0]?.outputTruncated, undefined);
+    assert.ok(Buffer.byteLength(summaryOutput) < 1000);
+    assert.equal(summaryOutput.split(/\r?\n/).includes("entry-1"), false);
+    assert.ok(summaryOutput.split(/\r?\n/).includes("entry-25"));
+
+    const full = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: ["report"],
+      maxBytes: 64_000,
+    });
+    const fullOutput = full.items[0]?.stdout ?? "";
+    assert.equal(full.truncated, false);
+    assert.ok(fullOutput.split(/\r?\n/).includes("entry-1"));
+    assert.ok(fullOutput.split(/\r?\n/).includes("entry-25"));
+
+    const large = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: ["large-report"],
+    });
+    assert.equal(large.truncated, true);
+    assert.equal(large.items[0]?.outputTruncated, true);
+    assert.match(large.items[0]?.stdout ?? "", /END_20\s*$/);
+
+    const capped = await callBatch(handler, "run_package_scripts_batch", {
+      scripts: ["capped-report"],
+    });
+    assert.equal(capped.truncated, true);
+    assert.equal(capped.items[0]?.outputTruncated, true);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

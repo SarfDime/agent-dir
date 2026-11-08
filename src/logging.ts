@@ -29,7 +29,6 @@ const TOOL_ICONS: Record<string, string> = {
   file_info: "ℹ️",
   project_context: "🧭",
   apply_changes: "✏️",
-  validate: "✓",
 };
 
 const MCP_METHOD_ICONS: Record<string, string> = {
@@ -322,7 +321,6 @@ export function printBanner(options: {
   addTool("find_references", GREEN);
   addTool("read_range", GREEN);
   addTool("apply_changes", BRIGHT_MAGENTA);
-  addTool("validate", BRIGHT_YELLOW);
   addTool("run_package_scripts_batch", BRIGHT_BLUE);
   addTool("run_command_batch", BRIGHT_CYAN);
   addTool("file_info", YELLOW);

@@ -36,8 +36,7 @@ as a correctable message rather than a failure. Read those messages; do not rese
 | Who calls X? | `find_references` | `search_code` per call site |
 | How does this subsystem work? | `codegraph_explore` when advertised | many `search_code` + `read_range` loops |
 | Change files | `apply_changes` | `sed -i`, `tee`, heredocs |
-| Does it compile or pass? | `validate` | guessing, or a full test suite for a typo |
-| Run a project script | `run_package_scripts_batch` | `npm run …` through `run_command_batch` |
+| Does it compile or pass? Run a project script | `run_package_scripts_batch`, narrowest script first | `npm run …` through `run_command_batch` |
 | Run git or another allowlisted binary | `run_command_batch` | shell pipelines |
 | What happened across sessions? | `telemetry_analytics` when advertised | guessing |
 
@@ -87,10 +86,6 @@ escaped quotes or newlines inside argument values.
 "maxBytes": 8000}`. Every item reports `status` (`success` / `failure` / `skipped`), `ran`, `exitCode`, and
 `stdout`/`stderr`; nothing is ever “maybe ran”.
 
-`validate` — `{"level": "diagnostics" | "scripts" | "full", "scripts": ["check"], "maxBytes": 8000}`. The result
-carries `diagnostics.summary` (counts by severity, affected files) and `diagnostics.byFile`; the flat
-`diagnostics.issues` list is present only when it fits.
-
 ## When a call is rejected
 
 Rejections come back as a normal tool result with `isError: true` and a message written to be acted on in the
@@ -128,4 +123,4 @@ same turn. From the message:
 - Sending `changes` as a JSON *string* instead of an array.
 - Patching text you remember instead of text you just read.
 - Using `run_command_batch` for something a dedicated tool does, then parsing its stdout by hand.
-- Running the full validation suite after a one-line edit when `validate` at `diagnostics` answers the question.
+- Running the full test suite after a one-line edit when one script or one test file answers the question.

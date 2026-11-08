@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CodeGraphIntegration } from "../src/codegraph.js";
+import { ToolFailure } from "../src/tools/failure.js";
 
 const META = {
   "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -53,6 +54,11 @@ test("CodeGraph reports not indexed without starting a server", async () => {
   try {
     const integration = new CodeGraphIntegration(root);
     assert.equal((await integration.capability()).status, "not_indexed");
+    await assert.rejects(
+      () => integration.explore("anything"),
+      (error: unknown) =>
+        error instanceof ToolFailure && error.reason === "integration_not_indexed",
+    );
     await integration.close();
   } finally {
     fake.restore();

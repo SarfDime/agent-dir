@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { ToolFailure } from "./failure.js";
 import {
   blacklistCandidates,
   type CommandPolicyConfig,
@@ -10,20 +11,29 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const MAX_CAPTURE_BYTES = 512_000;
 const TRUNCATION_MARKER = "\n…[output truncated at 512 KB]";
 
-export function appendBoundedOutput(current: string, chunk: Buffer | string): string {
+// shortcut: 512 KB head-only capture, upgrade to head/tail if complete tails become important.
+function appendBoundedOutputWithStatus(
+  current: string,
+  chunk: Buffer | string,
+): { output: string; truncated: boolean } {
   if (
     current.endsWith(TRUNCATION_MARKER) ||
     Buffer.byteLength(current, "utf8") >= MAX_CAPTURE_BYTES
   )
-    return current;
+    return { output: current, truncated: true };
   const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
   const available = MAX_CAPTURE_BYTES - Buffer.byteLength(current, "utf8");
-  if (incoming.byteLength <= available) return current + incoming.toString("utf8");
+  if (incoming.byteLength <= available)
+    return { output: current + incoming.toString("utf8"), truncated: false };
   const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
   const payloadBytes = Math.max(0, available - markerBytes);
   let payload = incoming.subarray(0, payloadBytes).toString("utf8");
   while (Buffer.byteLength(payload, "utf8") > payloadBytes) payload = payload.slice(0, -1);
-  return current + payload + TRUNCATION_MARKER;
+  return { output: current + payload + TRUNCATION_MARKER, truncated: true };
+}
+
+export function appendBoundedOutput(current: string, chunk: Buffer | string): string {
+  return appendBoundedOutputWithStatus(current, chunk).output;
 }
 
 export function commandEnvironment(): NodeJS.ProcessEnv {
@@ -82,6 +92,7 @@ export interface CaptureResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  outputTruncated?: boolean;
   timedOut: boolean;
   aborted: boolean;
   /** Spawn failure message (for example the executable does not exist). */
@@ -105,6 +116,7 @@ export function spawnCapture(
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let outputTruncated = false;
     let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: Omit<CaptureResult, "stdout" | "stderr" | "durationMs">): void => {
@@ -112,7 +124,13 @@ export function spawnCapture(
       finished = true;
       if (timer) clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      resolve({ ...result, stdout, stderr, durationMs: Date.now() - startedAt });
+      resolve({
+        ...result,
+        stdout,
+        stderr,
+        ...(outputTruncated ? { outputTruncated: true } : {}),
+        durationMs: Date.now() - startedAt,
+      });
     };
     const child = spawn(executable, args, {
       cwd: root,
@@ -136,10 +154,14 @@ export function spawnCapture(
     }
     signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout = appendBoundedOutput(stdout, chunk);
+      const appended = appendBoundedOutputWithStatus(stdout, chunk);
+      stdout = appended.output;
+      outputTruncated ||= appended.truncated;
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr = appendBoundedOutput(stderr, chunk);
+      const appended = appendBoundedOutputWithStatus(stderr, chunk);
+      stderr = appended.output;
+      outputTruncated ||= appended.truncated;
     });
     child.on("error", (error: Error) => {
       finish({ exitCode: null, timedOut: false, aborted: false, error: error.message });
@@ -194,24 +216,41 @@ export function checkCommand(
   args: string[],
   context: CommandCheckContext,
 ): string | undefined {
-  if (typeof command !== "string" || !SAFE_NAME.test(command)) return "Invalid command name.";
+  return checkCommandFailure(root, command, args, context)?.message;
+}
+
+export function checkCommandFailure(
+  root: string,
+  command: string,
+  args: string[],
+  context: CommandCheckContext,
+): ToolFailure | undefined {
+  if (typeof command !== "string" || !SAFE_NAME.test(command))
+    return new ToolFailure("command_invalid", "Invalid command name.");
   if (!context.allowedCommands.includes(command)) {
     const alternative = BUILT_IN_ALTERNATIVES[command];
-    return `Command '${command}' is not allowed by this profile.${
-      alternative
-        ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
-        : ""
-    }`;
+    return new ToolFailure(
+      "command_not_allowed",
+      `Command '${command}' is not allowed by this profile.${
+        alternative
+          ? ` Use ${alternative} instead: it stays inside the project, honors .gitignore and returns bounded results.`
+          : ""
+      }`,
+    );
   }
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
-    return "Command arguments must be strings.";
+    return new ToolFailure("command_invalid", "Command arguments must be strings.");
   if (isCommandBlacklisted(command, args, context.blacklistedCommands ?? []))
-    return `Command '${[command, ...args].join(" ")}' is blocked by this profile.`;
-  return evaluateCommandPolicy(command, args, {
+    return new ToolFailure(
+      "command_blocked",
+      `Command '${[command, ...args].join(" ")}' is blocked by this profile.`,
+    );
+  const problem = evaluateCommandPolicy(command, args, {
     root,
     ...(context.allowedScripts ? { allowedScripts: context.allowedScripts } : {}),
     ...(context.policy ? { policy: context.policy } : {}),
   });
+  return problem ? new ToolFailure("command_blocked", problem) : undefined;
 }
 
 export async function runCommand(
@@ -224,19 +263,24 @@ export async function runCommand(
   signal?: AbortSignal,
   context: Omit<CommandCheckContext, "allowedCommands" | "blacklistedCommands"> = {},
 ): Promise<CommandResult> {
-  const problem = checkCommand(root, command, args, {
+  const problem = checkCommandFailure(root, command, args, {
     allowedCommands,
     blacklistedCommands,
     ...context,
   });
-  if (problem) throw new Error(problem);
+  if (problem) throw problem;
   const capture = await spawnCapture(root, command, args, {
     timeoutMs,
     ...(signal ? { signal } : {}),
   });
-  if (capture.aborted) throw new Error(`Command '${command}' was aborted.`);
-  if (capture.timedOut) throw new Error(`Command '${command}' timed out after ${timeoutMs}ms.`);
-  if (capture.error) throw new Error(capture.error);
+  if (capture.aborted)
+    throw new ToolFailure("command_aborted", `Command '${command}' was aborted.`);
+  if (capture.timedOut)
+    throw new ToolFailure(
+      "command_timeout",
+      `Command '${command}' timed out after ${timeoutMs}ms.`,
+    );
+  if (capture.error) throw new ToolFailure("command_spawn_failed", capture.error);
   return {
     command: [command, ...args].join(" "),
     exitCode: capture.exitCode ?? 1,

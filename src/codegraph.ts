@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { ToolFailure } from "./tools/failure.js";
 
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../../package.json") as { version: string }).version;
@@ -130,14 +131,22 @@ export class CodeGraphIntegration {
   async explore(query: string, maxFiles?: number): Promise<Record<string, unknown>> {
     const capability = await this.capability();
     if (capability.status === "not_installed")
-      throw new Error("CodeGraph is not installed or the codegraph executable is unavailable.");
+      throw new ToolFailure(
+        "integration_not_installed",
+        "CodeGraph is not installed or the codegraph executable is unavailable.",
+      );
     if (capability.status === "not_indexed")
-      throw new Error(
+      throw new ToolFailure(
+        "integration_not_indexed",
         "CodeGraph is not initialized for this project; no usable .codegraph index exists.",
       );
     if (capability.status === "startup_failed" || capability.status === "runtime_failed")
-      throw new Error(capability.detail ?? "CodeGraph is unavailable.");
-    if (capability.status === "stopped") throw new Error("CodeGraph is stopped.");
+      throw new ToolFailure(
+        "integration_unavailable",
+        capability.detail ?? "CodeGraph is unavailable.",
+      );
+    if (capability.status === "stopped")
+      throw new ToolFailure("integration_not_running", "CodeGraph is stopped.");
 
     await this.ensureStarted();
     const result = await this.request("tools/call", {
@@ -147,8 +156,13 @@ export class CodeGraphIntegration {
         ...(maxFiles === undefined ? {} : { maxFiles }),
       },
     });
-    if (result.error) throw new Error(result.error.message ?? "CodeGraph MCP request failed.");
-    if (!result.result) throw new Error("CodeGraph returned a malformed MCP response.");
+    if (result.error)
+      throw new ToolFailure(
+        "integration_failed",
+        result.error.message ?? "CodeGraph MCP request failed.",
+      );
+    if (!result.result)
+      throw new ToolFailure("integration_failed", "CodeGraph returned a malformed MCP response.");
     return result.result;
   }
 
@@ -157,7 +171,7 @@ export class CodeGraphIntegration {
     const child = this.process;
     this.process = undefined;
     this.initialized = false;
-    this.rejectPending(new Error("CodeGraph integration closed."));
+    this.rejectPending(new ToolFailure("integration_not_running", "CodeGraph integration closed."));
     if (!child) return;
     child.stdin.end();
     if (!child.killed) child.kill("SIGTERM");
@@ -204,7 +218,7 @@ export class CodeGraphIntegration {
   }
 
   private async ensureStarted(): Promise<void> {
-    if (this.closed) throw new Error("CodeGraph is stopped.");
+    if (this.closed) throw new ToolFailure("integration_not_running", "CodeGraph is stopped.");
     if (this.process && this.initialized) return;
 
     const child = spawn(CODEGRAPH_COMMAND, ["serve", "--mcp", "--path", this.root], {
@@ -259,24 +273,34 @@ export class CodeGraphIntegration {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       this.handleProcessFailure(`CodeGraph startup failed: ${detail}`, "startup_failed");
-      throw new Error(`CodeGraph startup failed: ${detail}`);
+      const reason = error instanceof ToolFailure ? error.reason : "integration_failed";
+      throw new ToolFailure(reason, `CodeGraph startup failed: ${detail}`);
     }
   }
 
   private request(method: string, params: Record<string, unknown>): Promise<JsonRpcMessage> {
     const child = this.process;
     if (!child || child.killed || child.stdin.destroyed)
-      return Promise.reject(new Error("CodeGraph process is not running."));
+      return Promise.reject(
+        new ToolFailure("integration_not_running", "CodeGraph process is not running."),
+      );
 
     const id = this.nextId++;
     const message = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     if (Buffer.byteLength(message, "utf8") > MAX_MESSAGE_BYTES)
-      return Promise.reject(new Error("CodeGraph MCP request is too large."));
+      return Promise.reject(
+        new ToolFailure("integration_request_too_large", "CodeGraph MCP request is too large."),
+      );
 
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        rejectRequest(new Error(`CodeGraph MCP request timed out after ${REQUEST_TIMEOUT_MS}ms.`));
+        rejectRequest(
+          new ToolFailure(
+            "integration_timeout",
+            `CodeGraph MCP request timed out after ${REQUEST_TIMEOUT_MS}ms.`,
+          ),
+        );
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve: resolveRequest, reject: rejectRequest, timer });
       child.stdin.write(`${message}\n`, (error) => {
@@ -292,7 +316,7 @@ export class CodeGraphIntegration {
   private async notify(method: string): Promise<void> {
     const child = this.process;
     if (!child || child.killed || child.stdin.destroyed)
-      throw new Error("CodeGraph process is not running.");
+      throw new ToolFailure("integration_not_running", "CodeGraph process is not running.");
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`);
   }
 
@@ -310,7 +334,10 @@ export class CodeGraphIntegration {
       this.buffer = "";
       this.discarding = true;
       this.rejectPending(
-        new Error("CodeGraph returned an oversized MCP message; narrow the query."),
+        new ToolFailure(
+          "integration_failed",
+          "CodeGraph returned an oversized MCP message; narrow the query.",
+        ),
       );
       return;
     }
@@ -341,7 +368,7 @@ export class CodeGraphIntegration {
   ): void {
     this.runtimeFailure = detail;
     this.initialized = false;
-    this.rejectPending(new Error(detail));
+    this.rejectPending(new ToolFailure("integration_unavailable", detail));
     const child = this.process;
     this.process = undefined;
     if (child && !child.killed) child.kill("SIGTERM");

@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { commandEnvironment, processTreeSpawnOptions, terminateProcessTree } from "./commands.js";
-import { safePath } from "./files.js";
+import { safePath, ToolFailure } from "./files.js";
 import type { RawMatch, SearchRequest } from "./search.js";
 
 const RG_BATCH = 300;
@@ -17,13 +17,20 @@ function escapeRegex(value: string): string {
 
 function compileBuiltinRegex(request: SearchRequest): RegExp {
   const source = request.regex ? request.query : escapeRegex(request.query);
-  if (source.length > 2000) throw new Error("Regex pattern is too long (limit 2000 characters).");
+  if (source.length > 2000)
+    throw new ToolFailure("invalid_pattern", "Regex pattern is too long (limit 2000 characters).");
   if (request.regex && NESTED_QUANTIFIER.test(source))
-    throw new Error(
+    throw new ToolFailure(
+      "invalid_pattern",
       "Regex rejected: nested quantifiers can cause catastrophic backtracking. Simplify the pattern, or install ripgrep (recommended), which searches in linear time.",
     );
   const flags = `g${request.caseSensitive ? "" : "i"}${request.multiline ? "ms" : ""}`;
-  return new RegExp(source, flags);
+  try {
+    return new RegExp(source, flags);
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new ToolFailure("invalid_pattern", error.message);
+  }
 }
 
 function firstAcceptedHit(

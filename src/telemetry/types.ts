@@ -37,10 +37,42 @@ export const TELEMETRY_ERROR_REASONS = [
   "patch_text_not_found",
   "patch_ambiguous",
   "path_not_found",
+  "path_outside_root",
+  "protected_path",
+  "range_too_large",
+  "not_a_file",
+  "binary_file",
+  "file_too_large",
+  "invalid_pattern",
+  "command_invalid",
+  "command_not_allowed",
+  "command_blocked",
+  "command_timeout",
+  "command_aborted",
+  "command_spawn_failed",
+  "command_failed",
+  "integration_unavailable",
+  "integration_not_installed",
+  "integration_not_indexed",
+  "integration_not_running",
+  "integration_timeout",
+  "integration_request_too_large",
+  "integration_failed",
   "other",
 ] as const;
 
 export type TelemetryErrorReason = (typeof TELEMETRY_ERROR_REASONS)[number];
+
+export const TELEMETRY_JSON_TYPES = [
+  "string",
+  "number",
+  "boolean",
+  "object",
+  "array",
+  "null",
+] as const;
+
+export type TelemetryJsonType = (typeof TELEMETRY_JSON_TYPES)[number];
 
 /** Canonical tool outcomes; `toolOutcome` returns one of these. */
 export const TOOL_OUTCOMES = ["ok", "empty", "truncated", "error"] as const;
@@ -58,6 +90,7 @@ export const ARG_SHAPE_KEYS = [
   "ranges",
   "queries",
   "dryRun",
+  "skipIfUnchanged",
   "okExitCodes",
   "limit",
 ] as const;
@@ -146,6 +179,9 @@ export interface TelemetryToolEvent {
   readLines?: number;
   errorCategory?: TelemetryErrorCategory;
   errorReason?: TelemetryErrorReason;
+  /** Schema path and JSON type for a rejected type mismatch; never contains the received value. */
+  argumentName?: string;
+  receivedType?: TelemetryJsonType;
   /**
    * Argument key names from a rejected call. Unknown keys are recorded as `<unknown>`, so a
    * misspelled or invented argument is visible without persisting the text that was sent.
@@ -163,6 +199,7 @@ export interface TelemetryCommandEvent {
   durationMs: number;
   outputBytes?: number;
   errorCategory?: TelemetryErrorCategory;
+  errorReason?: TelemetryErrorReason;
 }
 
 export interface TelemetryTunnelEvent {

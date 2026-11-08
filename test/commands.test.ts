@@ -8,7 +8,9 @@ import {
   commandEnvironment,
   isCommandBlacklisted,
   runCommand,
+  spawnCapture,
 } from "../src/tools/commands.js";
+import { ToolFailure } from "../src/tools/failure.js";
 import { runPackageScript } from "../src/tools/package-scripts.js";
 
 test("command output is bounded and marked when truncated", () => {
@@ -16,6 +18,15 @@ test("command output is bounded and marked when truncated", () => {
   assert.ok(Buffer.byteLength(output, "utf8") <= 512_000);
   assert.match(output, /output truncated at 512 KB/);
   assert.equal(appendBoundedOutput(output, "more"), output);
+});
+
+test("process capture reports output capped at 512 KB", async () => {
+  const result = await spawnCapture(process.cwd(), process.execPath, [
+    "-e",
+    "process.stdout.write('x'.repeat(600000))",
+  ]);
+  assert.equal(result.outputTruncated, true);
+  assert.match(result.stdout, /output truncated at 512 KB/);
 });
 
 test("child command environment filters common secret-bearing variables", () => {
@@ -61,10 +72,21 @@ test("package scripts run with the filtered environment while retaining build es
   }
 });
 
-test("configured package scripts work with the filtered environment", async () => {
-  for (const script of ["check", "format:check"]) {
-    const result = await runPackageScript(process.cwd(), script, 120_000, [script]);
-    assert.equal(result.exitCode, 0, `${script} failed:\n${result.stderr}\n${result.stdout}`);
+test("configured package scripts run from a fixture project", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-package-script-"));
+  try {
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify({
+        private: true,
+        scripts: { "fixture:check": `node -e "process.stdout.write('fixture script passed')"` },
+      }),
+    );
+    const result = await runPackageScript(root, "fixture:check", 10_000, ["fixture:check"]);
+    assert.equal(result.exitCode, 0, `${result.stderr}\n${result.stdout}`);
+    assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), "fixture script passed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -80,7 +102,13 @@ test("command timeout terminates descendant processes", async (t) => {
       `fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));`,
       "setInterval(()=>{},1000);",
     ].join("");
-    await assert.rejects(runCommand(root, "node", ["-e", script], ["node"], [], 250), /timed out/);
+    await assert.rejects(
+      runCommand(root, "node", ["-e", script], ["node"], [], 250),
+      (error: unknown) =>
+        error instanceof ToolFailure &&
+        error.reason === "command_timeout" &&
+        /timed out/.test(error.message),
+    );
     const childPid = Number(await readFile(pidFile, "utf8"));
     let terminated = false;
     for (let attempt = 0; attempt < 30; attempt += 1) {

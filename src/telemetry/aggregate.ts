@@ -11,6 +11,7 @@ export interface TelemetrySummary {
       httpAuthFailures: number;
       httpErrors: number;
       mcpRequests: number;
+      mcpRequestsByMethod: Record<string, number>;
       toolCalls: number;
       commandCalls: number;
       tunnelEvents: number;
@@ -191,7 +192,9 @@ function outcomeOf(event: ToolCallEvent): string {
 function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)] ?? 0;
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[middle] ?? 0;
+  return ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
 }
 
 /** Buckets requested read sizes; the boundaries separate a focused read from a file dump. */
@@ -392,6 +395,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
     let httpAuthFailures = 0;
     let httpErrors = 0;
     let mcpRequests = 0;
+    const mcpRequestsByMethod: Record<string, number> = {};
     let toolCalls = 0;
     let commandCalls = 0;
     let tunnelEvents = 0;
@@ -414,7 +418,11 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
       if (event.event === "http_request") {
         httpRequests += 1;
         if (event.status === 401) httpAuthFailures += 1;
-        if (event.status >= 400) httpErrors += 1;
+        if (
+          event.status >= 400 &&
+          !(event.route === "mcp" && event.method.toUpperCase() === "GET" && event.status === 405)
+        )
+          httpErrors += 1;
         sessions.set(envelope.sessionId, session);
         continue;
       }
@@ -457,6 +465,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
 
       if (event.event === "mcp_request") {
         mcpRequests += 1;
+        mcpRequestsByMethod[event.method] = (mcpRequestsByMethod[event.method] ?? 0) + 1;
       } else if (event.event === "tool_call") {
         toolCalls += 1;
         const item = tools.get(event.tool) ?? bucket();
@@ -504,6 +513,7 @@ export function summarizeTelemetry(events: TelemetryEnvelope[]): TelemetrySummar
       httpAuthFailures,
       httpErrors,
       mcpRequests,
+      mcpRequestsByMethod,
       toolCalls,
       commandCalls,
       tunnelEvents,

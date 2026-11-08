@@ -37,8 +37,8 @@ jobs:
       - name: Verify package
         run: npm run check
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests with coverage
+        run: npm run test:coverage
 
       - name: Verify package contents
         run: npm pack --dry-run

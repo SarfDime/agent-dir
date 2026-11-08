@@ -4,7 +4,15 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { findFiles, findReferences, findSymbol, searchCode } from "../src/tools/code.js";
+import {
+  findFiles,
+  findReferences,
+  findSymbol,
+  formatSearchEnvelope,
+  searchCode,
+} from "../src/tools/code.js";
+import { ToolFailure } from "../src/tools/failure.js";
+import { handleFindFiles } from "../src/tools/handlers/find-files.js";
 import { detectSearchBackend } from "../src/tools/search.js";
 import { invalidateProjectFiles } from "../src/tools/walk.js";
 
@@ -65,6 +73,33 @@ for (const backend of backends) {
       assert.ok(!generated.includes("node_modules/pkg/index.js"));
       assert.ok(!generated.includes("image.bin"), "binary files are skipped");
       assert.ok(!generated.includes("big.txt"), "files over 1 MB are skipped");
+
+      const explicitlyScopedGenerated = await searchCode(root, "needle", {
+        backend,
+        paths: ["package-lock.json"],
+      });
+      assert.equal(explicitlyScopedGenerated.items.length, 0);
+      const explicitlyScopedWithGenerated = await searchCode(root, "needle", {
+        backend,
+        paths: ["package-lock.json"],
+        includeGenerated: true,
+      });
+      assert.equal(explicitlyScopedWithGenerated.items.length, 1);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  test("find_files explains byte-limited results and stays within the requested budget", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "agent-dir-find-files-budget-"));
+    try {
+      for (let index = 0; index < 40; index += 1)
+        await put(root, `long-directory-name-${index}/long-file-name-${index}.txt`, "content");
+
+      const output = await handleFindFiles({ pattern: "**/*.txt", maxBytes: 1024 }, root);
+      assert.equal(output.payload.truncated, true);
+      assert.match(String(output.payload.note), /showing \d+ of 40 matching files/);
+      assert.ok(Buffer.byteLength(JSON.stringify(output.payload), "utf8") <= 1024);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -105,6 +140,14 @@ for (const backend of backends) {
       const missing = await searchCode(root, "needle", { backend, paths: ["nope"] });
       assert.equal(missing.items.length, 0);
       assert.match(missing.notes?.[0] ?? "", /matched no project files/);
+      const unmatchedGlob = await searchCode(root, "needle", {
+        backend,
+        globs: ["no-project-files-match-this-*"],
+      });
+      assert.match(
+        unmatchedGlob.notes?.join("\n") ?? "",
+        /globs matched no candidate project files/,
+      );
       await assert.rejects(
         searchCode(root, "needle", { backend, paths: ["../outside"] }),
         /escapes/,
@@ -118,6 +161,7 @@ for (const backend of backends) {
     const root = await mkdtemp(path.join(tmpdir(), "agent-dir-search-trunc-"));
     try {
       await put(root, "many.txt", Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
+      await put(root, "other.txt", Array.from({ length: 50 }, (_, i) => `needle ${i}`).join("\n"));
       const capped = await searchCode(root, "needle", { backend, maxResults: 10 });
       assert.equal(capped.items.length, 10);
       assert.equal(capped.truncated, true);
@@ -127,10 +171,19 @@ for (const backend of backends) {
       assert.equal(bytes.truncated, true);
       assert.equal(bytes.truncationReason, "maxBytes");
       assert.ok(Buffer.byteLength(JSON.stringify(bytes), "utf8") <= 1024);
+      const remainder = bytes.notes?.find((note) => note.startsWith("Unreturned matches by file"));
+      assert.match(remainder ?? "", /"many\.txt":\d+/);
+      assert.match(remainder ?? "", /"other\.txt":\d+/);
+      assert.match(formatSearchEnvelope(bytes), /note: Unreturned matches by file/);
 
       const complete = await searchCode(root, "needle 49", { backend });
       assert.equal(complete.truncated, false);
       assert.equal(complete.truncationReason, undefined);
+      assert.doesNotMatch(formatSearchEnvelope(complete), /Search tip:/);
+      assert.match(
+        formatSearchEnvelope(complete, { searchFooterHint: true }),
+        /Search tip: set context for nearby lines; use paths or globs to narrow follow-up searches\.$/,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -198,7 +251,14 @@ test("the built-in backend rejects regexes with nested quantifiers", async () =>
     await put(root, "a.txt", `${"a".repeat(40)}!\n`);
     await assert.rejects(
       searchCode(root, "(a+)+$", { regex: true, backend: "builtin" }),
-      /catastrophic backtracking/,
+      (error: unknown) =>
+        error instanceof ToolFailure &&
+        error.reason === "invalid_pattern" &&
+        /catastrophic backtracking/.test(error.message),
+    );
+    await assert.rejects(
+      searchCode(root, "[", { regex: true, backend: "builtin" }),
+      (error: unknown) => error instanceof ToolFailure && error.reason === "invalid_pattern",
     );
     const ok = await searchCode(root, "a{3}", { regex: true, backend: "builtin" });
     assert.equal(ok.items.length, 1);
@@ -239,6 +299,12 @@ test("inside a git repository the file list honors .gitignore and includes untra
       ["tracked.ts", "untracked.ts"],
     );
     assert.deepEqual((await findFiles(root, "*.ts")).files, ["tracked.ts", "untracked.ts"]);
+    const ignored = await searchCode(root, "needle", {
+      paths: ["ignored/skip.ts"],
+      backend: "builtin",
+    });
+    assert.equal(ignored.items.length, 0);
+    assert.match(ignored.notes?.join("\n") ?? "", /ignored\/skip\.ts.*Git ignores 'ignored'/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

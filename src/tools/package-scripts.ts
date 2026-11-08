@@ -3,6 +3,7 @@ import path from "node:path";
 import type { PackageManager } from "../types.js";
 import type { CaptureResult, CommandResult } from "./commands.js";
 import { spawnCapture } from "./commands.js";
+import { ToolFailure } from "./failure.js";
 
 interface PackageJson {
   scripts?: Record<string, string>;
@@ -14,20 +15,34 @@ export async function packageScriptProblem(
   script: string,
   allowedScripts: string[] = [],
 ): Promise<string | undefined> {
+  return (await packageScriptFailure(root, script, allowedScripts))?.message;
+}
+
+export async function packageScriptFailure(
+  root: string,
+  script: string,
+  allowedScripts: string[] = [],
+): Promise<ToolFailure | undefined> {
   if (typeof script !== "string" || !/^[A-Za-z0-9:_-]+$/.test(script))
-    return "Invalid package script name.";
+    return new ToolFailure("command_invalid", "Invalid package script name.");
   let packageJson: PackageJson;
   try {
     packageJson = JSON.parse(
       await fs.readFile(path.join(root, "package.json"), "utf8"),
     ) as PackageJson;
   } catch {
-    return "No valid package.json found.";
+    return new ToolFailure("command_invalid", "No valid package.json found.");
   }
   if (!packageJson.scripts?.[script])
-    return `Package script '${script}' does not exist in package.json.`;
+    return new ToolFailure(
+      "command_invalid",
+      `Package script '${script}' does not exist in package.json.`,
+    );
   if (!allowedScripts.includes(script))
-    return `Package script '${script}' is not allowed by this profile.`;
+    return new ToolFailure(
+      "command_not_allowed",
+      `Package script '${script}' is not allowed by this profile.`,
+    );
   return undefined;
 }
 
@@ -40,15 +55,30 @@ export function packageScriptArgsProblem(
   args: unknown,
   argumentScripts: string[] = [],
 ): string | undefined {
+  return packageScriptArgsFailure(script, args, argumentScripts)?.message;
+}
+
+export function packageScriptArgsFailure(
+  script: string,
+  args: unknown,
+  argumentScripts: string[] = [],
+): ToolFailure | undefined {
   if (args === undefined) return undefined;
   if (!Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
-    return "Package script args must be an array of strings.";
+    return new ToolFailure("command_invalid", "Package script args must be an array of strings.");
   if (args.length === 0) return undefined;
   if (!argumentScripts.includes(script))
-    return `Package script '${script}' does not accept arguments; add it to scripts.argumentScripts in the profile to allow them.`;
-  if (args.length > MAX_SCRIPT_ARGS) return `At most ${MAX_SCRIPT_ARGS} arguments are allowed.`;
+    return new ToolFailure(
+      "command_not_allowed",
+      `Package script '${script}' does not accept arguments; add it to scripts.argumentScripts in the profile to allow them.`,
+    );
+  if (args.length > MAX_SCRIPT_ARGS)
+    return new ToolFailure("command_invalid", `At most ${MAX_SCRIPT_ARGS} arguments are allowed.`);
   if (args.some((arg) => arg.length > MAX_SCRIPT_ARG_LENGTH || /[\0\r\n]/.test(arg)))
-    return `Arguments must be single lines of at most ${MAX_SCRIPT_ARG_LENGTH} characters.`;
+    return new ToolFailure(
+      "command_invalid",
+      `Arguments must be single lines of at most ${MAX_SCRIPT_ARG_LENGTH} characters.`,
+    );
   return undefined;
 }
 
@@ -93,16 +123,17 @@ export async function runPackageScript(
   packageManager: PackageManager = "npm",
 ): Promise<CommandResult> {
   const problem = await packageScriptProblem(root, script, allowedScripts);
-  if (problem) throw new Error(problem);
+  if (problem) throw new ToolFailure("command_invalid", problem);
   const label = packageScriptLabel(packageManager, script);
   const capture = await packageScriptCapture(root, script, {
     timeoutMs,
     packageManager,
     ...(signal ? { signal } : {}),
   });
-  if (capture.aborted) throw new Error(`${label} was aborted.`);
-  if (capture.timedOut) throw new Error(`${label} timed out after ${timeoutMs}ms.`);
-  if (capture.error) throw new Error(capture.error);
+  if (capture.aborted) throw new ToolFailure("command_aborted", `${label} was aborted.`);
+  if (capture.timedOut)
+    throw new ToolFailure("command_timeout", `${label} timed out after ${timeoutMs}ms.`);
+  if (capture.error) throw new ToolFailure("command_spawn_failed", capture.error);
   return {
     command: label,
     exitCode: capture.exitCode ?? 1,

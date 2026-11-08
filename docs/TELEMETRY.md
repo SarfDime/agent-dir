@@ -20,6 +20,10 @@ configuration → session → event
 
 ## Event types
 
+### http_request
+
+One HTTP request received by the server. `GET /mcp` returns `405` by design because the MCP endpoint accepts `POST` only; it remains visible in `httpRequests` but is excluded from the summary's `httpErrors`.
+
 ### mcp_request
 
 One MCP/JSON-RPC request handled by Agent Dir. Its duration covers the request from entry through response/error handling.
@@ -40,12 +44,16 @@ Three further fields describe *how* a tool was called, never what was passed:
 | --- | --- |
 | `skippedCount` | Batch tools only: items reported as `skipped`, i.e. never started because an earlier item failed or was rejected. |
 | `integration` / `integrationStatus` | Set for integration-backed tools (`codegraph_explore`), with the integration status at call time. |
-| `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `okExitCodes`, `limit`). Values are never recorded. |
+| `argShape` | Booleans for the optional arguments that were supplied (`regex`, `caseSensitive`, `paths`, `globs`, `context`, `multiline`, `ranges`, `dryRun`, `skipIfUnchanged`, `okExitCodes`, `limit`). Values are never recorded. |
 | `readLines` | `read_range` only: total lines requested, summed over `ranges`. A count, never content. `mode=summary` buckets it under `efficiency.readSpans`, which is how a large-byte read total is attributed to big reads or to many small ones. |
-| `errorReason` | Why a call failed, from a closed list: `unknown_argument`, `type_mismatch`, `missing_required`, `enum_mismatch`, `length_or_range`, `patch_text_not_found`, `patch_ambiguous`, `path_not_found`, `other`. It refines `errorCategory` (which stays the coarse bucket) without ever carrying a message, an argument value, a path or patch text. A value that is not on the list is dropped rather than coerced. |
+| `resultCount` | Number of returned result items. For multi-query `search_code`, this is the aggregate returned count across all query groups. |
+| `errorReason` | Why a call failed, from a closed list: `unknown_argument`, `type_mismatch`, `missing_required`, `enum_mismatch`, `length_or_range`, `patch_text_not_found`, `patch_ambiguous`, `path_not_found`, `path_outside_root`, `protected_path`, `range_too_large`, `not_a_file`, `binary_file`, `file_too_large`, `invalid_pattern`, `command_invalid`, `command_not_allowed`, `command_blocked`, `command_timeout`, `command_aborted`, `command_spawn_failed`, `command_failed`, `integration_unavailable`, `integration_not_installed`, `integration_not_indexed`, `integration_not_running`, `integration_timeout`, `integration_request_too_large`, `integration_failed`, `other`. It refines `errorCategory` (which stays the coarse bucket) without ever carrying a message, an argument value, a path or patch text. A value that is not on the list is dropped rather than coerced. |
+| `argumentName` | For `type_mismatch` only: the schema argument path (for example `commands[0].args`). It is validated against a conservative identifier/path allowlist. |
+| `receivedType` | For `type_mismatch` only: the received JSON type (`string`, `number`, `boolean`, `object`, `array` or `null`). Argument values are never recorded. |
 | `argumentKeys` | Key names from a rejected call, recorded as sent, so an invented key such as `_raw` or `base64Args` is visible and a retry of the same bad shape is countable. A key that is not identifier-shaped or is longer than 64 characters is recorded as `<unknown>`. Values are never recorded. |
 
 `argShape` is what makes guidance experiments measurable: it shows whether agents actually use `paths`/`globs` to scope a search, or `context` instead of a follow-up read.
+Efficiency outcomes classify successful calls with `resultCount: 0` as `empty`; a truncated result is classified as `truncated` even when its returned count is zero.
 
 ### command_call
 
@@ -115,21 +123,22 @@ Event shapes live in `src/telemetry/types.ts`; the persistence allowlist lives i
 
 Start Agent Dir with `--analytics` to expose the `telemetry_analytics` MCP tool. It reads persisted telemetry across all profiles and sessions on the host; this is separate from enabling collection. Keep the flag off unless the connected agent needs access to this history.
 
-- `mode=summary` returns aggregate reliability, timing, and usage metrics.
-- `mode=sessions` returns per-session tool counts and failure summaries.
+- `mode=summary` defaults to compact counts and success rates, the five highest-volume issues, and the ten most-used MCP clients (plus an `otherRequests` total when more clients exist). `view=full` returns the complete per-tool and per-command tables.
+- `mode=sessions` returns per-session tool counts and failure summaries. Identical failures within a session are grouped by event and failure details, with `count`, `first`, and `last` timestamps.
 - `mode=events` returns bounded event records, with runtime/project context reduced to coarse fields and legacy raw diagnostic tool details removed.
-- Optional `profile`, `session`, `since`, and `until` filters narrow the dataset. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
+- Optional `profile`, `session`, `client`, `excludeClients`, `since`, and `until` filters narrow the dataset. `excludeClients` accepts up to 20 client selectors and uses the same name/name@version matching as `client`. `limit` and `maxBytes` bound the response; use filters rather than requesting the entire event stream.
 
 Diagnostic-level telemetry can still include identifying runtime metadata, so only enable remote analytics on a connector you trust. The analytics tool is hidden by default and is registered only when the explicit flag is true.
 
 ### Guidance experiments
 
-The guidance text that `initialize` and `server/discover` return has two variants, selected with `AGENT_DIR_GUIDANCE`:
+Guidance experiments are selected with `AGENT_DIR_GUIDANCE`:
 
 - unset or `table` (default): the decision table.
 - `terse`: a single paragraph with the same policy.
+- `search-footer`: the decision table plus a one-line `search_code` text-result hint to use context and narrow follow-up searches. The hint is not added to JSON-format results.
 
-Each `initialize`/`discover` request records `guidanceVariant`, and `mode=summary` reports request counts per variant under `efficiency.guidanceVariants`. To compare, run the same workload under both variants and diff the `efficiency` block: calls per episode, `searchThenReadTransitions`, `argShape` usage, and tokens by tool. Nothing else in the response changes, so a difference is attributable to the guidance.
+Each `initialize`/`discover` request records `guidanceVariant`, and `mode=summary` reports request counts per variant under `efficiency.guidanceVariants`. To compare, run the same workload under `table` and `search-footer` and diff the `efficiency` block: calls per episode, `searchThenReadTransitions`, read-span buckets, `argShape` usage, and tokens by tool. Only the search result's text footer changes; search execution and JSON payloads are unchanged.
 
 Keep one variant per host and window; switching mid-session mixes the samples.
 
@@ -147,7 +156,7 @@ telemetry show is the raw event stream grouped by configuration and session. Use
 
 ## Reading telemetry summary
 
-telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. Use the raw stream when investigating a specific request or reconstructing event order. Each configuration in `mode=summary` also carries an `efficiency` block: estimated output tokens and token share per tool, truncation and empty rates, duplicate input/output calls, repeated file reads, requested read-size buckets (`readSpans`), `searchThenReadTransitions`, episodes, top transitions, clients, protocol versions, and guidance variants. It is larger than the reliability block, so raise `maxBytes` or filter by `profile` before reading it.
+telemetry summary is an aggregation for humans and agents. Prefer its separate MCP/tool/command success rates and per-tool/per-command metrics for reliability analysis. `mcpRequestsByMethod` separates protocol request counts (such as `tools/list` and `tools/call`) from tool-call counts. Use the raw stream when investigating a specific request or reconstructing event order. Each configuration in `mode=summary` also carries an `efficiency` block: estimated output tokens and token share per tool, truncation and empty rates, duplicate input/output calls, repeated file reads, requested read-size buckets (`readSpans`), `searchThenReadTransitions`, episodes, top transitions, clients, protocol versions, and guidance variants. It is larger than the reliability block, so raise `maxBytes` or filter by `profile` before reading it.
 
 ## Data quality rules
 

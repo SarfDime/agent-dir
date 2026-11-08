@@ -250,7 +250,12 @@ test("MCP telemetry records command, session, and detailed project context", asy
           method: "tools/call",
           params: {
             name: "run_command_batch",
-            arguments: { commands: [{ command: "git", args: ["status", "--short"] }] },
+            arguments: {
+              commands: [
+                { command: "git", args: ["status", "--short"] },
+                { command: "curl", args: ["https://example.com"] },
+              ],
+            },
             _meta: META,
           },
         }),
@@ -267,6 +272,9 @@ test("MCP telemetry records command, session, and detailed project context", asy
     if (command?.event.event === "command_call") {
       assert.equal(command.event.commandFamily, "command");
       assert.equal(command.event.operation, "batch");
+      assert.equal(command.event.success, false);
+      assert.equal(command.event.errorCategory, "policy_denied");
+      assert.equal(command.event.errorReason, "command_not_allowed");
     }
     assert.ok(tool);
     assert.ok(session);
@@ -321,6 +329,96 @@ test("MCP telemetry records malformed requests as invalid input", async () => {
       ],
     );
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("type-mismatch telemetry records only the argument name and JSON type", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-type-mismatch-"));
+  const configId = `test-mcp-type-mismatch-${process.pid}-${Date.now()}`;
+  const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+  try {
+    const response = await handler(
+      new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "read_range",
+            arguments: { path: { secret: "do-not-record" }, startLine: 1, endLine: 1 },
+            _meta: META,
+          },
+        }),
+      }),
+    );
+    const body = (await response.json()) as { result: { isError?: boolean } };
+    assert.equal(body.result.isError, true);
+
+    const event = handler
+      .telemetrySnapshot()
+      .find(
+        (envelope) => envelope.configId === configId && envelope.event.event === "tool_call",
+      )?.event;
+    assert.ok(event?.event === "tool_call");
+    assert.equal(event.errorReason, "type_mismatch");
+    assert.equal(event.argumentName, "path");
+    assert.equal(event.receivedType, "object");
+    assert.doesNotMatch(JSON.stringify(event), /do-not-record/);
+  } finally {
+    handler.closeSubscriptions();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("read range validation and root-boundary failures have typed telemetry reasons", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-dir-mcp-read-failures-"));
+  const configId = `test-mcp-read-failures-${process.pid}-${Date.now()}`;
+  const handler = createMcpHandler(root, {}, { level: "anonymous", configId });
+  try {
+    for (const [id, filePath, startLine, endLine] of [
+      [1, "inside.txt", 30, 10],
+      [2, "../outside.txt", 1, 1],
+    ] as const) {
+      await handler(
+        new Request("http://localhost/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "tools/call",
+            params: {
+              name: "read_range",
+              arguments: { path: filePath, startLine, endLine },
+              _meta: META,
+            },
+          }),
+        }),
+      );
+    }
+
+    const failures = handler
+      .telemetrySnapshot()
+      .filter(
+        (envelope) =>
+          envelope.configId === configId &&
+          envelope.event.event === "tool_call" &&
+          !envelope.event.success,
+      )
+      .map((envelope) =>
+        envelope.event.event === "tool_call"
+          ? [envelope.event.errorCategory, envelope.event.errorReason]
+          : [],
+      );
+    assert.deepEqual(failures, [
+      ["invalid_input", "length_or_range"],
+      ["invalid_input", "path_outside_root"],
+    ]);
+  } finally {
+    handler.closeSubscriptions();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -477,7 +575,10 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
     const missing = await call(3, "apply_changes", {});
     assert.equal(((await missing.json()) as { result: { isError: boolean } }).result.isError, true);
 
-    const badEnum = await call(4, "validate", { level: "nonsense" });
+    const badEnum = await call(4, "run_command_batch", {
+      commands: [{ command: "git" }],
+      onError: "nonsense",
+    });
     assert.equal(((await badEnum.json()) as { result: { isError: boolean } }).result.isError, true);
 
     const badRange = await call(5, "read_range", {
@@ -524,7 +625,7 @@ test("argument rejections record a reason, sanitized keys and an input fingerpri
         ["changez"],
         ["changes"],
         undefined,
-        ["level"],
+        ["commands", "onError"],
         ["path", "startLine", "endLine", "maxBytes"],
       ],
     );

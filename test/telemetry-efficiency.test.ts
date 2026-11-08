@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { resultCount } from "../src/mcp-telemetry.js";
 import { summarizeTelemetry } from "../src/telemetry/aggregate.js";
 import type { TelemetryEnvelope } from "../src/telemetry/types.js";
 
@@ -71,15 +72,47 @@ test("efficiency summary measures duplicates, truncation, search-then-read and e
   });
 });
 
-test("efficiency summary reports client and protocol usage from MCP requests", () => {
-  const request = (version: string, name: string): TelemetryEnvelope =>
+test("telemetry summary uses the conventional median for an even read sample", () => {
+  const summary = summarizeTelemetry([
+    call(0, "read_range", { readLines: 60 }),
+    call(1_000, "read_range", { readLines: 21 }),
+    call(2_000, "read_range", { readLines: 11 }),
+    call(3_000, "read_range", { readLines: 11 }),
+  ]);
+  assert.equal(summary.configs.p?.efficiency.readSpans.medianLines, 16);
+});
+
+test("telemetry counts multi-query search results for empty and populated outcomes", () => {
+  const emptyCount = resultCount({
+    returned: 0,
+    groups: [
+      { returned: 0, items: [] },
+      { returned: 0, items: [] },
+    ],
+  });
+  assert.equal(emptyCount, 0);
+  const populatedCount = resultCount({
+    returned: 3,
+    groups: [
+      { returned: 1, items: [{}] },
+      { returned: 2, items: [{}, {}] },
+    ],
+  });
+  assert.equal(populatedCount, 3);
+
+  const summary = summarizeTelemetry([call(0, "search_code", { resultCount: emptyCount })]);
+  assert.equal(summary.configs.p?.efficiency.tools.search_code?.emptyRatePercent, 100);
+});
+
+test("telemetry summary reports MCP request counts per method", () => {
+  const request = (version: string, name: string, method: string): TelemetryEnvelope =>
     ({
       schemaVersion: 1,
       timestamp: new Date(START).toISOString(),
       configId: "p",
       sessionId: "s1",
       level: "basic",
-      event: { event: "mcp_request", method: "server/discover", success: true, durationMs: 1 },
+      event: { event: "mcp_request", method, success: true, durationMs: 1 },
       runtime: {
         agentDirVersion: "1.3.0",
         nodeMajor: 24,
@@ -91,13 +124,49 @@ test("efficiency summary reports client and protocol usage from MCP requests", (
       },
     }) as TelemetryEnvelope;
   const summary = summarizeTelemetry([
-    request("2026-07-28", "Anthropic/ClaudeAI"),
-    request("2026-07-28", "Anthropic/ClaudeAI"),
-    request("2025-11-25", "other"),
+    request("2026-07-28", "Anthropic/ClaudeAI", "server/discover"),
+    request("2026-07-28", "Anthropic/ClaudeAI", "tools/list"),
+    request("2025-11-25", "other", "tools/call"),
+    call(1_000, "read_range"),
   ]);
+  assert.equal(summary.configs.p?.mcpRequests, 3);
+  assert.equal(summary.configs.p?.toolCalls, 1);
+  assert.deepEqual(summary.configs.p?.mcpRequestsByMethod, {
+    "server/discover": 1,
+    "tools/list": 1,
+    "tools/call": 1,
+  });
   assert.deepEqual(summary.configs.p?.efficiency.protocolVersions, {
     "2026-07-28": 2,
     "2025-11-25": 1,
   });
   assert.equal(summary.configs.p?.efficiency.clients["Anthropic/ClaudeAI@1.0.0"], 2);
+});
+
+test("HTTP summaries exclude the expected GET /mcp 405 response from errors", () => {
+  const http = (method: string, route: "mcp" | "other"): TelemetryEnvelope =>
+    ({
+      schemaVersion: 1,
+      timestamp: new Date(START).toISOString(),
+      configId: "p",
+      sessionId: "s1",
+      level: "anonymous",
+      event: {
+        event: "http_request",
+        method,
+        route,
+        status: 405,
+        success: false,
+        durationMs: 1,
+        authenticated: true,
+      },
+    }) as TelemetryEnvelope;
+
+  const summary = summarizeTelemetry([
+    http("GET", "mcp"),
+    http("POST", "mcp"),
+    http("GET", "other"),
+  ]);
+  assert.equal(summary.configs.p?.httpRequests, 3);
+  assert.equal(summary.configs.p?.httpErrors, 2);
 });
